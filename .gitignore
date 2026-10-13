@@ -1,0 +1,12 @@
+.build/
+.swiftpm/
+.DS_Store
+*.profraw
+*.profdata
+outputs/
+work/
+Vendor/sing-box
+*.qzb
+*.keyref
+*.pem
+*.key
