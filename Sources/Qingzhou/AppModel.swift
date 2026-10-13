@@ -2,6 +2,7 @@ import Foundation
 import Darwin
 import SwiftUI
 import AppKit
+import CoreImage
 import ServiceManagement
 import QingzhouKit
 
@@ -16,6 +17,17 @@ import QingzhouKit
     @Published var errorMessage:String?
     @Published var logs:[String]=[]
     @Published var preview:ImportPreview?
+    @Published var previewDiff:UpdateDiff?
+    @Published var rateHistory:[RateSample]=[]
+    @Published var trafficByNode:[String:Int64]=[:]
+    @Published var trafficByTarget:[String:Int64]=[:]
+    private var observedConnections:[String:Int64]=[:]
+    private let shortcuts=ShortcutController()
+    @Published var diagnosticRows:[DiagnosticResult]=[]
+    @Published var diagnosing=false
+    private var fallbackStates:[UUID:FallbackController]=[:]
+    private var healthTask:Task<Void,Never>?
+    private var failedHealthCycles=0
     @Published var recoveryPending=false
     @Published var loadingFailed=false
     @Published var uploadRate:Int64=0
@@ -31,6 +43,8 @@ import QingzhouKit
     let core:CoreController
     let proxy:SystemProxyController
     let directory:URL
+    lazy var capture=CaptureController(core:core,proxy:proxy)
+    @Published var helperStatus="未检测"
     private var api:CoreAPIClient?
     private var telemetryTask:Task<Void,Never>?
     private var trafficTask:Task<Void,Never>?
@@ -64,6 +78,8 @@ import QingzhouKit
         core.onUnexpectedExit={ [weak self] in guard let self else{return};self.stopTelemetry();self.coreFailed=true;self.cancelMeasurement();self.drainPendingDisconnect() }
         proxy.onNetworkChange={ [weak self] in guard let self,self.connection == .connected || self.connection == .connecting else{return};self.networkChanged=true;self.cancelMeasurement();self.drainPendingDisconnect() }
         proxy.startMonitoring()
+        shortcuts.action={ [weak self] in Task{@MainActor in guard let self else{return};if self.connection == .connected{await self.disconnect()}else{await self.connect()}}}
+        synchronizeShortcut()
         // 只有持有实例锁的应用才清理自己上次遗留的敏感运行文件。
         if let files=try? FileManager.default.contentsOfDirectory(at:directory,includingPropertiesForKeys:nil) {for file in files where file.lastPathComponent.hasPrefix("runtime-") || file.lastPathComponent.hasPrefix("check-") {try? FileManager.default.removeItem(at:file)}}
     }
@@ -84,48 +100,43 @@ import QingzhouKit
     private func persist(_ next:AppState) throws {guard let store else {throw ProxyError("配置未加载")};try store.commit(next);state=store.state}
     private func secrets(_ next:AppState,_ control:CoreControlContext) -> [String] {[control.secret]+next.nodes.flatMap{[(try? credentials.get($0.credentialRef)) ?? "",(try? credentials.get($0.credentialRef+".obfs")) ?? ""]}}
     private func startService(_ next:AppState) async throws {
-        let control=try CoreControlContext.make();let data=try ConfigBuilder.build(state:next,credentials:credentials,control:control)
+        let control=try CoreControlContext.make();_=try ConfigBuilder.build(state:next,credentials:credentials,control:control)
         core.secrets=secrets(next,control);networkChanged=false;coreFailed=false
-        try await core.start(config:data,port:next.listenPort)
+        try await capture.start(next,credentials:credentials,control:control)
         let client=CoreAPIClient(context:control)
         do {
             _=try await client.proxies()
             guard !networkChanged else {throw ProxyError("启动期间网络发生变化")}
-            try proxy.apply(port:next.listenPort)
-            guard core.isRunning else {throw ProxyError("核心已经退出")}
-            api=client;connection = .connected;recoveryPending=proxy.hasRecovery;startTelemetry(client)
+            try capture.activateSystemProxy(port:next.listenPort)
+            guard capture.running else {throw ProxyError("核心已经退出")}
+            connection = .connected;recoveryPending=proxy.hasRecovery;startTelemetry(client)
         } catch {
             await client.shutdown()
             if proxy.hasRecovery {do{try proxy.restore()}catch{recoveryPending=true;throw ProxyError("系统代理恢复失败，请使用恢复入口")}}
-            await core.stop();throw error
+            try await capture.stop();throw error
         }
     }
     // 元数据和凭据仅在新配置实际应用成功后提交；失败时恢复原运行配置。
     private func apply(_ tx:StoreTransaction,reconfigure:Bool=true) async throws {
         guard let store else {throw ProxyError("配置未加载")}
-        let wasConnected=connection == .connected
         do {
-            if reconfigure && !tx.next.nodes.isEmpty {
-                let context=try CoreControlContext.make();try await core.validate(config:ConfigBuilder.build(state:tx.next,credentials:credentials,control:context))
-            }
-            if reconfigure && wasConnected {try await disconnectInternal();if tx.next.activePolicy != nil || tx.next.mode == .direct {try await startService(tx.next)}}
-            try store.commit(tx);state=store.state
-            if wasConnected && reconfigure && connection == .connected {reachability="配置已更新，新连接生效"}
-        } catch {
-            if reconfigure && wasConnected {
-                do {
-                    if core.isRunning || proxy.hasRecovery {try await disconnectInternal()}
-                    if tx.previous.activePolicy != nil || tx.previous.mode == .direct {try await startService(tx.previous)}
-                    log("新配置未生效，已恢复上一份运行配置")
-                } catch {connection = .error;log("上一份配置恢复失败，请检查代理恢复入口")}
-            }
-            store.abort(tx);state=store.state;throw error
-        }
+            try await RuntimeTransaction.apply(tx,connected:reconfigure && connection == .connected,validate:{
+                if reconfigure && !tx.next.nodes.isEmpty {let context=try CoreControlContext.make();try await self.core.validate(config:ConfigBuilder.build(state:tx.next,credentials:self.credentials,control:context))}
+            },stop:{if self.capture.running || self.proxy.hasRecovery || self.connection == .connected {try await self.disconnectInternal()}},start:{try await self.startService($0)},commit:{try store.commit(tx)},abort:{store.abort(tx)})
+            state=store.state;synchronizeShortcut()
+            if reconfigure && connection == .connected{reachability="配置已更新，新连接生效"}
+        }catch{state=store.state;report(error);throw error}
     }
-    func importPreview(_ input:String) async {guard !locked else{return};busy=true;defer{busy=false};do{pendingSubscription=nil;preview=try await ImportService.preview(input)}catch{report(error)}}
+
+    func importPreview(_ input:String) async {guard !locked else{return};busy=true;defer{busy=false};do{pendingSubscription=nil;previewDiff=nil;preview=try await ImportService.preview(input)}catch{report(error)}}
     func importFile(_ url:URL) async {
         guard !locked else{return};busy=true;defer{busy=false};let granted=url.startAccessingSecurityScopedResource();defer{if granted{url.stopAccessingSecurityScopedResource()}}
-        do {let attrs=try FileManager.default.attributesOfItem(atPath:url.path);guard ((attrs[.size] as? NSNumber)?.intValue ?? Int.max)<=2*1024*1024 else {throw ProxyError("文件超过 2 MiB")};let data=try Data(contentsOf:url);guard let text=String(data:data,encoding:.utf8) else {throw ProxyError("文件必须为 UTF-8")};pendingSubscription=nil;preview=try ProfileImporter.parse(text)}catch{report(error)}
+        do {let attrs=try FileManager.default.attributesOfItem(atPath:url.path);guard ((attrs[.size] as? NSNumber)?.intValue ?? Int.max)<=2*1024*1024 else {throw ProxyError("文件超过 2 MiB")};let data=try Data(contentsOf:url);let text:String
+            if ["png","jpg","jpeg","heic","tiff","gif"].contains(url.pathExtension.lowercased()) {
+                guard let image=CIImage(data:data),image.extent.width*image.extent.height<=20_000_000,let detector=CIDetector(ofType:CIDetectorTypeQRCode,context:CIContext(),options:[CIDetectorAccuracy:CIDetectorAccuracyHigh]) else{throw ProxyError("二维码图片无效或尺寸过大")}
+                let links=detector.features(in:image).compactMap{($0 as? CIQRCodeFeature)?.messageString};guard !links.isEmpty,links.count<=20 else{throw ProxyError("未识别到二维码或二维码数量超过限制")};text=links.joined(separator:"\n")
+            }else{guard let decoded=String(data:data,encoding:.utf8) else{throw ProxyError("文件必须为 UTF-8 或本地二维码图片")};text=decoded}
+            pendingSubscription=nil;previewDiff=nil;preview=try ProfileImporter.parse(text)}catch{report(error)}
     }
     func confirmImport(scope:ImportScope = .nodes) async {
         guard !locked,let preview,let store else{return};busy=true;defer{busy=false}
@@ -136,8 +147,8 @@ import QingzhouKit
             try await apply(tx);self.preview=nil;pendingSubscription=nil;log("导入已完成")
         } catch {report(error)}
     }
-    func cancelPreview(){preview=nil;pendingSubscription=nil}
-    func refresh(_ sub:Subscription) async {guard !locked else{return};busy=true;defer{busy=false};do{let result=try await ImportService.preview(credentials.get(sub.sourceRef));pendingSubscription=sub;preview=result}catch{recordSubscriptionFailure(sub.id,error:error);report(error)}}
+    func cancelPreview(){preview=nil;previewDiff=nil;pendingSubscription=nil}
+    func refresh(_ sub:Subscription) async {guard !locked else{return};busy=true;defer{busy=false};do{let result=try await ImportService.preview(credentials.get(sub.sourceRef));pendingSubscription=sub;previewDiff=UpdateDiff.compare(old:state,preview:result,subscriptionID:sub.id,credentials:credentials);preview=result}catch{recordSubscriptionFailure(sub.id,error:error);report(error)}}
     func saveManual(_ candidate:Candidate,editingID:UUID?) async {guard !locked,let store else{return};busy=true;defer{busy=false};do{let tx=try store.prepareImport([candidate],replacingID:editingID);try await apply(tx);log("节点已保存")}catch{report(error)}}
     func deleteNode(_ id:UUID) async {guard !locked,let store else{return};busy=true;defer{busy=false};do{try await apply(store.prepareDeleteNode(id))}catch{report(error)}}
     func deleteSubscription(_ id:UUID) async {guard !locked,let store else{return};busy=true;defer{busy=false};do{try await apply(store.prepareDeleteSubscription(id))}catch{report(error)}}
@@ -147,7 +158,7 @@ import QingzhouKit
         let old=state.activePolicy
         do {
             if let api,connection == .connected {try await api.select(ref)}
-            var next=state;next.selectedPolicy=ref;if case .node(let id)=ref {next.selectedID=id}
+            var next=state;next.selectedPolicy=ref;if case .node(let id)=ref {next.selectedID=id;next.recentUse[id.uuidString]=Date()}
             do{try persist(next)}catch{if let api,let old{try? await api.select(old)};throw error}
             log("已选择 \(state.label(ref))，已有连接保留")
         } catch {report(error)}
@@ -182,27 +193,30 @@ import QingzhouKit
     }
     func updateRemote(_ id:UUID,auto:Bool?=nil,target:PolicyReference?=nil) async {guard !locked,let store else{return};busy=true;defer{busy=false};do{var next=state;guard let i=next.remoteRules.firstIndex(where:{$0.id==id}) else{return};if let auto{next.remoteRules[i].autoUpdate=auto;next.remoteRules[i].retryCount=0;next.remoteRules[i].retryAfter=nil};if let target{next.remoteRules[i].target=target};try await apply(store.prepareChange(next),reconfigure:target != nil)}catch{report(error)}}
     func moveRemote(_ id:UUID,by offset:Int) async {guard !locked,let store,let i=state.remoteRules.firstIndex(where:{$0.id==id}),state.remoteRules.indices.contains(i+offset) else{return};busy=true;defer{busy=false};do{var next=state;next.remoteRules.swapAt(i,i+offset);try await apply(store.prepareChange(next))}catch{report(error)}}
-    func deleteRemote(_ id:UUID) async {guard !locked,let store,let source=state.remoteRules.first(where:{$0.id==id}) else{return};busy=true;defer{busy=false};do{var next=state;next.remoteRules.removeAll{$0.id==id};try await apply(store.prepareChange(next));try? credentials.remove(source.sourceRef)}catch{report(error)}}
+    func deleteRemote(_ id:UUID) async {guard !locked,let store,let source=state.remoteRules.first(where:{$0.id==id}) else{return};busy=true;defer{busy=false};do{var next=state;next.remoteRules.removeAll{$0.id==id};try await apply(store.prepareChange(next));if !store.catalog.credentialRefs.contains(source.sourceRef){try? credentials.remove(source.sourceRef)}}catch{report(error)}}
     func connect() async {
         guard !locked,state.activePolicy != nil || state.mode == .direct else{return};busy=true;connection = .connecting;reachability="尚未检测";defer{busy=false}
-        do {guard !proxy.hasRecovery else {throw ProxyError("请先恢复原代理")};try await startService(state);reachability=await core.probe(port:state.listenPort);guard core.isRunning,!networkChanged else {throw ProxyError("连接期间核心退出或网络变化")};log(reachability)}catch{var restored=true;if proxy.hasRecovery{do{try proxy.restore()}catch{restored=false;log("原代理恢复失败，保留核心及恢复记录")}};if restored{await core.stop();stopTelemetry()};recoveryPending=proxy.hasRecovery;connection = .error;report(error)}
+        do {guard !proxy.hasRecovery else {throw ProxyError("请先恢复原代理")};try await startService(state);reachability=await ConnectivityProbe.detailed(port:state.captureMode == .tun ? nil:state.listenPort);guard capture.running,!networkChanged else {throw ProxyError("连接期间核心退出或网络变化")};if state.captureMode == .tun && !reachability.contains("正常"){try await disconnectInternal();throw ProxyError("TUN HTTPS 检测失败，原网络已恢复")};log(reachability)}catch{var restored=true;if proxy.hasRecovery{do{try proxy.restore()}catch{restored=false;log("原代理恢复失败，保留核心及恢复记录")}};if restored{do{try await capture.stop();stopTelemetry()}catch{recoveryPending=true;report(error)}};recoveryPending=proxy.hasRecovery;connection = .error;report(error)}
     }
-    private func disconnectInternal() async throws {connection = .disconnecting;do{try proxy.restore()}catch{recoveryPending=proxy.hasRecovery;connection = .error;throw error};stopTelemetry();await core.stop();recoveryPending=proxy.hasRecovery;connection = .disconnected;reachability="尚未检测";log("已断开并恢复原代理")}
+    private func disconnectInternal() async throws {connection = .disconnecting;do{try await capture.stop()}catch{recoveryPending=true;connection = .error;throw error};stopTelemetry();recoveryPending=proxy.hasRecovery;connection = .disconnected;reachability="尚未检测";log("已断开并恢复原代理")}
     func disconnect() async {guard !locked else{return};busy=true;defer{busy=false};do{try await disconnectInternal()}catch{report(error)}}
-    func recover() async {await disconnect()}
+    func recover() async {if state.captureMode == .tun && capture.activeMode==nil {guard !locked else{return};busy=true;defer{busy=false};do{try await capture.recoverHelper();recoveryPending=false;connection = .disconnected;helperStatus="原网络已恢复"}catch{report(error)}}else{await disconnect()}}
     func startupRecovery() async {
         guard !started,!loadingFailed else{return};started=true
+        if FileManager.default.fileExists(atPath:HelperPaths.socket){do{let status=try await capture.helperStatus();helperStatus=status.message;if status.message.contains("待恢复") || status.running{recoveryPending=true;try await capture.recoverHelper();recoveryPending=proxy.hasRecovery}}catch{helperStatus=error.localizedDescription;recoveryPending=true}}
         if recoveryPending {await recover()};if state.autoConnect && !proxy.hasRecovery {await connect()}
         maintenanceTask=Task{[weak self] in while !Task.isCancelled {await self?.maintenance();try? await Task.sleep(nanoseconds:60_000_000_000)}}
     }
     private func startTelemetry(_ client:CoreAPIClient) {
-        stopTelemetry();api=client;let token=UUID();epoch=token;monitorStatus="实时监控"
+        stopTelemetry();rateHistory=[];trafficByNode=[:];trafficByTarget=[:];observedConnections=[:];fallbackStates=[:];failedHealthCycles=0;api=client;let token=UUID();epoch=token;monitorStatus="实时监控"
+        healthTask=Task{[weak self] in while !Task.isCancelled{await self?.healthCheck(client,token:token);try? await Task.sleep(nanoseconds:60_000_000_000)}}
         telemetryTask=Task{[weak self] in
             while !Task.isCancelled {
                 guard let self,self.epoch==token else{return}
                 let hidden=NSApplication.shared.isHidden || NSApplication.shared.windows.filter{$0.canBecomeMain}.allSatisfy{!$0.isVisible || $0.isMiniaturized}
                 if !self.monitorPaused {
-                    do {let snapshot=try await client.connections();let info=try await client.proxies();guard self.epoch==token,!Task.isCancelled else{return};self.connections=snapshot.connections;self.uploadTotal=snapshot.uploadTotal;self.downloadTotal=snapshot.downloadTotal;self.proxyInfo=info;self.monitorStatus="实时监控"}
+                    do {if self.capture.activeMode == .tun {let status=try await self.capture.helperStatus();self.helperStatus=status.message;if !status.running {self.coreFailed=true;self.drainPendingDisconnect();return}}
+                    let snapshot=try await client.connections();let info=try await client.proxies();guard self.epoch==token,!Task.isCancelled else{return};self.aggregate(snapshot.connections);self.connections=snapshot.connections;self.uploadTotal=snapshot.uploadTotal;self.downloadTotal=snapshot.downloadTotal;self.proxyInfo=info;self.monitorStatus="实时监控"}
                     catch {if self.epoch==token,!Task.isCancelled{self.monitorStatus="监控暂不可用"}}
                 }
                 try? await Task.sleep(nanoseconds:hidden ? 5_000_000_000 : 1_000_000_000)
@@ -210,11 +224,11 @@ import QingzhouKit
         }
         trafficTask=Task{[weak self] in
             do {let stream=try await client.traffic();var last=Date.distantPast
-                for try await rate in stream {guard let self,!Task.isCancelled,self.epoch==token else{return};let hidden=NSApplication.shared.isHidden || NSApplication.shared.windows.filter{$0.canBecomeMain}.allSatisfy{!$0.isVisible || $0.isMiniaturized};if !self.monitorPaused && Date().timeIntervalSince(last)>=(hidden ? 5 : 0.8){self.uploadRate=max(0,rate.up);self.downloadRate=max(0,rate.down);last=Date()}}
+                for try await rate in stream {guard let self,!Task.isCancelled,self.epoch==token else{return};let hidden=NSApplication.shared.isHidden || NSApplication.shared.windows.filter{$0.canBecomeMain}.allSatisfy{!$0.isVisible || $0.isMiniaturized};if !self.monitorPaused && Date().timeIntervalSince(last)>=(hidden ? 5 : 0.8){self.uploadRate=max(0,rate.up);self.downloadRate=max(0,rate.down);last=Date();self.rateHistory.append(RateSample(upload:self.uploadRate,download:self.downloadRate));self.rateHistory.removeAll{Date().timeIntervalSince($0.time)>1800}}}
             }catch{if let self,self.epoch==token,!Task.isCancelled{self.monitorStatus="流量通道暂不可用"}}
         }
     }
-    private func stopTelemetry() {epoch=UUID();telemetryTask?.cancel();trafficTask?.cancel();telemetryTask=nil;trafficTask=nil;if let old=api{Task{await old.shutdown()}};api=nil;connections=[];proxyInfo=[:];uploadRate=0;downloadRate=0;uploadTotal=0;downloadTotal=0;monitorStatus="未连接"}
+    private func stopTelemetry() {epoch=UUID();healthTask?.cancel();healthTask=nil;telemetryTask?.cancel();trafficTask?.cancel();telemetryTask=nil;trafficTask=nil;if let old=api{Task{await old.shutdown()}};api=nil;connections=[];proxyInfo=[:];uploadRate=0;downloadRate=0;uploadTotal=0;downloadTotal=0;monitorStatus="未连接"}
     func closeConnection(_ id:String?) async {guard !locked,let api else{return};do{if let id{try await api.closeConnection(id)}else{try await api.closeAllConnections()}}catch{report(error)}}
     func measure(_ ids:[UUID]?=nil) {
         guard !locked,!state.nodes.isEmpty else{return};measuring=true;measurementProgress="准备测速"
@@ -251,7 +265,7 @@ import QingzhouKit
             let result=try await ImportService.preview(credentials.get(sub.sourceRef))
             let old=state.nodes.filter{$0.subscriptionID==id}
             let insecure=result.candidates.contains{candidate in candidate.node.insecure && !old.contains{$0.fingerprint==candidate.node.fingerprint && $0.insecure}}
-            if insecure || (sub.scope == .profile && !result.unsupported.isEmpty) || (sub.scope == .nodes && !result.unsupported.filter{!$0.hasPrefix("完整导入") && !$0.hasPrefix("规则") && !$0.hasPrefix("策略")}.isEmpty) {
+            if insecure || UpdateDiff.compare(old:state,preview:result,subscriptionID:id,credentials:credentials).requiresReview || (sub.scope == .profile && !result.unsupported.isEmpty) || (sub.scope == .nodes && !result.unsupported.filter{!$0.hasPrefix("完整导入") && !$0.hasPrefix("规则") && !$0.hasPrefix("策略")}.isEmpty) {
                 var next=state;if let i=next.subscriptions.firstIndex(where:{$0.id==id}){next.subscriptions[i].pendingReview=true;next.subscriptions[i].lastError="更新需要人工预览确认"};try persist(next);log("订阅更新需要人工确认，保留旧节点");return
             }
             let tx=try store.prepareImport(result.candidates,subscription:sub,source:result.source,profile:result,scope:sub.scope);try await apply(tx);log("订阅自动更新成功")
@@ -275,10 +289,73 @@ import QingzhouKit
         }catch{report(error)}
     }
     func copyTerminalProxy(){let p=state.listenPort;let value="export http_proxy=http://127.0.0.1:\(p) https_proxy=http://127.0.0.1:\(p) all_proxy=socks5h://127.0.0.1:\(p) HTTP_PROXY=http://127.0.0.1:\(p) HTTPS_PROXY=http://127.0.0.1:\(p) ALL_PROXY=socks5h://127.0.0.1:\(p)";NSPasteboard.general.clearContents();NSPasteboard.general.setString(value,forType:.string);log("已复制本地终端代理命令，不包含节点凭据")}
+    private func aggregate(_ rows:[CoreConnection]) {
+        for row in rows{let total=max(0,row.upload)+max(0,row.download);let delta=max(0,total-(observedConnections[row.id] ?? 0));observedConnections[row.id]=total
+            let node=row.chains.first{ $0.hasPrefix("node-") } ?? "未提供";if trafficByNode.count<2000 || trafficByNode[node] != nil{trafficByNode[node,default:0]+=delta}
+            let target=row.metadata.host?.isEmpty==false ? row.metadata.host! : row.metadata.destinationIP ?? "未提供";if trafficByTarget.count<2000 || trafficByTarget[target] != nil{trafficByTarget[target,default:0]+=delta}
+        };let active=Set(rows.map(\.id));observedConnections=observedConnections.filter{active.contains($0.key)}
+    }
+    private func synchronizeShortcut(){do{try shortcuts.configure(enabled:state.shortcutEnabled,key:state.shortcutKey,modifiers:state.shortcutModifiers)}catch{log("快捷键冲突，未注册全局快捷键")}}
+    func setShortcut(enabled:Bool,key:UInt32,modifiers:UInt32){guard !locked else{return};let old=state;do{guard [UInt32(35),2,15].contains(key),[UInt32(2304),4352,6144,6400].contains(modifiers) else{throw ProxyError("不支持的快捷键组合")};try shortcuts.configure(enabled:enabled,key:key,modifiers:modifiers);var next=state;next.shortcutEnabled=enabled;next.shortcutKey=key;next.shortcutModifiers=modifiers;do{try persist(next)}catch{try? shortcuts.configure(enabled:old.shortcutEnabled,key:old.shortcutKey,modifiers:old.shortcutModifiers);throw error}}catch{report(error)}}
+    func saveTunExclusions(_ input:String) async {guard !locked,let store else{return};busy=true;defer{busy=false};do{var next=state;next.tunExcludedCIDRs=input.components(separatedBy:CharacterSet(charactersIn:",\n")).map{$0.trimmingCharacters(in:.whitespaces)}.filter{!$0.isEmpty};try PolicyValidator.validate(next);try await apply(store.prepareChange(next))}catch{report(error)}}
+    func setCaptureMode(_ mode:CaptureMode) async {guard !locked,let store,state.captureMode != mode else{return};busy=true;defer{busy=false};do{var next=state;next.captureMode=mode;try await apply(store.prepareChange(next))}catch{report(error)}}
+    func setDNS(_ mode:DNSPreference) async {guard !locked,let store,state.dnsPreference != mode else{return};busy=true;defer{busy=false};do{var next=state;next.dnsPreference=mode;try await apply(store.prepareChange(next))}catch{report(error)}}
+    func inspectHelper() async {do{helperStatus=try await capture.helperStatus().message}catch{helperStatus=error.localizedDescription}}
+    var profiles:[ClientProfile]{store?.catalog.profiles ?? []}
+    var currentProfileID:UUID?{store?.catalog.currentProfileID}
+    func changeProfile(_ id:UUID) async {
+        guard !locked,let store,id != currentProfileID else{return};busy=true;defer{busy=false}
+        do{try await apply(store.prepareCatalog(ProfileStore.switchTo(id,in:store.catalog)));log("配置切换完成")}catch{report(error)}
+    }
+    func createProfile(name:String,copy:Bool,officeDomains:[String]=[]) async {
+        guard !locked,let store else{return};busy=true;defer{busy=false}
+        do{let root=try ProfileStore.create(in:store.catalog,name:name,copyID:copy ? currentProfileID:nil,officeDomains:officeDomains);try await apply(store.prepareCatalog(root),reconfigure:false)}catch{report(error)}
+    }
+    func renameProfile(_ id:UUID,name:String) async {
+        guard !locked,let store else{return};busy=true;defer{busy=false}
+        do{try await apply(store.prepareCatalog(ProfileStore.rename(id,to:name,in:store.catalog)),reconfigure:false)}catch{report(error)}
+    }
+    func deleteProfile(_ id:UUID) async {
+        guard !locked,let store else{return};busy=true;defer{busy=false}
+        do{try await apply(store.prepareCatalog(ProfileStore.remove(id,in:store.catalog)),reconfigure:false)}catch{report(error)}
+    }
+    func recordBackup(_ url:URL) {guard let store else{return};do{var root=store.catalog;root.backupIndex.append(BackupIndex(fileName:url.lastPathComponent));if root.backupIndex.count>100{root.backupIndex.removeFirst(root.backupIndex.count-100)};try store.commit(store.prepareCatalog(root));state=store.state}catch{report(error)}}
+    func migrationSnapshot() throws -> BackupSnapshot {let ref=try String(contentsOf:directory.appendingPathComponent("migration-v3.keyref"),encoding:.utf8);return try BackupService.decrypt(Data(contentsOf:directory.appendingPathComponent("migration-v3.qzb")),password:credentials.get(ref))}
+    func restoreBackup(_ snapshot:BackupSnapshot) async {
+        guard !locked,let store else{return};busy=true;defer{busy=false}
+        do{try await apply(store.prepareRestore(snapshot));log("加密备份恢复完成")}catch{report(error)}
+    }
+    func saveNote(_ id:UUID,note:String){guard !locked else{return};do{guard note.utf8.count<=4096 else{throw ProxyError("备注不能超过 4096 字节")};var next=state;next.notes[id.uuidString]=note;try persist(next)}catch{report(error)}}
+    func setCompact(_ value:Bool){guard !locked else{return};do{var next=state;next.compactNodes=value;try persist(next)}catch{report(error)}}
+    func batchFavorite(_ ids:Set<UUID>,value:Bool){guard !locked else{return};do{var next=state;if value{next.favorites.formUnion(ids)}else{next.favorites.subtract(ids)};try persist(next)}catch{report(error)}}
+    func batchDelete(_ ids:Set<UUID>) async{guard !locked,let store else{return};busy=true;defer{busy=false};do{try await apply(store.prepareDeleteNodes(ids))}catch{report(error)}}
+    private func healthCheck(_ client:CoreAPIClient,token:UUID) async {
+        guard !locked,epoch==token,connection == .connected,state.mode != .direct else{return};busy=true;defer{busy=false}
+        let nodes=state.nodes;var results:[UUID:Bool]=[:]
+        await withTaskGroup(of:(UUID,Bool).self){group in var cursor=0;func enqueue(){let id=nodes[cursor].id;cursor+=1;group.addTask{(id,(try? await client.delay(id)) != nil)}};for _ in 0..<min(4,nodes.count){enqueue()};while let (id,ok)=await group.next(){guard !Task.isCancelled else{group.cancelAll();break};results[id]=ok;if cursor<nodes.count{enqueue()}}}
+        guard epoch==token,!Task.isCancelled else{return}
+        if !nodes.isEmpty && results.values.allSatisfy({!$0}){failedHealthCycles+=1}else{failedHealthCycles=0}
+        if failedHealthCycles>=2 {do{try await disconnectInternal();connection = .error;errorMessage="全部节点不可用，代理已失效，原网络已恢复"}catch{report(error)};return}
+        for group in state.groups where group.kind == .fallback {
+            let priority=group.members.compactMap{ref -> UUID? in if case .node(let id)=ref{return id};return nil};let currentTag=proxyInfo[PolicyReference.group(group.id).tag]?.now
+            let current=priority.first{PolicyReference.node($0).tag==currentTag} ?? {if case .node(let id)=group.selected{return id};return nil}()
+            var controller=fallbackStates[group.id] ?? FallbackController();let decision=controller.evaluate(priority:priority,current:current,results:results);fallbackStates[group.id]=controller
+            if decision.unavailable {monitorStatus="回退组 \(group.name) 全部不可用";if state.activePolicy == .group(group.id){do{try await disconnectInternal();connection = .error;errorMessage="回退组全部不可用，代理已失效，原网络已恢复"}catch{report(error)}};continue}
+            if let selected=decision.selected,selected != current {do{try await client.select(.node(selected),group:PolicyReference.group(group.id).tag);log("优先级回退已切换，已有连接保留")}catch{report(error)}}
+        }
+    }
+    func diagnose() async {
+        guard !locked,!diagnosing else{return};diagnosing=true;defer{diagnosing=false}
+        diagnosticRows=DiagnosticService.local(state:state,corePath:core.binary.path,connected:connection == .connected)
+        if state.captureMode == .tun{do{let status=try await capture.helper.request(TunRequest(operation:"status",verifyNetwork:true));diagnosticRows.append(DiagnosticResult("管理员权限/辅助服务","通过","已通过固定客户端身份认证："+status.message));diagnosticRows.append(DiagnosticResult("TUN 路由",status.routesVerified==true ? "通过":status.running ? "失败":"未验证",status.running ? "核对四条接管路由及其接口、网关":"未启用接管"));diagnosticRows.append(DiagnosticResult("TUN DNS",status.dnsVerified==true ? "通过":status.running ? "失败":"未验证","核对当前 DNS 与本次所有权记录"))}catch{diagnosticRows.append(DiagnosticResult("管理员权限/辅助服务","失败",Redactor.redact(error.localizedDescription)))}}else{diagnosticRows.append(DiagnosticResult("系统代理权限","未验证","需要在连接时完成系统管理员授权；诊断不会自动申请"))}
+        diagnosticRows.append(DiagnosticResult("系统代理恢复",proxy.hasRecovery ? "需检查":"通过",proxy.hasRecovery ? "保留恢复记录，可使用恢复入口":"没有待恢复记录"))
+        if let node=selected ?? state.nodes.first{diagnosticRows.append(await DiagnosticService.dns(node.server))}else{diagnosticRows.append(DiagnosticResult("节点 DNS","未验证","尚未选择节点"))}
+        if connection == .connected {diagnosticRows += DiagnosticService.https(await ConnectivityProbe.detailed(port:state.captureMode == .tun ? nil:state.listenPort))}else{diagnosticRows.append(DiagnosticResult("TLS / HTTPS","未验证","请连接后检测真实代理路径；诊断不会自动接管网络"))}
+    }
     func quit() async -> Bool {
         if loadingFailed{return true}
         if measuring {cancelMeasurement();await measurementTask?.value}
         guard !busy else {errorMessage="正在更新配置，请稍后退出";return false}
-        maintenanceTask?.cancel();await disconnect();return !core.isRunning && !proxy.hasRecovery
+        maintenanceTask?.cancel();await disconnect();return !capture.running && !proxy.hasRecovery && !recoveryPending
     }
 }

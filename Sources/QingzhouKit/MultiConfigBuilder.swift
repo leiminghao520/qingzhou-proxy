@@ -2,7 +2,7 @@ import Foundation
 import Security
 import Darwin
 
-public struct CoreControlContext:Sendable {
+public struct CoreControlContext:Codable,Sendable {
     public var port:Int
     public var secret:String
     public init(port:Int,secret:String){self.port=port;self.secret=secret}
@@ -26,8 +26,8 @@ extension ConfigBuilder {
         outbounds.append(["type":"direct","tag":"direct"])
         if !state.nodes.isEmpty {outbounds.append(["type":"urltest","tag":"auto","outbounds":state.nodes.map{PolicyReference.node($0.id).tag},"url":testURL,"interval":"5m","tolerance":50,"interrupt_exist_connections":false])}
         for group in state.groups {
-            var item:[String:Any]=["type":group.kind == .select ? "selector" : "urltest","tag":PolicyReference.group(group.id).tag,"outbounds":group.members.map(\.tag),"interrupt_exist_connections":false]
-            if group.kind == .select {item["default"]=(group.selected ?? group.members[0]).tag} else {item["url"]=testURL;item["interval"]="5m";item["tolerance"]=50}
+            var item:[String:Any]=["type":group.kind != .urltest ? "selector" : "urltest","tag":PolicyReference.group(group.id).tag,"outbounds":group.members.map(\.tag),"interrupt_exist_connections":false]
+            if group.kind != .urltest {item["default"]=(group.selected ?? group.members[0]).tag} else {item["url"]=testURL;item["interval"]="5m";item["tolerance"]=50}
             outbounds.append(item)
         }
         let options=(!state.nodes.isEmpty ? ["auto"] : [])+state.nodes.map{PolicyReference.node($0.id).tag}+state.groups.map{PolicyReference.group($0.id).tag}+["direct"]
@@ -37,7 +37,7 @@ extension ConfigBuilder {
             try validate(rule)
             let key=rule.kind == .domain ? "domain" : rule.kind == .suffix ? "domain_suffix" : rule.kind == .keyword ? "domain_keyword" : "ip_cidr"
             let target=override ?? rule.target ?? (rule.action == .direct ? .direct : rule.action == .reject ? .reject : .selected)
-            var object:[String:Any]=rule.kind == .match ? [:] : [key:[rule.value]]
+            var object:[String:Any]=RuleEvaluator.condition(rule)
             if target == .reject {object["action"]="reject"} else {object["action"]="route";object["outbound"]=target.tag}
             return object
         }

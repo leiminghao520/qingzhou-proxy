@@ -8,6 +8,7 @@ python3 scripts/fetch-core.py
 python3 scripts/verify-yams.py
 scripts/swift-local.sh build -c release --product Qingzhou
 scripts/swift-local.sh build -c release --product QingzhouRunner
+scripts/swift-local.sh build -c release --product QingzhouHelper
 app="$output/轻舟代理.app"
 if [ -e "$app" ]; then
     if [ -e "$output/轻舟代理.previous.app" ]; then rm -rf "$output/轻舟代理.previous.app"; fi
@@ -15,6 +16,8 @@ if [ -e "$app" ]; then
 fi
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp .build/release/Qingzhou "$app/Contents/MacOS/Qingzhou"
+cp .build/release/QingzhouHelper "$app/Contents/Resources/QingzhouHelper"
+cp scripts/install-helper.sh scripts/uninstall-helper.sh scripts/recover-helper.sh "$app/Contents/Resources/"
 cp .build/release/QingzhouRunner "$app/Contents/Resources/QingzhouRunner"
 cp Vendor/Yams/LICENSE "$app/Contents/Resources/Yams.LICENSE"
 cp Vendor/yams-lock.json "$app/Contents/Resources/"
@@ -29,8 +32,8 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>轻舟代理</string>
 <key>CFBundleDisplayName</key><string>轻舟代理</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.2.0</string>
-<key>CFBundleVersion</key><string>2</string>
+<key>CFBundleShortVersionString</key><string>0.3.0</string>
+<key>CFBundleVersion</key><string>3</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>CFBundleIconFile</key><string>AppIcon</string>
@@ -50,6 +53,7 @@ fi
 cp .build/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 codesign --force --sign - "$app/Contents/Resources/sing-box"
 codesign --force --sign - "$app/Contents/Resources/QingzhouRunner"
+codesign --force --sign - "$app/Contents/Resources/QingzhouHelper"
 codesign --force --sign - "$app"
 codesign --verify --deep --strict "$app"
 echo "APP_BUILD_OK"

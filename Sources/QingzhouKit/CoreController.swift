@@ -91,6 +91,6 @@ import CFNetwork
     }
     private func cleanup() { if let url = configURL { try? FileManager.default.removeItem(at:url) }; configURL = nil }
     public func probe(port: Int) async -> String {
-        await ConnectivityProbe.test(port:port) ? "HTTPS 连通性正常" : "HTTPS 检测失败：请检查节点认证、证书或网络"
+        await ConnectivityProbe.detailed(port:port)
     }
 }

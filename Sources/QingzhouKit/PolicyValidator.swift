@@ -6,10 +6,14 @@ public enum PolicyValidator {
     }
     public static func validate(_ state:AppState) throws {
         guard Set(state.nodes.map(\.id)).count==state.nodes.count,Set(state.groups.map(\.id)).count==state.groups.count else {throw ProxyError("节点或策略 ID 重复")}
+        guard state.nodes.count<=2000,state.groups.count<=2000,state.rules.count<=50000,state.remoteRules.reduce(0,{$0+$1.rules.count})<=50000,state.tunExcludedCIDRs.count<=100 else{throw ProxyError("配置数量超过限制")}
+        for cidr in state.tunExcludedCIDRs{try ConfigBuilder.validate(RoutingRule(kind:.cidr,value:cidr,action:.direct))}
+        for source in state.remoteRules{for rule in source.rules{try ConfigBuilder.validate(rule)}}
         var visiting=Set<UUID>(),finished=Set<UUID>()
         func visit(_ id:UUID) throws {
             if finished.contains(id){return};guard !visiting.contains(id),let group=state.groups.first(where:{$0.id==id}) else {throw ProxyError("策略组存在循环或缺失引用")}
             guard !group.members.isEmpty else {throw ProxyError("策略组至少包含一个成员")};visiting.insert(id)
+            if group.kind == .fallback {guard group.members.allSatisfy({if case .node=$0{return true};return false}) else{throw ProxyError("优先回退仅接受节点成员")}}
             for ref in group.members {
                 guard ref != .selected,ref != .reject,exists(ref,in:state) else {throw ProxyError("策略组包含不支持或失效成员")}
                 if case .group(let child)=ref {try visit(child)}
