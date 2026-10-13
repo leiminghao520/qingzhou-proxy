@@ -23,6 +23,7 @@ struct PreviewSheet:View {
     var body:some View {
         VStack(alignment:.leading,spacing:14){
             Text("确认导入").font(.title2.bold())
+            if let diff=model.previewDiff{DisclosureGroup("更新差异：新增 \(diff.added.count) · 删除 \(diff.removed.count) · 变化 \(diff.changed.count)"){ScrollView{VStack(alignment:.leading){Text("新增："+diff.added.joined(separator:"、"));Text("删除："+diff.removed.joined(separator:"、"));Text("参数/名称变化："+diff.changed.joined(separator:"、"));Text("证书验证变化："+diff.certificateChanges.joined(separator:"、"));Text("策略变化："+(diff.strategyChanges ? "是":"否")+" · 规则变化："+(diff.ruleChanges ? "是":"否"));if diff.removesSelection{Text("当前节点将移除，需重新选择").foregroundStyle(.orange)}}.font(.caption)}.frame(maxHeight:110)}}
             Picker("导入范围",selection:$scope){Text("仅兼容节点").tag(ImportScope.nodes);Text("节点、策略和规则").tag(ImportScope.profile)}.pickerStyle(.segmented)
             Text("\(model.preview?.candidates.count ?? 0) 个兼容节点 · \(model.preview?.groups.count ?? 0) 个策略组 · \(model.preview?.rules.count ?? 0) 条规则").foregroundStyle(.secondary)
             List(model.preview?.candidates ?? [],id:\.node.id){c in VStack(alignment:.leading,spacing:4){Text(c.node.name).font(.headline);Text("\(c.node.kind.rawValue) · \(c.node.server):\(c.node.port)").font(.caption);if c.node.insecure{Text("此节点跳过 TLS 证书验证").foregroundStyle(.orange).font(.caption)}}}.frame(height:170)

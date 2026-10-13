@@ -49,12 +49,12 @@ public enum ProfileImporter {
         for (_,id,entry) in definitions {
             do {
                 guard let name=entry["name"] as? String,let type=entry["type"] as? String,let members=entry["proxies"] as? [String],!members.isEmpty else {throw ProxyError("策略组格式无效")}
-                guard ["select","url-test"].contains(type) else {throw ProxyError("仅支持 select 和 url-test 策略组")}
+                guard ["select","url-test","fallback"].contains(type) else {throw ProxyError("仅支持 select、url-test 和 fallback 策略组")}
                 let unknown=Set(entry.keys).subtracting(["name","type","proxies","url","interval","tolerance","lazy","icon"])
                 guard unknown.isEmpty else {throw ProxyError("策略组含有不支持的参数")}
                 if entry["url"] != nil || entry["interval"] != nil || entry["tolerance"] != nil {result.ignored.append("策略测速统一使用应用的检测页、5 分钟间隔和 50 ms 容差")}
                 let refs=try members.map(resolve);guard !refs.contains(.reject) else {throw ProxyError("策略组中的 REJECT 成员暂不支持，请使用拒绝规则")}
-                result.groups.append(PolicyGroup(id:id,name:name,kind:type=="select" ? .select : .urltest,members:refs,selected:refs.first))
+                result.groups.append(PolicyGroup(id:id,name:name,kind:type=="select" ? .select : type=="fallback" ? .fallback : .urltest,members:refs,selected:refs.first))
             } catch {result.unsupported.append("策略组："+Redactor.redact(error.localizedDescription))}
         }
         if let rows=root["rules"] as? [String] {

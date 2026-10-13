@@ -1,68 +1,71 @@
-# 轻舟代理 0.2.0
+# 轻舟代理 0.3.0 · 待验收开发版
 
-原生 SwiftUI macOS 客户端，最低 macOS 14，Apple Silicon，sing-box 1.14.3 普通用户子进程。源代码与开发构建可用，验收范围和待验收项目见交付验收记录。
+macOS 14+、Apple Silicon、SwiftUI，固定 sing-box 1.14.3、Yams 6.2.2。默认系统代理；TUN、自动连接、登录启动及全局快捷键默认关闭。ad-hoc 签名，未做 Apple 公证。本版已完成源码和构建，管理员路径、真实 TUN 及严格质量门禁仍待验收。
 
-## 使用
+## 使用与新增功能
 
-1. 打开应用，选择“链接导入”粘贴节点或 HTTPS 设备订阅，也可“文件导入”选择 UTF-8 YAML / 链接列表。
-2. 在预览中选择“仅节点”或“节点、策略及规则”。完整范围有不支持项时禁止确认；仅节点须明确确认跳过不支持内容。跳过 TLS 验证的节点另需明确确认。
-3. 在节点页选择节点，或策略页选择手动分组/自动选择，再连接。系统弹出授权窗口时由用户完成管理员授权。
-4. 已连接代表核心与系统代理设置成功；远端 HTTPS 连通性独立显示。菜单栏可切模式、选策略、测速、更新或复制终端代理命令。
-5. 断开和正常退出会恢复原代理；关闭主窗口后菜单栏继续运行。异常退出后重开应用可恢复残留。
+- 节点页支持链接、HTTPS 订阅、Base64、兼容 Clash/Mihomo YAML、文件拖入和本地二维码图片。输入转换成受限模型，不直接执行下载的配置。图片/文本上限 2 MiB，图片最多 2000 万像素、20 个二维码。
+- 节点支持搜索、收藏、备注、最近使用、列表/紧凑卡片、多选、批量收藏/删除/测速。按唯一协议/服务器/端口保留更新节点的备注与收藏，歧义时不猜测。未变化节点保留 ID。
+- 分享窗口需主动确认生成含凭据的链接/二维码；可复制链接或保存图片。应用不后台读取剪贴板。关闭分享窗口不清理用户已经复制的剪贴板内容。
+- 配置页可新建、复制、改名、删除非当前配置；每份独立保存节点、订阅、策略、规则、选择。办公模板由用户填写内网域名，留空为通用模板，不预置公司域名。连接中切换采用校验、重连、提交；失败恢复上一运行配置。跨配置仍引用的凭据不清理。
+- 更新预览显示新增、删除、参数/名称、证书验证、策略和规则变化。删除当前节点、证书验证降低或不兼容内容暂停自动应用。确认后才替换数据。
+- fallback 仅接受节点成员，编辑器上下排列优先级；应用管理 selector，每 60 秒用 HTTPS 检测，超时 8 秒、最多 4 并发。当前节点连续失败两次切换，高优先级连续成功两次切回，切换间隔至少 60 秒；保留已有连接，无直连后备。全部节点或当前 fallback 组失败时停止接管并恢复原网络。
+- 自动选择仍为核心 URLTest，每 5 分钟、50 ms 容差。测速是 HTTPS 请求延迟，不是下载带宽；断开测速使用普通用户受监护临时核心，不改系统代理。
+- 规则解释页共用匹配模型，不查询实时 DNS；无法确定 IP 条件时明确显示限制。模拟结果与核心真实规则字段分开；连接详情可生成待确认规则。
+- 最近 30 分钟速率图、按节点/目标聚合、连接排序/协议筛选仅保存在内存。聚合基于轮询观测，短连接可能未计入，不等同核心累计总量；重连清零。未提供的应用/规则字段不猜测。
+- 诊断分开显示核心、端口、配置、权限、DNS、TLS、HTTPS、恢复及 TUN 路由/DNS。未连接不自动接管；无法独立归因的阶段显示未验证。导出默认脱敏。
+- 菜单栏增加配置、实际节点、速率、暂停、诊断和恢复。快捷键默认关闭，可选择 P/D/R 与 ⌘⌥、⌘⌃、⌃⌥、⌘⌃⌥，注册时检查占用，冲突保留原设置。
 
-设备链接从现有 HY2 admin 的 owner 设备页复制 `hy2.txt` 地址即可。应用和源码没有预置设备链接或 VPS 密钥。0.2 本轮已获授权只读提取现有 owner 设备订阅，完成多节点配置校验、原生 HTTPS 检测及 curl HTTPS 请求。临时凭据随后删除；真实系统代理路径仍待管理员验收。
+导入协议为 HY2、SS（AES-128/256-GCM、ChaCha20-IETF-Poly1305）、Trojan TCP/TLS、VLESS TCP/WS/TLS/Reality/Vision。Reality/Vision 仅配置校验，尚无真实服务转发证据。策略 select/url-test/fallback，拒绝循环；fallback 不接受组、自动组或直连。规则 DOMAIN、DOMAIN-SUFFIX、DOMAIN-KEYWORD、IP-CIDR、IP-CIDR6、MATCH。外部端口/控制/TUN 不带入应用；脚本、覆写、proxy-providers 等列入不支持内容。未知节点参数拒绝。无解密、脚本、云同步、负载均衡或应用商店发布。
 
-## 日常功能
+规则顺序：模式 → 本机/私网直连 → 用户规则 → 排列的远程规则源 → 默认策略。远程源动作统一覆盖，HTTPS 请求 15 秒、2 MiB、50,000 条限制。订阅/规则默认每 24 小时，仅应用运行时更新，失败保留旧数据，最多三次退避重试。隐藏窗口刷新降为每 5 秒。
 
-- 节点搜索、收藏、名称/协议/延迟排序；单节点、批量 HTTPS 延迟检测。超时 8 秒、最多并发 4 个、可取消。离线测速启动临时受监护核心，不改系统代理。测速不是带宽测速。
-- 内置手动选择与自动选择，支持自定义 select/url-test 及组引用。核心 tag 使用稳定 UUID；循环和歧义引用拒绝。自动选择每 5 分钟检测、改善超过 50 ms 才切换；内置自动组只有节点，无直连后备。
-- 规则、全部代理、全部直连通过控制 API 切换；选择只影响新连接。节点集合、规则结构改变采用校验后重连，失败保留原数据并尝试恢复原运行配置。
-- 订阅改名、手动更新、自动更新开关、时间、失败原因、服务端用量/到期。默认每 24 小时、仅应用运行时，启动时补到期更新；失败后 60/300/1800 秒退避，最多 3 次，下个周期重试。新增不验证证书节点暂停更新，等待预览确认。
-- 远程规则源支持 HTTPS 逐行域名/IP、Clash 文本、YAML payload、sing-box JSON 独立域名/IP规则集。默认 24 小时更新、可手动更新、拖序替代为上下移动；失败保留缓存。每次下载 15 秒、2 MiB、规则最多 50,000 条。
-- 概览显示核心实时上传/下载速率、累计流量、连接数、实际节点。连接页可搜索、查看详情、关闭单条/全部连接。核心未提供的字段显示“未提供”，详情只保存在内存。每秒刷新，隐藏窗口时 5 秒；暂停刷新不停止代理。
-- 登录启动和启动后自动连接独立，均默认关闭。登录启动需先将应用移入 `/Applications`，允许系统登录项。
+## 数据、备份和回退
 
-## 导入兼容范围
+用户数据在 `~/Library/Application Support/Qingzhou/`。根 state.json schemaVersion=3，配置集合内沿用兼容 schema 2 的配置结构。元数据不含密码、完整订阅/规则地址或 API 密钥；凭据在 Keychain。文件 0600、目录 0700；敏感运行配置停止后清理。API 回环、每次随机 Bearer 密钥，无网页面板。日志脱敏，最多 500 行。
 
-- `hy2://`、`hysteria2://`、`ss://`、`trojan://`、`vless://`；HTTPS 链接列表、Base64 链接列表、兼容 Clash/Mihomo YAML。
-- HY2 支持完整认证、SNI、TLS 验证开关、salamander 混淆、端口跳跃。SS 支持 AES-128-GCM、AES-256-GCM、ChaCha20-IETF-Poly1305。Trojan TCP/TLS；VLESS TCP/WS、TLS/Reality/Vision。Reality/Vision 本轮只做配置校验，未做真实服务转发。
-- YAML 策略 select/url-test；规则 DOMAIN、DOMAIN-SUFFIX、DOMAIN-KEYWORD、IP-CIDR、IP-CIDR6、MATCH，动作 DIRECT、REJECT、兼容组。测速 URL/间隔/容差统一采用应用默认值，预览告知。
-- 外部控制、端口等配置不带入应用；proxy-providers、脚本、DNS/Geo 数据和不兼容配置明确列出。禁止 YAML 锚点/别名，避免展开造成资源耗尽。未知节点参数不会静默忽略。
-- 远程规则的动作由规则源设置统一覆盖，文本里的动作不决定执行动作。JSON 仅支持独立 domain/domain_suffix/domain_keyword/ip_cidr 条件，组合条件拒绝。
-- 匹配顺序为模式 → 本机/私网直连 → 用户规则 → 排列的规则源 → 默认策略。远程 MATCH 会匹配之后所有目标，应放在末尾。
+首次迁移先保存包含必要凭据的 `migration-v3.qzb` 加密快照，随机口令在 Keychain，`migration-v3.keyref` 只存引用；成功后才替换元数据。凭据缺失/保存失败不覆盖旧文件。保留旧节点 ID、收藏、规则、订阅和启动设置。
 
-仅覆盖遵循 macOS 系统代理设置的应用。无 TUN、全机 UDP/DNS 接管、HTTPS 解密、脚本、云同步或自动后台守护更新。
+配置页支持 AES-GCM 完整备份、恢复预览、升级前快照。PBKDF2-SHA256 600,000 次、随机 16 字节盐和随机 nonce；口令不写入备份。明文最大 32 MiB、文件上限 48 MiB。错误口令、损坏、不支持版本先拒绝；恢复暂存新凭据，运行成功提交后清理旧凭据，失败回滚。
 
-## 数据、安全和恢复
+回退 0.2：先预览升级前快照，导出 0.2 回退数据并恢复必要旧 Keychain 引用；已有不同凭据引用时拒绝覆盖。退出 0.3，另存当前 state.json，将导出文件改名 state.json 放回用户数据目录，再启动历史版本-0.2。不要将 schema 3 文件交给旧版。含 fallback/TUN 的新快照不能给 0.2；升级后新增数据先另存完整加密备份。
 
-数据目录 `~/Library/Application Support/Qingzhou/`：`state.json` schemaVersion 2，非敏感元数据和规则缓存；`proxy-recovery.json` 原代理/PAC 快照；临时 `runtime-*.json` 运行凭据及随机 API 密钥。文件 0600，目录 0700。普通元数据不含密码、订阅完整 URL 或 API 密钥；它们在 Keychain 或临时运行配置内。API 仅回环、Bearer 验证、没有网页面板。日志脱敏、最多 500 行、仅内存。
+## TUN 与管理员服务
 
-单实例锁防止并发覆盖。监护进程在主应用死亡时停止核心；残留代理下次启动恢复。恢复前比较本应用写入字段，外部冲突保留恢复记录，避免覆盖外部修改。若授权或恢复失败，用恢复入口；必要时根据恢复记录在系统网络设置内手动恢复，勿盲目清除原代理/PAC。
+设置页复制安装/修复、卸载或管理员恢复命令，由用户在终端完成 sudo：
 
-首次从 schema 1 迁移保存 `state-v1-backup.json`，0600；迁移失败不覆盖原文件。旧节点 ID、Keychain 引用、订阅和规则保留。首次迁移后、尚未编辑数据时，可退出应用，将当前 state.json 另存备份，再用 state-v1-backup.json 替换并启动旧版。**0.2 更新后不能直接恢复旧备份**：旧凭据可能已退休。需要先保留当前 schema 2 数据，并将当前节点与凭据引用转换为 schema 1；高级组/规则/远程源无法在旧版表达，须另存并明确取舍。建议使用交付目录的 0.1 归档仅做版本回退参考，不在旧版中覆盖 0.2 数据。
+```sh
+sudo bash scripts/install-helper.sh '/绝对路径/轻舟代理.app'
+sudo bash scripts/recover-helper.sh
+sudo bash scripts/uninstall-helper.sh
+```
 
-## 构建与测试
+root 目录 `/Library/PrivilegedHelperTools/cn.qingzhou.proxy`，launchd 标签 `cn.qingzhou.proxy.helper`。固定组件 SHA-256、版本、客户端 CDHash；LOCAL_PEERTOKEN audit UID 与 Security.framework 动态代码有效性/CDHash 校验。socket 0600，控制模型最大 4 MiB；仅 status/start/stop/recover，不接收 shell、任意程序路径或外部配置。变更核心/辅助服务/客户端后重新批准安装。
 
-需要 macOS Command Line Tools / Swift 6.2、Python 3、codesign；集成测试使用 curl/openssl。不依赖完整 Xcode 的 XCTest。
+gVisor、MTU 1500、IPv4/IPv6；核心 auto_route 和内置 DNS 修改关闭，辅助服务记录和管理自己的四条半网接管路由、私网/用户 CIDR/直连规则/节点/引导 DNS 绕行及主服务 DNS，不替换现有同前缀路由。要求原 IPv4/IPv6 默认路由同一物理接口、可读取原 DNS；不满足明确拒绝。虚拟网段根据已有路由检查选择。
 
-```bash
+默认代理域名经代理请求 Cloudflare HTTPS DNS，节点和明确直连域名使用原 DNS；可选全部原系统解析，无 Fake-IP。更高优先级 VPN、应用内加密 DNS 不保证覆盖。系统代理与 TUN 不同时接管。
+
+检测活动 VPN、非本机隧道路由、已有 HTTP/HTTPS/SOCKS/PAC；归属不明阻止启动，不能仅凭 utun 存在判断。本机预检已检测到活动 VPN，未启用 TUN，未改其配置。
+
+root recovery.json/runtime.json 为 0600。写入前保存意图，清理时核对前缀、接口、网关和 DNS 当前值；外部修改冲突保留记录，不覆盖。正常断开先恢复网络后停核心；核心崩溃、应用 socket 中断、服务退出/重启执行恢复，不自动重新接管。SIGKILL 恢复、管理员批准/取消、卸载及真实 TCP/UDP/DNS/IPv6 仍待验收。失效恢复原网络，可能恢复直连，无持续断网保护。
+
+外部冲突时使用管理员恢复命令重试，仍冲突由用户核对 scutil --dns、netstat -rn 与记录，保留原值，只处理确认仍归轻舟所有的设置；不要盲目清除其他 VPN、默认路由或 PAC。恢复记录未处理时安装/卸载拒绝删除组件。
+
+## 构建和质量
+
+```sh
 scripts/build-app.sh /绝对路径/outputs
-scripts/swift-local.sh build --enable-code-coverage
-.build/debug/QingzhouChecks
+scripts/swift-local.sh run QingzhouChecks
 .build/debug/QingzhouChecks runtime-checks
 python3 scripts/integration.py
 python3 scripts/features-integration.py
-python3 scripts/supervisor-check.py
+scripts/coverage.sh
+python3 scripts/mutation-check.py
 ```
 
-集成核心需要 macOS DNS 通知权限，沙箱内可能报 status 9，应从普通 Terminal 执行。`sudo .build/debug/QingzhouChecks system-proxy-checks` 使用隔离偏好文件测试，非默认系统配置；非管理员返回 77。本轮仍未取得真实系统代理授权验收。
+受限沙箱可能禁止 macOS DNS notification（status 9），受控核心测试需允许读取系统 DNS；不会修改系统代理或 TUN。隔离 SystemConfiguration 写入测试也需要管理员，不能替代真实用户授权与网络恢复验收。
 
-构建验证固定核心及 Yams 归档/来源文件；应用、核心、监护程序仅 ad-hoc 签名，未 Apple 公证。代码测试通过不等于管理员路径或严格质量门禁通过。覆盖率和变异证据见验收记录。
+适用代码门禁仍为 100% 行/分支覆盖及至少 80% 全项目变异检出率。当前未达到/未取得；六个定向变异不能代表全项目指标。详细状态见交付验收记录。
 
-## 来源和许可
-
-界面和管理逻辑独立实现；Shadowrocket 2.2.90 仅用作本机静态结构参考，没有复制代码/资源或读取其账号。
-
-sing-box [官方 v1.14.3](https://github.com/SagerNet/sing-box/releases/tag/v1.14.3)，对应源码归档和 GPL 许可在 Vendor。固定归档 SHA-256 `0360ce634a04c26a6b4fd957517987bb4f6c8950f63435ce3c5af2fcae5860c5`，未重新签名核心 `28b7200074d6380006acc4f035a404c8af3dceb65dd92d7386ed92c9224e08a2`。
-
-Yams [官方 6.2.2](https://github.com/jpsim/Yams/tree/6.2.2)，MIT 许可、固定源码和官方归档保留；SHA-256 `c18b63003173ff886eb781e0cbb2cba612fb5c68485b0cd4e66ad06b686091e8`。各依赖保留原版权。项目源码 GPL-3.0-or-later。
+依赖：[sing-box 官方来源](https://github.com/SagerNet/sing-box)、[TUN 文档](https://sing-box.sagernet.org/configuration/inbound/tun/)、[Yams 6.2.2](https://github.com/jpsim/Yams/tree/6.2.2)。版本、下载哈希、许可证与源码获取说明随 Vendor 交付。固定源码参考 sing-tun bca4bf029237，参考归档 SHA-256：10310d412692015c8d2056af83db58c15728b56bf4db6c87a32dcdc9b8ecc071。

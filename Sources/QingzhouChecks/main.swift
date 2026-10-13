@@ -46,6 +46,10 @@ if args.count >= 5 && args[1] == "subscription-v02-config" {
     }
     dispatchMain()
 }
+if args.count>=5 && args[1]=="subscription-v03-config" {
+    let input=try String(contentsOfFile:args[2],encoding:.utf8)
+    Task{do{let preview=try await ImportService.preview(input);let directory=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString);defer{try? FileManager.default.removeItem(at:directory)};let credentials=MemoryCredentials();let store=try NodeStore(file:directory.appendingPathComponent("state.json"),credentials:credentials);try store.commit(store.prepareImport(preview.candidates,subscription:Subscription(name:"本轮验收"),source:preview.source));var state=store.state;state.listenPort=Int(args[4]) ?? 0;state.mode = .global;try store.commit(state);try SecureFile.write(ConfigBuilder.build(state:store.state,credentials:credentials,control:CoreControlContext.make()),to:URL(fileURLWithPath:args[3]));print("SUBSCRIPTION_V03_CONFIG_OK schema=\(store.catalog.schemaVersion) nodes=\(store.state.nodes.count)");exit(0)}catch{print(Redactor.redact(error.localizedDescription));exit(1)}};dispatchMain()
+}
 if args.count >= 3 && args[1] == "preview" {
     let input = try String(contentsOfFile:args[2],encoding:.utf8)
     Task {
@@ -89,6 +93,8 @@ if args.count>=4 && args[1]=="api-checks" {
     }
     dispatchMain()
 }
+if args.count>=4 && args[1]=="fallback-checks"{Task{do{try await runFallbackChecks(args)}catch{CheckHarness.failure("回退 API 检查失败",file:#filePath,line:#line)};print("RESULT fallback_api_failures=\(CheckHarness.failures)");exit(CheckHarness.failures==0 ? 0:1)};dispatchMain()}
+if args.count==2 && args[1]=="capture-preflight"{do{try NetworkInspection.checkConflicts();print("TUN_PREFLIGHT_NO_CONFLICT");exit(0)}catch{print("TUN_PREFLIGHT_BLOCKED: "+Redactor.redact(error.localizedDescription));exit(77)}}
 var scenarios = 0
 func run(_ name:String,_ instance:CheckCase,_ body:() throws -> Void) {
     let before = CheckHarness.failures
@@ -125,9 +131,19 @@ do {let instance=EnhancementTests();run("EnhancementTests.testGroupValidationAnd
 do {let instance=EnhancementTests();run("EnhancementTests.testRemoteRuleFormatsAndRejections",instance){try instance.testRemoteRuleFormatsAndRejections()}}
 do {let instance=EnhancementTests();run("EnhancementTests.testScheduleAndUsage",instance){try instance.testScheduleAndUsage()}}
 do {let instance=EnhancementTests();run("EnhancementTests.testMultiConfigCoreValidationAndTokenSeparation",instance){try instance.testMultiConfigCoreValidationAndTokenSeparation()}}
+do {let instance=DailyTests();run("DailyTests.testProfilesIsolationAndSharedCredentials",instance){try instance.testProfilesIsolationAndSharedCredentials()}}
+do {let instance=DailyTests();run("DailyTests.testMigrationBackupAndFailure",instance){try instance.testMigrationBackupAndFailure()}}
+do {let instance=DailyTests();run("DailyTests.testEncryptedBackupIntegrityAndAtomicRestore",instance){try instance.testEncryptedBackupIntegrityAndAtomicRestore()}}
+do {let instance=DailyTests();run("DailyTests.testLegacyExportAndCredentialConflict",instance){try instance.testLegacyExportAndCredentialConflict()}}
+do {let instance=DailyTests();run("DailyTests.testFallbackThresholdsAndUnavailable",instance){try instance.testFallbackThresholdsAndUnavailable()}}
+do {let instance=DailyTests();run("DailyTests.testRuleExplanationAndBoundaries",instance){try instance.testRuleExplanationAndBoundaries()}}
+do {let instance=DailyTests();run("DailyTests.testUpdateDiffAndPersonalMetadata",instance){try instance.testUpdateDiffAndPersonalMetadata()}}
+do {let instance=DailyTests();run("DailyTests.testShareRoundtripAndFallbackValidation",instance){try instance.testShareRoundtripAndFallbackValidation()}}
+do {let instance=DailyTests();run("DailyTests.testTunModelAndConflictDetection",instance){try instance.testTunModelAndConflictDetection()}}
 Task {
     await runAsyncChecks()
-    print("RESULT scenarios=\(scenarios + 8) assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
+    do{try await runTransactionChecks()}catch{CheckHarness.failure("事务场景异常",file:#filePath,line:#line)}
+    print("RESULT scenarios=\(scenarios + 12) assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
     exit(CheckHarness.failures == 0 ? 0 : 1)
 }
 dispatchMain()

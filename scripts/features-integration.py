@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-import http.server,json,pathlib,secrets,socket,subprocess,threading,time,urllib.request,urllib.error
+import http.server,json,pathlib,os,secrets,socket,subprocess,threading,time,urllib.request,urllib.error
 ROOT=pathlib.Path(__file__).resolve().parent.parent
-CORE=ROOT/'Vendor/sing-box';CHECKS=ROOT/'.build/debug/QingzhouChecks'
+CORE=ROOT/'Vendor/sing-box';CHECKS=pathlib.Path(os.environ.get('QINGZHOU_CHECKS',ROOT/'.build/debug/QingzhouChecks'))
 
 def port():
     with socket.socket() as s:s.bind(('127.0.0.1',0));return s.getsockname()[1]
@@ -44,7 +44,7 @@ def main():
     context={'port':api,'secret':secret};write(d/'context.json',context)
     gateway={'log':{'level':'info'},'inbounds':[{'type':'shadowsocks','tag':tag,'listen':'127.0.0.1','listen_port':p,'method':'aes-128-gcm','password':'controlled-password'} for tag,p in [('gateway-a',a),('gateway-b',b)]],'outbounds':[{'type':'direct','tag':'direct'}]}
     write(d/'gateway.json',gateway)
-    yaml='proxies:\n'+''.join(f'  - {{name: {name}, type: ss, server: 127.0.0.1, port: {p}, cipher: aes-128-gcm, password: controlled-password}}\n' for name,p in [('A',a),('B',b),('Dead',dead),('Hung',hung)])+'proxy-groups:\n  - {name: Manual, type: select, proxies: [A, B]}\nrules:\n  - DOMAIN,reject.test,REJECT\n  - MATCH,Manual\n'
+    yaml='proxies:\n'+''.join(f'  - {{name: {name}, type: ss, server: 127.0.0.1, port: {p}, cipher: aes-128-gcm, password: controlled-password}}\n' for name,p in [('A',a),('B',b),('Dead',dead),('Hung',hung)])+'proxy-groups:\n  - {name: Manual, type: select, proxies: [A, B]}\n  - {name: Fallback, type: fallback, proxies: [Dead, A, B]}\nrules:\n  - DOMAIN,reject.test,REJECT\n  - MATCH,Manual\n'
     write(d/'profile.yaml',yaml)
     subprocess.run([str(CHECKS),'v02-config',str(d/'profile.yaml'),str(d/'client.json'),str(mixed),str(d/'context.json'),str(d/'fixture.json'),'global'],check=True)
     fixture=json.loads((d/'fixture.json').read_text());tags=['node-'+x.lower() for x in fixture['nodes']]
@@ -73,6 +73,8 @@ def main():
         time.sleep(1)
         subprocess.run([str(CHECKS),'api-checks',str(d/'context.json'),str(d/'fixture.json')],check=True,timeout=50)
         passed('nativeAPIBehavior')
+        subprocess.run([str(CHECKS),'fallback-checks',str(d/'context.json'),str(d/'fixture.json')],check=True,timeout=40)
+        before=count('gateway-a');result=request();assert result.returncode==0 and result.stdout==b'QINGZHOU_FORWARD_OK';assert count('gateway-a')>before;passed('fallbackDecisionRoutesThroughHealthyPriority')
         api_request('/proxies/proxy','PUT',{'name':tags[2]});assert request().returncode!=0;passed('failedSelectionDoesNotFallbackDirect')
     finally:
         for p in streams+processes:stop(p)
