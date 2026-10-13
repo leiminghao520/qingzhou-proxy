@@ -7,7 +7,7 @@ final class FixtureProtocol: URLProtocol {
     override func startLoading() {
         let path = request.url!.path
         let status = path == "/expired" ? 403 : 200
-        let headers = path == "/declared-large" ? ["Content-Length":"3000000"] : ["Content-Type":"text/plain"]
+        let headers = path == "/usage" ? ["subscription-userinfo":"upload=12; download=34; total=56; expire=200000"] : path == "/declared-large" ? ["Content-Length":"3000000"] : ["Content-Type":"text/plain"]
         let response = HTTPURLResponse(url:request.url!,statusCode:status,httpVersion:"HTTP/1.1",headerFields:headers)!
         client?.urlProtocol(self,didReceive:response,cacheStoragePolicy:.notAllowed)
         if path == "/stream-large" {client?.urlProtocol(self,didLoad:Data(repeating:120,count:64));client?.urlProtocol(self,didLoad:Data(repeating:120,count:64))}
@@ -20,6 +20,7 @@ final class FixtureProtocol: URLProtocol {
 func runAsyncChecks() async {
     let good = URL(string:"https://fixture.invalid/nodes")!
     do {let data = try await BoundedDownload.fetch(good,protocolClasses:[FixtureProtocol.self]);expectEqual(try NodeParser.parseList(String(decoding:data,as:UTF8.self)).count,1);print("PASS DownloadTests.success")} catch {CheckHarness.failure("订阅正常响应失败",file:#filePath,line:#line)}
+    do {let response=try await BoundedDownload.fetchResponse(URL(string:"https://fixture.invalid/usage")!,protocolClasses:[FixtureProtocol.self]);expectEqual(UsageInfo.parse(response.usageHeader)?.download,34);print("PASS DownloadTests.usageHeader")}catch{CheckHarness.failure("订阅用量响应头失败",file:#filePath,line:#line)}
     for path in ["expired","declared-large","stream-large","error"] {
         do {_ = try await BoundedDownload.fetch(URL(string:"https://fixture.invalid/"+path)!,limit:100,protocolClasses:[FixtureProtocol.self]);CheckHarness.failure("订阅错误未被拒绝",file:#filePath,line:#line)} catch {expectFalse(error.localizedDescription.contains("fixture.invalid"));print("PASS DownloadTests.\(path)")}
     }

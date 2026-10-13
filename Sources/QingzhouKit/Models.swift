@@ -31,31 +31,78 @@ public struct Candidate: Sendable {
     public var obfsSecret: String?
     public init(node: Node, secret: String, obfsSecret: String? = nil) { self.node = node; self.secret = secret; self.obfsSecret = obfsSecret }
 }
-public struct Subscription: Codable, Identifiable, Sendable {
-    public var id: UUID
-    public var name: String
-    public var sourceRef: String
-    public var updatedAt: Date
-    public init(id: UUID = UUID(), name: String, sourceRef: String = UUID().uuidString, updatedAt: Date = Date()) { self.id = id; self.name = name; self.sourceRef = sourceRef; self.updatedAt = updatedAt }
+public struct UsageInfo: Codable, Sendable {
+    public var upload: UInt64?; public var download: UInt64?; public var total: UInt64?; public var expire: TimeInterval?
+    public init(upload: UInt64? = nil, download: UInt64? = nil, total: UInt64? = nil, expire: TimeInterval? = nil) {self.upload=upload;self.download=download;self.total=total;self.expire=expire}
+    public static func parse(_ header: String?) -> UsageInfo? {
+        guard let header else {return nil};var fields:[String:String]=[:]
+        for part in header.split(separator:";") {let p=part.split(separator:"=",maxSplits:1);if p.count==2 {fields[p[0].trimmingCharacters(in:.whitespaces).lowercased()]=p[1].trimmingCharacters(in:.whitespaces)}}
+        let result=UsageInfo(upload:fields["upload"].flatMap(UInt64.init),download:fields["download"].flatMap(UInt64.init),total:fields["total"].flatMap(UInt64.init),expire:fields["expire"].flatMap(Double.init))
+        return result.upload == nil && result.download == nil && result.total == nil && result.expire == nil ? nil : result
+    }
 }
-public enum RuleKind: String, Codable, CaseIterable, Sendable { case domain, suffix, cidr }
+public enum ImportScope: String, Codable, Sendable {case nodes, profile}
+public struct Subscription: Codable, Identifiable, Sendable {
+    public var id: UUID; public var name: String; public var sourceRef: String; public var updatedAt: Date
+    public var autoUpdate: Bool; public var scope: ImportScope; public var usage: UsageInfo?; public var lastError: String?; public var pendingReview: Bool; public var retryCount: Int; public var retryAfter: Date?
+    public init(id: UUID = UUID(), name: String, sourceRef: String = UUID().uuidString, updatedAt: Date = Date()) {self.id=id;self.name=name;self.sourceRef=sourceRef;self.updatedAt=updatedAt;autoUpdate=true;scope = .nodes;pendingReview=false;retryCount=0}
+    enum CodingKeys: String,CodingKey {case id,name,sourceRef,updatedAt,autoUpdate,scope,usage,lastError,pendingReview,retryCount,retryAfter}
+    public init(from decoder: Decoder) throws {
+        let c=try decoder.container(keyedBy:CodingKeys.self);id=try c.decode(UUID.self,forKey:.id);name=try c.decode(String.self,forKey:.name);sourceRef=try c.decode(String.self,forKey:.sourceRef);updatedAt=try c.decode(Date.self,forKey:.updatedAt)
+        autoUpdate=try c.decodeIfPresent(Bool.self,forKey:.autoUpdate) ?? true;scope=try c.decodeIfPresent(ImportScope.self,forKey:.scope) ?? .nodes;usage=try c.decodeIfPresent(UsageInfo.self,forKey:.usage);lastError=try c.decodeIfPresent(String.self,forKey:.lastError);pendingReview=try c.decodeIfPresent(Bool.self,forKey:.pendingReview) ?? false;retryCount=try c.decodeIfPresent(Int.self,forKey:.retryCount) ?? 0;retryAfter=try c.decodeIfPresent(Date.self,forKey:.retryAfter)
+    }
+}
+public enum ProxyMode: String, Codable, CaseIterable, Sendable {case rule, global, direct
+    public var label: String {self == .rule ? "规则" : self == .global ? "全部代理" : "全部直连"}
+}
+public enum PolicyReference: Codable, Hashable, Sendable {
+    case node(UUID), group(UUID), automatic, selected, direct, reject
+    public var tag: String {switch self {case .node(let id):return "node-"+id.uuidString.lowercased();case .group(let id):return "group-"+id.uuidString.lowercased();case .automatic:return "auto";case .selected:return "proxy";case .direct:return "direct";case .reject:return "reject"}}
+}
+public enum GroupKind: String,Codable,CaseIterable,Sendable {case select, urltest}
+public struct PolicyGroup: Codable,Identifiable,Sendable {
+    public var id: UUID;public var name: String;public var kind: GroupKind;public var members:[PolicyReference];public var selected:PolicyReference?;public var subscriptionID:UUID?
+    public init(id:UUID=UUID(),name:String,kind:GroupKind,members:[PolicyReference],selected:PolicyReference?=nil,subscriptionID:UUID?=nil) {self.id=id;self.name=name;self.kind=kind;self.members=members;self.selected=selected;self.subscriptionID=subscriptionID}
+}
+public struct LatencyResult:Codable,Sendable {public var milliseconds:Int?;public var testedAt:Date;public init(milliseconds:Int?,testedAt:Date=Date()){self.milliseconds=milliseconds;self.testedAt=testedAt}}
+public enum RuleKind: String, Codable, CaseIterable, Sendable { case domain, suffix, keyword, cidr, match }
 public enum RuleAction: String, Codable, CaseIterable, Sendable { case direct, proxy, reject }
 public struct RoutingRule: Codable, Identifiable, Sendable {
-    public var id = UUID()
-    public var kind: RuleKind
-    public var value: String
-    public var action: RuleAction
-    public init(kind: RuleKind, value: String, action: RuleAction) { self.kind = kind; self.value = value; self.action = action }
+    public var id = UUID();public var kind: RuleKind;public var value: String;public var action: RuleAction;public var target:PolicyReference?;public var subscriptionID:UUID?
+    public init(kind: RuleKind, value: String, action: RuleAction,target:PolicyReference?=nil,subscriptionID:UUID?=nil) {self.kind=kind;self.value=value;self.action=action;self.target=target;self.subscriptionID=subscriptionID}
+}
+public struct RemoteRuleSource:Codable,Identifiable,Sendable {
+    public var id=UUID();public var name:String;public var sourceRef:String;public var target:PolicyReference;public var rules:[RoutingRule]=[];public var updatedAt:Date?;public var autoUpdate=true;public var lastError:String?;public var retryCount=0;public var retryAfter:Date?
+    public init(name:String,sourceRef:String=UUID().uuidString,target:PolicyReference = .selected){self.name=name;self.sourceRef=sourceRef;self.target=target}
 }
 public struct AppState: Codable, Sendable {
-    public var schemaVersion = 1
-    public var nodes: [Node] = []
-    public var subscriptions: [Subscription] = []
-    public var rules: [RoutingRule] = []
-    public var rulesEnabled = true
-    public var listenPort = 7890
-    public var selectedID: UUID?
+    public var schemaVersion = 2;public var nodes:[Node]=[];public var subscriptions:[Subscription]=[];public var rules:[RoutingRule]=[]
+    public var mode:ProxyMode = .rule;public var listenPort=7890;public var selectedID:UUID?;public var selectedPolicy:PolicyReference?;public var groups:[PolicyGroup]=[];public var remoteRules:[RemoteRuleSource]=[];public var favorites:Set<UUID>=[];public var latency:[String:LatencyResult]=[:];public var ruleFinal:PolicyReference?;public var autoConnect=false;public var loginAtStartup=false
+    public var rulesEnabled:Bool {get {mode == .rule} set {mode = newValue ? .rule : .global}}
+    public var activePolicy:PolicyReference? {selectedPolicy ?? selectedID.map(PolicyReference.node)}
     public init() {}
+    enum CodingKeys:String,CodingKey {case schemaVersion,nodes,subscriptions,rules,mode,listenPort,selectedID,selectedPolicy,groups,remoteRules,favorites,latency,ruleFinal,autoConnect,loginAtStartup}
+    enum LegacyKeys:String,CodingKey {case rulesEnabled}
+    public init(from decoder:Decoder) throws {
+        let c=try decoder.container(keyedBy:CodingKeys.self);schemaVersion=try c.decodeIfPresent(Int.self,forKey:.schemaVersion) ?? 1
+        nodes=try c.decodeIfPresent([Node].self,forKey:.nodes) ?? [];subscriptions=try c.decodeIfPresent([Subscription].self,forKey:.subscriptions) ?? [];rules=try c.decodeIfPresent([RoutingRule].self,forKey:.rules) ?? []
+        let old=try decoder.container(keyedBy:LegacyKeys.self);mode=try c.decodeIfPresent(ProxyMode.self,forKey:.mode) ?? ((try old.decodeIfPresent(Bool.self,forKey:.rulesEnabled) ?? true) ? .rule : .global)
+        listenPort=try c.decodeIfPresent(Int.self,forKey:.listenPort) ?? 7890;selectedID=try c.decodeIfPresent(UUID.self,forKey:.selectedID);selectedPolicy=try c.decodeIfPresent(PolicyReference.self,forKey:.selectedPolicy)
+        groups=try c.decodeIfPresent([PolicyGroup].self,forKey:.groups) ?? [];remoteRules=try c.decodeIfPresent([RemoteRuleSource].self,forKey:.remoteRules) ?? [];favorites=try c.decodeIfPresent(Set<UUID>.self,forKey:.favorites) ?? [];latency=try c.decodeIfPresent([String:LatencyResult].self,forKey:.latency) ?? [:];ruleFinal=try c.decodeIfPresent(PolicyReference.self,forKey:.ruleFinal)
+        autoConnect=try c.decodeIfPresent(Bool.self,forKey:.autoConnect) ?? false;loginAtStartup=try c.decodeIfPresent(Bool.self,forKey:.loginAtStartup) ?? false
+    }
+    public func label(_ ref:PolicyReference?) -> String {
+        guard let ref else {return "未选择"}
+        switch ref {case .node(let id):return nodes.first{$0.id==id}?.name ?? "节点已移除";case .group(let id):return groups.first{$0.id==id}?.name ?? "分组已移除";case .automatic:return "自动选择";case .selected:return "当前选择";case .direct:return "直连";case .reject:return "拒绝"}
+    }
+}
+public enum UpdateSchedule {
+    public static func due(updatedAt:Date?,enabled:Bool,pending:Bool=false,retryCount:Int=0,retryAfter:Date?=nil,now:Date=Date()) -> Bool {
+        guard enabled,!pending else{return false}
+        if retryCount>0 {return retryAfter.map{$0<=now} == true}
+        return updatedAt.map{now.timeIntervalSince($0)>=86400} ?? true
+    }
+    public static func nextRetry(_ count:Int,now:Date=Date()) -> Date? {guard (1...3).contains(count) else{return nil};return now.addingTimeInterval([60.0,300,1800][count-1])}
 }
 public protocol CredentialStore: AnyObject {
     func get(_ ref: String) throws -> String

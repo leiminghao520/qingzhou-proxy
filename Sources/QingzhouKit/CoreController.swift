@@ -19,15 +19,22 @@ import CFNetwork
         self.binary = binary ?? Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/sing-box")
         self.supervisor = binary == nil ? Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/QingzhouRunner") : supervisor
     }
-    private static func portAvailable(_ port: Int) -> Bool {
+    public static func portAvailable(_ port: Int) -> Bool {
         let fd = socket(AF_INET,SOCK_STREAM,0); guard fd >= 0 else { return false }; defer {close(fd)}
         var address = sockaddr_in(); address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size); address.sin_family = sa_family_t(AF_INET); address.sin_port = UInt16(port).bigEndian; address.sin_addr.s_addr = inet_addr("127.0.0.1")
         return withUnsafePointer(to:&address) {$0.withMemoryRebound(to:sockaddr.self,capacity:1) {Darwin.bind(fd,$0,socklen_t(MemoryLayout<sockaddr_in>.size)) == 0}}
     }
-    private static func listening(_ port: Int) -> Bool {
+    public static func listening(_ port: Int) -> Bool {
         let fd = socket(AF_INET,SOCK_STREAM,0); guard fd >= 0 else { return false }; defer {close(fd)}
         var address = sockaddr_in(); address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size); address.sin_family = sa_family_t(AF_INET); address.sin_port = UInt16(port).bigEndian; address.sin_addr.s_addr = inet_addr("127.0.0.1")
         return withUnsafePointer(to:&address) {$0.withMemoryRebound(to:sockaddr.self,capacity:1) {Darwin.connect(fd,$0,socklen_t(MemoryLayout<sockaddr_in>.size)) == 0}}
+    }
+    public func validate(config:Data) async throws {
+        guard FileManager.default.isExecutableFile(atPath:binary.path) else {throw ProxyError("代理核心缺失")}
+        let url=directory.appendingPathComponent("check-"+UUID().uuidString+".json");try SecureFile.write(config,to:url);defer{try? FileManager.default.removeItem(at:url)}
+        let binary=self.binary
+        let valid=try await Task.detached{let p=Process();p.executableURL=binary;p.arguments=["check","-c",url.path];p.standardOutput=FileHandle.nullDevice;p.standardError=FileHandle.nullDevice;try p.run();p.waitUntilExit();return p.terminationStatus==0}.value
+        guard valid else {throw ProxyError("核心配置校验失败，请检查节点、策略和规则")}
     }
     public func start(config: Data, port: Int) async throws {
         guard process == nil else { throw ProxyError("代理核心已经运行") }
