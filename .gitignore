@@ -1,0 +1,13 @@
+.build/
+.swiftpm/
+.DS_Store
+*.profraw
+*.profdata
+outputs/
+work/
+Vendor/sing-box
+Vendor/*-source.tar.gz
+*.qzb
+*.keyref
+*.pem
+*.key
