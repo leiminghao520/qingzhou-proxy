@@ -3,6 +3,7 @@ import Darwin
 
 public enum ConfigBuilder {
     public static func validate(_ rule: RoutingRule) throws {
+        if rule.kind == .match {guard rule.value.isEmpty else {throw ProxyError("MATCH 不接受匹配内容")};return}
         guard !rule.value.isEmpty, rule.value == rule.value.trimmingCharacters(in: .whitespacesAndNewlines) else { throw ProxyError("规则内容不能为空或含首尾空格") }
         if rule.kind == .cidr {
             let parts = rule.value.split(separator: "/", omittingEmptySubsequences: false)
@@ -11,6 +12,8 @@ public enum ConfigBuilder {
             let family = String(address).withCString {inet_pton(AF_INET, $0, &bytes) == 1 ? AF_INET : inet_pton(AF_INET6, $0, &bytes) == 1 ? AF_INET6 : 0}
             guard family != 0 else { throw ProxyError("IP 地址无效") }
             if parts.count == 2 { guard let n = Int(parts[1]), (0...(family == AF_INET ? 32 : 128)).contains(n) else { throw ProxyError("CIDR 前缀无效") } }
+        } else if rule.kind == .keyword {
+            guard rule.value.utf8.count<=253,!rule.value.contains(where:{$0.isWhitespace}),rule.value.unicodeScalars.allSatisfy({$0.value>=33 && $0.value<=126}) else {throw ProxyError("域名关键词无效")}
         } else {
             guard rule.value.range(of: #"^(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)*[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$"#, options: .regularExpression) != nil else { throw ProxyError("域名规则无效，请使用 ASCII 域名") }
         }
@@ -49,8 +52,8 @@ public enum ConfigBuilder {
             rules.append(["domain":["localhost"],"action":"route","outbound":"direct"])
             for r in state.rules {
                 try validate(r)
-                let key = r.kind == .domain ? "domain" : r.kind == .suffix ? "domain_suffix" : "ip_cidr"
-                var value: [String:Any] = [key:[r.value]]
+                let key = r.kind == .domain ? "domain" : r.kind == .suffix ? "domain_suffix" : r.kind == .keyword ? "domain_keyword" : "ip_cidr"
+                var value: [String:Any] = r.kind == .match ? [:] : [key:[r.value]]
                 if r.action == .reject { value["action"] = "reject" } else { value["action"] = "route"; value["outbound"] = r.action.rawValue }
                 rules.append(value)
             }

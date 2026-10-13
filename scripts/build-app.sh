@@ -5,6 +5,7 @@ output="${1:-$PWD/../../outputs}"
 mkdir -p "$output"
 output="$(cd "$output" && pwd)"
 python3 scripts/fetch-core.py
+python3 scripts/verify-yams.py
 scripts/swift-local.sh build -c release --product Qingzhou
 scripts/swift-local.sh build -c release --product QingzhouRunner
 app="$output/轻舟代理.app"
@@ -15,6 +16,8 @@ fi
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp .build/release/Qingzhou "$app/Contents/MacOS/Qingzhou"
 cp .build/release/QingzhouRunner "$app/Contents/Resources/QingzhouRunner"
+cp Vendor/Yams/LICENSE "$app/Contents/Resources/Yams.LICENSE"
+cp Vendor/yams-lock.json "$app/Contents/Resources/"
 cp Vendor/sing-box Vendor/sing-box.LICENSE Vendor/core-lock.json "$app/Contents/Resources/"
 if [ -f Vendor/GPL-3.0.txt ]; then cp Vendor/GPL-3.0.txt "$app/Contents/Resources/"; fi
 cat > "$app/Contents/Info.plist" <<'PLIST'
@@ -26,8 +29,8 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>轻舟代理</string>
 <key>CFBundleDisplayName</key><string>轻舟代理</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.1.0</string>
-<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>0.2.0</string>
+<key>CFBundleVersion</key><string>2</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>CFBundleIconFile</key><string>AppIcon</string>

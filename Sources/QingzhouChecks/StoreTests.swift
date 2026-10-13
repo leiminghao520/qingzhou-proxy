@@ -51,7 +51,7 @@ final class StoreTests: CheckCase {
         expectThrows(try store.importNodes([]))
     }
     func testUnsupportedStateIsNotOverwritten() throws {
-        let url = dir.appendingPathComponent("state.json");var state = AppState();state.schemaVersion = 2
+        let url = dir.appendingPathComponent("state.json");var state = AppState();state.schemaVersion = 3
         let data = try JSONEncoder().encode(state);try data.write(to:url)
         expectThrows(try NodeStore(file:url,credentials:MemoryCredentials()));expectEqual(try Data(contentsOf:url),data)
     }

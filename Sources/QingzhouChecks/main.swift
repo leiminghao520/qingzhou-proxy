@@ -30,6 +30,22 @@ if args.count >= 5 && args[1] == "subscription-config" {
     }
     dispatchMain()
 }
+if args.count >= 5 && args[1] == "subscription-v02-config" {
+    let input = try String(contentsOfFile:args[2],encoding:.utf8)
+    Task {
+        do {
+            let preview = try await ImportService.preview(input)
+            guard let c = preview.candidates.first else {throw ProxyError("订阅没有节点")}
+            let credentials = MemoryCredentials();try credentials.set(c.secret,for:c.node.credentialRef)
+            if let obfs = c.obfsSecret {try credentials.set(obfs,for:c.node.credentialRef + ".obfs")}
+            var state = AppState();state.listenPort = Int(args[4]) ?? 0;state.mode = .global;state.nodes=preview.candidates.map(\.node);state.selectedPolicy = .node(c.node.id)
+            for candidate in preview.candidates {try credentials.set(candidate.secret,for:candidate.node.credentialRef);if let obfs=candidate.obfsSecret{try credentials.set(obfs,for:candidate.node.credentialRef+".obfs")}}
+            try SecureFile.write(ConfigBuilder.build(state:state,credentials:credentials,control:CoreControlContext.make()),to:URL(fileURLWithPath:args[3]))
+            print("SUBSCRIPTION_V02_CONFIG_OK nodes=\(preview.candidates.count)");exit(0)
+        } catch {print(Redactor.redact(error.localizedDescription));exit(1)}
+    }
+    dispatchMain()
+}
 if args.count >= 3 && args[1] == "preview" {
     let input = try String(contentsOfFile:args[2],encoding:.utf8)
     Task {
@@ -63,6 +79,16 @@ if args.count >= 2 && args[1] == "runtime-checks" {
     }
     dispatchMain()
 }
+if args.count>=8 && args[1]=="v02-config" {
+    do{try writeFeatureConfig(args);exit(0)}catch{print(Redactor.redact(error.localizedDescription));exit(1)}
+}
+if args.count>=4 && args[1]=="api-checks" {
+    Task {
+        do{try await runFeatureAPIChecks(args)}catch{CheckHarness.failure("核心 API 检查失败："+Redactor.redact(error.localizedDescription),file:#filePath,line:#line)}
+        print("RESULT feature_api_failures=\(CheckHarness.failures)");exit(CheckHarness.failures==0 ? 0:1)
+    }
+    dispatchMain()
+}
 var scenarios = 0
 func run(_ name:String,_ instance:CheckCase,_ body:() throws -> Void) {
     let before = CheckHarness.failures
@@ -90,9 +116,18 @@ do { let instance = StoreTests(); run("StoreTests.testSubscriptionUpdateKeepsIDA
 do { let instance = StoreTests(); run("StoreTests.testFailureLeavesOldStateAndCredentials",instance) { try instance.testFailureLeavesOldStateAndCredentials() } }
 do { let instance = StoreTests(); run("StoreTests.testEditAndConflict",instance) { try instance.testEditAndConflict() } }
 do { let instance = StoreTests(); run("StoreTests.testUnsupportedStateIsNotOverwritten",instance) { try instance.testUnsupportedStateIsNotOverwritten() } }
+do {let instance=EnhancementTests();run("EnhancementTests.testLegacyMigrationPreservesReferencesAndBackup",instance){try instance.testLegacyMigrationPreservesReferencesAndBackup()}}
+do {let instance=EnhancementTests();run("EnhancementTests.testPreparedUpdateAbortAndCommit",instance){try instance.testPreparedUpdateAbortAndCommit()}}
+do {let instance=EnhancementTests();run("EnhancementTests.testProfileYAMLAndBase64",instance){try instance.testProfileYAMLAndBase64()}}
+do {let instance=EnhancementTests();run("EnhancementTests.testYAMLUnsupportedContentAndCycles",instance){try instance.testYAMLUnsupportedContentAndCycles()}}
+do {let instance=EnhancementTests();run("EnhancementTests.testProfileImportStableGroupsAndRules",instance){try instance.testProfileImportStableGroupsAndRules()}}
+do {let instance=EnhancementTests();run("EnhancementTests.testGroupValidationAndRepair",instance){try instance.testGroupValidationAndRepair()}}
+do {let instance=EnhancementTests();run("EnhancementTests.testRemoteRuleFormatsAndRejections",instance){try instance.testRemoteRuleFormatsAndRejections()}}
+do {let instance=EnhancementTests();run("EnhancementTests.testScheduleAndUsage",instance){try instance.testScheduleAndUsage()}}
+do {let instance=EnhancementTests();run("EnhancementTests.testMultiConfigCoreValidationAndTokenSeparation",instance){try instance.testMultiConfigCoreValidationAndTokenSeparation()}}
 Task {
     await runAsyncChecks()
-    print("RESULT scenarios=\(scenarios + 7) assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
+    print("RESULT scenarios=\(scenarios + 8) assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
     exit(CheckHarness.failures == 0 ? 0 : 1)
 }
 dispatchMain()
