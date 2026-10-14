@@ -26,6 +26,15 @@ import QingzhouKit
     try controller.restore();expectFalse(controller.hasRecovery)
     let restoredPrefs = try preferences();let restoredService = SCNetworkServiceCopy(restoredPrefs,SCNetworkServiceGetServiceID(service)!)!;let restoredProto = SCNetworkServiceCopyProtocol(restoredService,kSCNetworkProtocolTypeProxies)!
     expectTrue(NSDictionary(dictionary:SCNetworkProtocolGetConfiguration(restoredProto) as! [String:Any]).isEqual(to:original));print("PASS SystemProxyTests.isolatedApplyRestorePAC")
+    // 使用隔离偏好文件复现：接管前的旧回环代理在恢复时已经停止。
+    let seed=try preferences();let seedService=SCNetworkServiceCopy(seed,SCNetworkServiceGetServiceID(service)!)!;let seedProto=SCNetworkServiceCopyProtocol(seedService,kSCNetworkProtocolTypeProxies)!
+    let stale:[String:Any]=["HTTPEnable":1,"HTTPProxy":"127.0.0.1","HTTPPort":1,"HTTPSEnable":1,"HTTPSProxy":"127.0.0.1","HTTPSPort":1]
+    expectTrue(SCNetworkProtocolSetConfiguration(seedProto,stale as CFDictionary));expectTrue(SCPreferencesCommitChanges(seed))
+    try controller.apply(port:27890);try controller.restore()
+    let checked=try preferences();let checkedService=SCNetworkServiceCopy(checked,SCNetworkServiceGetServiceID(service)!)!;let checkedProto=SCNetworkServiceCopyProtocol(checkedService,kSCNetworkProtocolTypeProxies)!
+    let restoredStale=SCNetworkProtocolGetConfiguration(checkedProto) as! [String:Any]
+    expectEqual(restoredStale["HTTPEnable"] as? Int,0);expectEqual(restoredStale["HTTPSEnable"] as? Int,0)
+    expectFalse(controller.hasRecovery);print("PASS SystemProxyTests.deadLoopbackRestoredDisabled")
     let cancelled = SystemProxyController(journal:dir.appendingPathComponent("cancelled.json"),preferencesFactory:{throw ProxyError("模拟授权取消")})
     expectThrows(try cancelled.apply(port:7890));expectFalse(cancelled.hasRecovery);print("PASS SystemProxyTests.authorizationCancelled")
     let failing = SystemProxyController(journal:dir.appendingPathComponent("failed.json"),preferencesFactory:preferences,commitHandler:{_ in throw ProxyError("模拟提交失败")})

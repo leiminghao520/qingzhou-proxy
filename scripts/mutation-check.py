@@ -4,6 +4,7 @@ root=pathlib.Path(__file__).resolve().parent.parent
 stage=root/'.build/mutation-stage';stage.mkdir(parents=True,exist_ok=True)
 shutil.copytree(root/'Sources',stage/'Sources',dirs_exist_ok=True)
 shutil.copytree(root/'scripts',stage/'scripts',dirs_exist_ok=True)
+shutil.copytree(root/'Resources',stage/'Resources',dirs_exist_ok=True)
 shutil.copy2(root/'Package.swift',stage/'Package.swift')
 if not (stage/'Vendor').exists():(stage/'Vendor').symlink_to(root/'Vendor',target_is_directory=True)
 mutations=[

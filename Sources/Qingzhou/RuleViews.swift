@@ -1,46 +1,366 @@
 import SwiftUI
 import QingzhouKit
 
-struct RuleTargetPicker:View {
-    var state:AppState
-    @Binding var target:PolicyReference
-    var body:some View {Picker("动作 / 策略",selection:$target){Text("当前代理").tag(PolicyReference.selected);Text("直连").tag(PolicyReference.direct);Text("拒绝").tag(PolicyReference.reject);ForEach(state.groups){Text($0.name).tag(PolicyReference.group($0.id))}}}
-}
-struct RuleView:View {
-    @ObservedObject var model:AppModel
-    @State private var tab="自定义规则"
-    @State private var kind=RuleKind.domain
-    @State private var value=""
-    @State private var target=PolicyReference.selected
-    @State private var addingRemote=false
-    var body:some View {
-        VStack(alignment:.leading,spacing:12){
-            Picker("规则来源",selection:$tab){Text("自定义规则").tag("自定义规则");Text("远程规则源").tag("远程规则源")}.pickerStyle(.segmented)
-            Text("规则模式：本机/私网直连 → 自定义规则 → 下方排列的远程规则源 → 默认策略。修改后执行受控重连。").font(.caption).foregroundStyle(.secondary)
-            if tab=="自定义规则"{
-                HStack{Picker("类型",selection:$kind){Text("域名").tag(RuleKind.domain);Text("后缀").tag(RuleKind.suffix);Text("关键词").tag(RuleKind.keyword);Text("IP/CIDR").tag(RuleKind.cidr)}.frame(width:160);TextField("匹配内容",text:$value);RuleTargetPicker(state:model.state,target:$target).frame(width:200);Button("添加"){let rule=RoutingRule(kind:kind,value:value,action:target == .direct ? .direct:target == .reject ? .reject:.proxy,target:target);Task{await model.addRule(rule);if model.errorMessage==nil{value=""}}}.disabled(model.locked)}
-                HStack{Text("默认策略").font(.caption);RuleTargetPicker(state:model.state,target:Binding(get:{model.state.ruleFinal ?? .selected},set:{ref in Task{await model.setRuleFinal(ref)}})).frame(width:250);Spacer()}.disabled(model.locked)
-                List(model.state.rules){rule in HStack{Text(rule.kind == .domain ? "域名":rule.kind == .suffix ? "后缀":rule.kind == .keyword ? "关键词":"IP/CIDR").frame(width:65,alignment:.leading);Text(rule.value);Spacer();Text(model.state.label(rule.target ?? (rule.action == .direct ? .direct:rule.action == .reject ? .reject:.selected))).font(.caption);Button{Task{await model.moveRule(rule.id,by:-1)}}label:{Image(systemName:"arrow.up")};Button{Task{await model.moveRule(rule.id,by:1)}}label:{Image(systemName:"arrow.down")};Button(role:.destructive){Task{await model.removeRule(rule.id)}}label:{Image(systemName:"trash")}}.disabled(model.locked)}
-            }else{
-                HStack{Text("规则源动作统一使用此处选择，不执行文件中的脚本或控制项。").font(.caption).foregroundStyle(.secondary);Spacer();Button("添加规则源",systemImage:"plus"){addingRemote=true}.disabled(model.locked)}
-                if model.state.remoteRules.isEmpty{ContentUnavailableView("还没有远程规则源",systemImage:"link",description:Text("支持域名/IP列表、Clash 文本、YAML payload 和兼容的 sing-box JSON"))}
-                else{List(model.state.remoteRules){source in VStack(alignment:.leading,spacing:8){
-                    HStack{Text(source.name).font(.headline);Spacer();Toggle("自动更新",isOn:Binding(get:{source.autoUpdate},set:{auto in Task{await model.updateRemote(source.id,auto:auto)}})).toggleStyle(.checkbox);Button("更新"){Task{await model.refreshRemote(source.id)}};Button{Task{await model.moveRemote(source.id,by:-1)}}label:{Image(systemName:"arrow.up")};Button{Task{await model.moveRemote(source.id,by:1)}}label:{Image(systemName:"arrow.down")};Button(role:.destructive){Task{await model.deleteRemote(source.id)}}label:{Image(systemName:"trash")}}
-                    HStack{RuleTargetPicker(state:model.state,target:Binding(get:{source.target},set:{ref in Task{await model.updateRemote(source.id,target:ref)}})).frame(width:260);Spacer();Text("\(source.rules.count) 条 · \(source.updatedAt?.formatted(date:.abbreviated,time:.shortened) ?? "未更新")").font(.caption).foregroundStyle(.secondary)}
-                    if let error=source.lastError{Text(error).font(.caption).foregroundStyle(.orange)}
-                }.padding(.vertical,8).disabled(model.locked)}}
+struct RuleTargetPicker: View {
+    var state: AppState
+    @Binding var target: PolicyReference
+    
+    var body: some View {
+        Picker("目标动作", selection: $target) {
+            Text("当前代理选择").tag(PolicyReference.selected)
+            Text("直接连接 (Direct)").tag(PolicyReference.direct)
+            Text("拦截丢弃 (Reject)").tag(PolicyReference.reject)
+            Divider()
+            ForEach(state.groups) { group in
+                Text("策略组: \(group.name)").tag(PolicyReference.group(group.id))
             }
-        }.sheet(isPresented:$addingRemote){RemoteEditor(model:model)}
+        }
     }
 }
-struct RemoteEditor:View {
-    @ObservedObject var model:AppModel
+
+struct RuleView: View {
+    @ObservedObject var model: AppModel
+    @State private var tab = "自定义规则"
+    @State private var kind = RuleKind.domain
+    @State private var value = ""
+    @State private var target = PolicyReference.selected
+    @State private var addingRemote = false
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Picker("规则来源", selection: $tab) {
+                Text("自定义分流规则 (\(model.state.rules.count))").tag("自定义规则")
+                Text("远程分流规则集 (\(model.state.remoteRules.count))").tag("远程规则源")
+            }
+            .pickerStyle(.segmented)
+            
+            if tab == "自定义规则" {
+                // Add New Rule Bar
+                HStack(spacing: 10) {
+                    Picker("规则类型", selection: $kind) {
+                        Text("域名 (DOMAIN)").tag(RuleKind.domain)
+                        Text("后缀 (SUFFIX)").tag(RuleKind.suffix)
+                        Text("关键词 (KEYWORD)").tag(RuleKind.keyword)
+                        Text("IP / CIDR").tag(RuleKind.cidr)
+                    }
+                    .frame(width: 160)
+                    
+                    TextField("匹配内容（如 google.com, 10.0.0.0/8）", text: $value)
+                        .textFieldStyle(.roundedBorder)
+                    
+                    RuleTargetPicker(state: model.state, target: $target)
+                        .frame(width: 190)
+                    
+                    Button {
+                        let rule = RoutingRule(
+                            kind: kind,
+                            value: value.trimmingCharacters(in: .whitespaces),
+                            action: target == .direct ? .direct : target == .reject ? .reject : .proxy,
+                            target: target
+                        )
+                        Task {
+                            await model.addRule(rule)
+                            if model.errorMessage == nil { value = "" }
+                        }
+                    } label: {
+                        Label("添加规则", systemImage: "plus")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.locked || value.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                .padding(12)
+                .background(Theme.cardBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                
+                // Default Final Rule Bar
+                HStack(spacing: 10) {
+                    Text("默认未命中兜底策略：")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                    RuleTargetPicker(
+                        state: model.state,
+                        target: Binding(
+                            get: { model.state.ruleFinal ?? .selected },
+                            set: { ref in Task { await model.setRuleFinal(ref) } }
+                        )
+                    )
+                    .frame(width: 220)
+                    Spacer()
+                }
+                .padding(.horizontal, 4)
+                
+                // Custom Rules Table
+                if model.state.rules.isEmpty {
+                    ContentUnavailableView(
+                        "暂无自定义规则",
+                        systemImage: "arrow.triangle.branch",
+                        description: Text("在上方输入规则内容、类型和目标动作即可添加。")
+                    )
+                } else {
+                    List(model.state.rules) { rule in
+                        HStack(spacing: 12) {
+                            ruleKindBadge(rule.kind)
+                            
+                            Text(rule.value)
+                                .font(.system(.body, design: .monospaced))
+                                .lineLimit(1)
+                            
+                            Spacer()
+                            
+                            ruleTargetBadge(rule.target ?? (rule.action == .direct ? .direct : rule.action == .reject ? .reject : .selected))
+                            
+                            HStack(spacing: 4) {
+                                Button {
+                                    Task { await model.moveRule(rule.id, by: -1) }
+                                } label: {
+                                    Image(systemName: "arrow.up")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                
+                                Button {
+                                    Task { await model.moveRule(rule.id, by: 1) }
+                                } label: {
+                                    Image(systemName: "arrow.down")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                
+                                Button(role: .destructive) {
+                                    Task { await model.removeRule(rule.id) }
+                                } label: {
+                                    Image(systemName: "trash")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                        .disabled(model.locked)
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
+                }
+            } else {
+                // Remote Rule Providers View
+                HStack {
+                    Text("远程规则集支持域名/IP列表、Clash YAML payload 以及兼容的 sing-box rule-set。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        addingRemote = true
+                    } label: {
+                        Label("添加远程规则集", systemImage: "plus.circle.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(model.locked)
+                }
+                
+                if model.state.remoteRules.isEmpty {
+                    ContentUnavailableView(
+                        "暂无远程规则集",
+                        systemImage: "link",
+                        description: Text("点击右上角添加远程 HTTPS 规则文件源。")
+                    )
+                } else {
+                    ScrollView(showsIndicators: false) {
+                        VStack(spacing: 12) {
+                            ForEach(model.state.remoteRules) { source in
+                                remoteRuleCard(source)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $addingRemote) { RemoteEditor(model: model) }
+    }
+    
+    private func ruleKindBadge(_ kind: RuleKind) -> some View {
+        let (label, color): (String, Color) = {
+            switch kind {
+            case .domain: return ("DOMAIN", Theme.accentBlue)
+            case .suffix: return ("SUFFIX", Theme.purpleAccent)
+            case .keyword: return ("KEYWORD", Theme.cyanAccent)
+            case .cidr: return ("IP-CIDR", Theme.amberAccent)
+            case .match: return ("MATCH", Theme.connectedGreen)
+            case .geoip: return ("GEOIP", Theme.connectedGreen)
+            case .asn: return ("IP-ASN", Theme.amberAccent)
+            case .userAgent: return ("USER-AGENT", Theme.purpleAccent)
+            }
+        }()
+        
+        return Text(label)
+            .font(.system(size: 10, weight: .bold, design: .monospaced))
+            .foregroundStyle(color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2.5)
+            .background(color.opacity(0.12))
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+            .frame(width: 75, alignment: .center)
+    }
+    
+    private func ruleTargetBadge(_ target: PolicyReference) -> some View {
+        let (label, color): (String, Color) = {
+            switch target {
+            case .direct: return ("直接连接", Theme.connectedGreen)
+            case .reject: return ("拦截丢弃", Theme.dangerRed)
+            case .selected: return ("当前代理", Theme.accentBlue)
+            case .group: return (model.state.label(target), Theme.purpleAccent)
+            default: return (model.state.label(target), Color.secondary)
+            }
+        }()
+        
+        return Text(label)
+            .font(.caption2.bold())
+            .foregroundStyle(color)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(color.opacity(0.12))
+            .clipShape(Capsule())
+    }
+    
+    private func remoteRuleCard(_ source: RemoteRuleSource) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 8) {
+                        Text(source.name).font(.headline)
+                        Text("\(source.rules.count) 条规则")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.secondary.opacity(0.1))
+                            .clipShape(Capsule())
+                    }
+                    Text("最近更新：\(source.updatedAt?.formatted(date: .abbreviated, time: .shortened) ?? "尚未更新")")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                
+                Spacer()
+                
+                HStack(spacing: 8) {
+                    Toggle("自动更新", isOn: Binding(get: { source.autoUpdate }, set: { auto in Task { await model.updateRemote(source.id, auto: auto) } }))
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                    
+                    Button {
+                        Task { await model.refreshRemote(source.id) }
+                    } label: {
+                        Label("立即更新", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    
+                    Button {
+                        Task { await model.moveRemote(source.id, by: -1) }
+                    } label: {
+                        Image(systemName: "arrow.up")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    
+                    Button {
+                        Task { await model.moveRemote(source.id, by: 1) }
+                    } label: {
+                        Image(systemName: "arrow.down")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    
+                    Button(role: .destructive) {
+                        Task { await model.deleteRemote(source.id) }
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+            
+            HStack(spacing: 8) {
+                Text("规则集命中动作：")
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+                RuleTargetPicker(
+                    state: model.state,
+                    target: Binding(get: { source.target }, set: { ref in Task { await model.updateRemote(source.id, target: ref) } })
+                )
+                .frame(width: 240)
+            }
+            
+            if let error = source.lastError {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                    Text(error)
+                }
+                .font(.caption)
+                .foregroundStyle(Theme.amberAccent)
+            }
+        }
+        .padding(14)
+        .background(Theme.cardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.cardCornerRadius)
+                .stroke(Theme.subtleBorder, lineWidth: 1)
+        )
+    }
+}
+
+// MARK: - Modern Remote Editor
+struct RemoteEditor: View {
+    @ObservedObject var model: AppModel
     @Environment(\.dismiss) private var dismiss
-    @State private var name=""
-    @State private var url=""
-    @State private var target=PolicyReference.selected
-    @State private var error:String?
-    var body:some View {
-        VStack(alignment:.leading,spacing:18){Text("添加远程规则源").font(.title2.bold());TextField("名称",text:$name);SecureField("HTTPS 规则文件地址",text:$url);RuleTargetPicker(state:model.state,target:$target);Text("最多 2 MiB / 50000 条规则。地址保存在钥匙串；下载与解析失败不会修改现有规则。").font(.caption).foregroundStyle(.secondary);if let error{Text(error).font(.caption).foregroundStyle(.red)};HStack{Button("取消"){dismiss()}.disabled(model.busy);Spacer();Button("下载并添加"){Task{await model.addRemote(name:name,url:url,target:target);if model.errorMessage==nil{dismiss()}else{error=model.errorMessage}}}.buttonStyle(.borderedProminent).disabled(model.locked || name.isEmpty || url.isEmpty)}}.padding(26).frame(width:560)
+    
+    @State private var name = ""
+    @State private var url = ""
+    @State private var target = PolicyReference.selected
+    @State private var error: String?
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("添加远程规则集").font(.title2.bold())
+            
+            VStack(spacing: 12) {
+                TextField("规则集名称（例如 去广告、直连域名列表等）", text: $name)
+                    .textFieldStyle(.roundedBorder)
+                SecureField("HTTPS 规则集下载地址", text: $url)
+                    .textFieldStyle(.roundedBorder)
+                
+                HStack {
+                    Text("统一生效策略：")
+                    RuleTargetPicker(state: model.state, target: $target)
+                }
+            }
+            
+            Text("规则文件上限 2 MiB / 50,000 条规则。文件 URL 将加密存储在钥匙串。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            
+            if let error {
+                Text(error).font(.caption).foregroundStyle(Theme.dangerRed)
+            }
+            
+            HStack {
+                Button("取消") { dismiss() }
+                    .buttonStyle(.bordered)
+                    .disabled(model.busy)
+                Spacer()
+                Button("下载并添加") {
+                    Task {
+                        await model.addRemote(name: name, url: url, target: target)
+                        if model.errorMessage == nil { dismiss() } else { error = model.errorMessage }
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.locked || name.isEmpty || url.isEmpty)
+            }
+        }
+        .padding(26)
+        .frame(width: 560)
     }
 }

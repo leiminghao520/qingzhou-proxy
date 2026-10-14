@@ -1,6 +1,8 @@
-# 轻舟代理 0.3.0 · 待验收开发版
+# 轻舟代理 · 待真实网络验收开发版
 
-macOS 14+、Apple Silicon、SwiftUI，固定 sing-box 1.14.3、Yams 6.2.2。默认系统代理；TUN、自动连接、登录启动及全局快捷键默认关闭。ad-hoc 签名，未做 Apple 公证。本版已完成源码和构建，管理员路径、真实 TUN 及严格质量门禁仍待验收。
+版本唯一来源为 `Sources/QingzhouKit/BuildVersion.swift`，应用包和辅助服务使用同一版本。
+
+macOS 14+、Apple Silicon、SwiftUI，固定 sing-box 1.14.3、Yams 6.2.2。默认系统代理，由 sing-box mixed 入站直接承接 HTTP/HTTPS/SOCKS；HTTP 兼容模式默认关闭，User-Agent 与 URL 重写保留但只在开启兼容模式后生效。TUN、自动连接、登录启动及全局快捷键默认关闭。ad-hoc 签名，未做 Apple 公证。本版已完成源码和构建，管理员路径、真实 TUN 及严格质量门禁仍待验收。
 
 ## 使用与新增功能
 
@@ -22,7 +24,7 @@ macOS 14+、Apple Silicon、SwiftUI，固定 sing-box 1.14.3、Yams 6.2.2。默�
 
 ## 数据、备份和回退
 
-用户数据在 `~/Library/Application Support/Qingzhou/`。根 state.json schemaVersion=3，配置集合内沿用兼容 schema 2 的配置结构。元数据不含密码、完整订阅/规则地址或 API 密钥；凭据在 Keychain。文件 0600、目录 0700；敏感运行配置停止后清理。API 回环、每次随机 Bearer 密钥，无网页面板。日志脱敏，最多 500 行。
+用户数据在 `~/Library/Application Support/Qingzhou/`。根 state.json schemaVersion=3，配置集合内沿用兼容 schema 2 的配置结构。新增 httpCompatibilityEnabled 缺省为 false，旧配置升级不会自动启用兼容入口。元数据不含密码、完整订阅/规则地址或 API 密钥；凭据在 Keychain。文件 0600、目录 0700；敏感运行配置停止后清理。API 回环、每次随机 Bearer 密钥，无网页面板。日志脱敏，最多 500 行。
 
 首次迁移先保存包含必要凭据的 `migration-v3.qzb` 加密快照，随机口令在 Keychain，`migration-v3.keyref` 只存引用；成功后才替换元数据。凭据缺失/保存失败不覆盖旧文件。保留旧节点 ID、收藏、规则、订阅和启动设置。
 
@@ -69,3 +71,7 @@ python3 scripts/mutation-check.py
 适用代码门禁仍为 100% 行/分支覆盖及至少 80% 全项目变异检出率。当前未达到/未取得；六个定向变异不能代表全项目指标。详细状态见交付验收记录。
 
 依赖：[sing-box 官方来源](https://github.com/SagerNet/sing-box)、[TUN 文档](https://sing-box.sagernet.org/configuration/inbound/tun/)、[Yams 6.2.2](https://github.com/jpsim/Yams/tree/6.2.2)。版本、下载哈希、许可证与源码获取说明随 Vendor 交付。固定源码参考 sing-tun bca4bf029237，参考归档 SHA-256：10310d412692015c8d2056af83db58c15728b56bf4db6c87a32dcdc9b8ecc071。
+
+构建版本唯一来源为 `Sources/QingzhouKit/BuildVersion.swift`。每次打包在输出目录中新建带版本、时间和随机后缀的目录，并输出 `artifact-manifest.json`，不覆盖旧包。启动前检测本地入口与当前节点，成功后才接管系统代理；界面分别显示运行状态与连通性。模式切换事务重建 DNS 策略。核心 DNS API 承担兼容模式目的解析，A/AAAA 独立查询，失败不回退直连。真实节点、两小时稳定性与 TUN 恢复需单独记录。
+
+附加验证：`/usr/bin/python3 scripts/helper-script-tests.py` 在临时目录模拟安装/恢复/卸载失败，不能替代真实管理员验收。`QingzhouChecks network-acceptance state.json sing-box qzhttp result.json 7200` 只使用临时回环入口，读取现有凭据，对普通/兼容模式执行两小时 HTTPS、节点和 SOCKS 观察，不接管系统网络；结果只含固定阶段和状态。新包清单包含源码树摘要和 Git 基准，明确含未提交变更。

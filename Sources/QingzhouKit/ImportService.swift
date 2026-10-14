@@ -1,8 +1,9 @@
 import Foundation
 
 public struct ImportPreview:Sendable {
+    public var fullConfiguration:ShadowrocketConfiguration?;public var revision:String?;public var profileName:String?
     public var candidates:[Candidate];public var source:String?;public var groups:[PolicyGroup];public var rules:[RoutingRule];public var final:PolicyReference?;public var unsupported:[String];public var ignored:[String];public var usage:UsageInfo?
-    public init(candidates:[Candidate],source:String?=nil,groups:[PolicyGroup]=[],rules:[RoutingRule]=[],final:PolicyReference?=nil,unsupported:[String]=[],ignored:[String]=[],usage:UsageInfo?=nil){self.candidates=candidates;self.source=source;self.groups=groups;self.rules=rules;self.final=final;self.unsupported=unsupported;self.ignored=ignored;self.usage=usage}
+    public init(candidates:[Candidate],source:String?=nil,groups:[PolicyGroup]=[],rules:[RoutingRule]=[],final:PolicyReference?=nil,unsupported:[String]=[],ignored:[String]=[],usage:UsageInfo?=nil,fullConfiguration:ShadowrocketConfiguration?=nil,revision:String?=nil,profileName:String?=nil){self.fullConfiguration=fullConfiguration;self.revision=revision;self.profileName=profileName;self.candidates=candidates;self.source=source;self.groups=groups;self.rules=rules;self.final=final;self.unsupported=unsupported;self.ignored=ignored;self.usage=usage}
 }
 public struct DownloadResult:Sendable {public var data:Data;public var usageHeader:String?}
 public enum ImportService {

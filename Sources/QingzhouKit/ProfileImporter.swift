@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 import Yams
 
 public enum ProfileImporter {
@@ -26,6 +27,7 @@ public enum ProfileImporter {
     public static func parse(_ input:String) throws -> ImportPreview {
         guard input.utf8.count<=2*1024*1024 else {throw ProxyError("导入内容超过 2 MiB")}
         let text=input.replacingOccurrences(of:"\u{feff}",with:"").trimmingCharacters(in:.whitespacesAndNewlines)
+        if let result=try FullSubscription.parse(text){return result}
         let first=text.components(separatedBy:.newlines).map{$0.trimmingCharacters(in:.whitespaces)}.first{!$0.isEmpty && !$0.hasPrefix("#")} ?? ""
         if ["hy2://","hysteria2://","ss://","trojan://","vless://"].contains(where:{first.lowercased().hasPrefix($0)}) {return ImportPreview(candidates:try NodeParser.parseList(text))}
         let compact=text.filter{!$0.isWhitespace};var padded=compact.replacingOccurrences(of:"-",with:"+").replacingOccurrences(of:"_",with:"/");padded+=String(repeating:"=",count:(4-padded.count%4)%4)
@@ -65,7 +67,7 @@ public enum ProfileImporter {
                     let parts=row.split(separator:",",omittingEmptySubsequences:false).map{$0.trimmingCharacters(in:.whitespaces)}
                     if parts.first?.uppercased()=="MATCH" {guard parts.count==2,!sawMatch,i==rows.count-1 else {throw ProxyError("MATCH 必须唯一且位于最后")};result.final=try resolve(parts[1]);sawMatch=true;continue}
                     guard parts.count==3 || (parts.count==4 && parts[3]=="no-resolve") else {throw ProxyError("规则格式不支持")}
-                    let target=try resolve(parts[2]);var rule=try RemoteRulesParser.clashCondition(parts[0],parts[1]);rule.action=target == .direct ? .direct : target == .reject ? .reject : .proxy;rule.target=target;result.rules.append(rule)
+                    let target=try resolve(parts[2]);var rule=try RemoteRulesParser.clashCondition(parts[0],parts[1]);rule.action=target == .direct ? .direct : target == .reject ? .reject : .proxy;rule.target=target;rule.noResolve=parts.count==4;result.rules.append(rule)
                 } catch {result.unsupported.append("规则 \(i+1)："+Redactor.redact(error.localizedDescription))}
             }
         } else if root["rules"] != nil {result.unsupported.append("rules 必须为字符串列表")}
@@ -79,6 +81,22 @@ public enum ProfileImporter {
     }
     private static func convertNode(_ p:[String:Any]) throws -> Candidate {
         guard let type=p["type"] as? String,let name=p["name"] as? String,let server=p["server"] as? String,let port=(p["port"] as? NSNumber)?.intValue,(1...65535).contains(port) else {throw ProxyError("名称、协议、地址或端口缺失")}
+        // 允许字段的类型必须明确，不能把错误类型静默降级为默认配置。
+        for key in ["udp","tls","skip-cert-verify"] where p[key] != nil {
+            guard let value=p[key] as? NSNumber,CFGetTypeID(value)==CFBooleanGetTypeID() else {throw ProxyError(key+" 必须为布尔值")}
+        }
+        if p["udp"] as? Bool == false {throw ProxyError("udp: false 暂不支持，不能完整导入该节点")}
+        guard let number=p["port"] as? NSNumber,CFGetTypeID(number) != CFBooleanGetTypeID(),number.doubleValue==Double(port) else {throw ProxyError("节点端口必须为整数")}
+        for key in ["sni","servername","network","flow","client-fingerprint","obfs","obfs-password","ports"] where p[key] != nil {
+            guard p[key] is String else {throw ProxyError(key+" 必须为字符串")}
+        }
+        if p["alpn"] != nil {guard let values=p["alpn"] as? [String],!values.isEmpty,values.allSatisfy({!$0.isEmpty}) else {throw ProxyError("alpn 必须为非空字符串列表")}}
+        for key in ["ws-opts","reality-opts"] where p[key] != nil {guard p[key] is [String:Any] else {throw ProxyError(key+" 必须为对象")}}
+        if let ws=p["ws-opts"] as? [String:Any] {
+            if ws["path"] != nil {guard ws["path"] is String else {throw ProxyError("WebSocket path 必须为字符串")}}
+            if ws["headers"] != nil {guard ws["headers"] is [String:String] else {throw ProxyError("WebSocket headers 必须为字符串映射")}}
+        }
+        if let reality=p["reality-opts"] as? [String:Any],reality["short-id"] != nil {guard reality["short-id"] is String else {throw ProxyError("Reality short-id 必须为字符串")}}
         var allowed:Set<String>=["name","type","server","port","udp"]
         var scheme=type,user="",password:String?;var params:[String:String]=[:]
         func string(_ key:String) throws -> String {guard let value=p[key] as? String,!value.isEmpty else {throw ProxyError("必需协议字段缺失")};return value}

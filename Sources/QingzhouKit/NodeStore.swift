@@ -26,7 +26,7 @@ public final class NodeStore {
                 if !FileManager.default.fileExists(atPath:backup.path){try SecureFile.write(data,to:backup)}
                 state.schemaVersion=2
             }
-        } else {state=AppState()}
+        } else {state=AppState();if let defaults=try ShadowrocketConfiguration.bundled(){state=try defaults.applying(to:state)}}
         catalog=ProfileCatalog(state:state)
         if FileManager.default.fileExists(atPath:file.path) {
             let snapshot=try BackupService.snapshot(catalog,credentials:credentials);let ref="migration-v3-"+UUID().uuidString;let password=UUID().uuidString+UUID().uuidString
@@ -78,11 +78,24 @@ public final class NodeStore {
                 next.nodes.append(node)
             }
             if var sub=subscription {
-                sub.updatedAt=Date();sub.pendingReview=false;sub.lastError=nil;sub.retryCount=0;sub.retryAfter=nil;sub.scope=scope;if let profile{sub.usage=profile.usage}
+                sub.updatedAt=Date();sub.pendingReview=false;sub.lastError=nil;sub.retryCount=0;sub.retryAfter=nil;sub.scope=scope;if let profile{sub.usage=profile.usage;sub.revision=profile.revision;if let name=profile.profileName{sub.name=name}}
                 if let source, (try? credentials.get(sub.sourceRef)) != source {if let old=state.subscriptions.first(where:{$0.id==sub.id}){retired.append(old.sourceRef)};sub.sourceRef=UUID().uuidString;created.append(sub.sourceRef);try credentials.set(source,for:sub.sourceRef)}
                 next.subscriptions.removeAll{$0.id==sub.id};next.subscriptions.append(sub)
             }
             if scope == .profile,let profile {
+                if let configuration=profile.fullConfiguration {
+                    guard let sub=subscription else{throw ProxyError("完整订阅需要保存订阅来源")}
+                    guard !next.subscriptions.contains(where:{$0.id != sub.id && $0.revision != nil}) else{throw ProxyError("当前配置只能关联一个完整配置订阅")}
+                    // 首次接入时只移除仍与已迁移默认规则完全一致的前缀，本地新增和修改保留。
+                    if state.subscriptions.first(where:{$0.id==sub.id})?.revision==nil,let previous=state.shadowrocket {
+                        let baseline=try previous.applying(to:AppState()).rules
+                        func signature(_ rule:RoutingRule)->String {"\(rule.kind)|\(rule.value)|\(rule.action)|\(rule.target?.tag ?? "")|\(rule.noResolve ?? false)"}
+                        if next.rules.count>=baseline.count,Array(next.rules.prefix(baseline.count)).allSatisfy({$0.subscriptionID==nil}),next.rules.prefix(baseline.count).map(signature)==baseline.map(signature) {next.rules.removeFirst(baseline.count)}
+                    }
+                    let merged=try configuration.applying(to:next)
+                    // 订阅提供规则与节点，不能覆盖用户选择的 DNS 或接管模式。
+                    next.shadowrocket=configuration;next.tunExcludedCIDRs=merged.tunExcludedCIDRs
+                }
                 guard profile.unsupported.isEmpty else {throw ProxyError("完整导入包含不支持内容，请选择仅节点")}
                 let oldGroups=subscription.map{sub in state.groups.filter{$0.subscriptionID==sub.id}} ?? []
                 if let sub=subscription {next.groups.removeAll{$0.subscriptionID==sub.id};next.rules.removeAll{$0.subscriptionID==sub.id}}

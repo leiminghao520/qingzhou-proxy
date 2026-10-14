@@ -3,6 +3,9 @@ import Darwin
 
 public enum ConfigBuilder {
     public static func validate(_ rule: RoutingRule) throws {
+        if rule.kind == .geoip {guard rule.value.range(of:"^[A-Z]{2}$",options:.regularExpression) != nil else{throw ProxyError("GEOIP 需要两位国家代码")};return}
+        if rule.kind == .asn {guard let number=UInt32(rule.value),number>0 else{throw ProxyError("ASN 编号无效")};return}
+        if rule.kind == .userAgent {guard !rule.value.isEmpty,rule.value.utf8.count<=512,!rule.value.contains(where:{$0.isNewline}) else{throw ProxyError("User-Agent 规则无效")};return}
         if rule.kind == .match {guard rule.value.isEmpty else {throw ProxyError("MATCH 不接受匹配内容")};return}
         guard !rule.value.isEmpty, rule.value == rule.value.trimmingCharacters(in: .whitespacesAndNewlines) else { throw ProxyError("规则内容不能为空或含首尾空格") }
         if rule.kind == .cidr {
@@ -17,6 +20,15 @@ public enum ConfigBuilder {
         } else {
             guard rule.value.range(of: #"^(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)*[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$"#, options: .regularExpression) != nil else { throw ProxyError("域名规则无效，请使用 ASCII 域名") }
         }
+    }
+    public static func coreCondition(_ rule:RoutingRule,state:AppState) throws -> [String:Any] {
+        if rule.kind == .geoip || rule.kind == .asn {
+            let key=(rule.kind == .geoip ? "GEOIP:":"IP-ASN:")+rule.value
+            guard let entries=state.shadowrocket?.assets[key],!entries.isEmpty else{throw ProxyError("地理或 ASN 规则资产缺失")}
+            return ["ip_cidr":entries]
+        }
+        guard rule.kind != .userAgent else{throw ProxyError("User-Agent 必须由 HTTP 兼容层处理")}
+        return RuleEvaluator.condition(rule)
     }
     public static func outbound(_ node: Node, credentials: CredentialStore) throws -> [String: Any] {
         let secret = try credentials.get(node.credentialRef)
@@ -52,13 +64,18 @@ public enum ConfigBuilder {
             rules.append(["domain":["localhost"],"action":"route","outbound":"direct"])
             for r in state.rules {
                 try validate(r)
+                if [.cidr,.geoip,.asn].contains(r.kind),r.noResolve != true {rules.append(["action":"resolve","strategy":state.effectiveAddressFamilyPolicy.strategy])}
+                if r.kind == .userAgent {continue}
                 let key = r.kind == .domain ? "domain" : r.kind == .suffix ? "domain_suffix" : r.kind == .keyword ? "domain_keyword" : "ip_cidr"
-                var value: [String:Any] = r.kind == .match ? [:] : [key:[r.value]]
+                var value: [String:Any] = try coreCondition(r,state:state)
                 if r.action == .reject { value["action"] = "reject" } else { value["action"] = "route"; value["outbound"] = r.action.rawValue }
+                if value["outbound"] as? String=="proxy",![.cidr,.geoip,.asn].contains(r.kind) {var resolution=try coreCondition(r,state:state);resolution["action"]="resolve";resolution["strategy"]=state.effectiveAddressFamilyPolicy.strategy;rules.append(resolution)}
                 rules.append(value)
             }
         }
-        let config: [String:Any] = ["log":["level":"info","timestamp":true],"inbounds":[["type":"mixed","tag":"mixed-in","listen":"127.0.0.1","listen_port":state.listenPort,"set_system_proxy":false]],"outbounds":[try outbound(node, credentials: credentials),["type":"direct","tag":"direct"]],"route":["rules":rules,"final":"proxy","default_domain_resolver":"local"],"dns":["servers":[["type":"local","tag":"local"]],"final":"local"]]
+        rules.append(["action":"resolve","strategy":state.effectiveAddressFamilyPolicy.strategy])
+        var config: [String:Any] = ["log":["level":"info","timestamp":true],"inbounds":[["type":"mixed","tag":"mixed-in","listen":"127.0.0.1","listen_port":state.listenPort,"set_system_proxy":false]],"outbounds":[try outbound(node, credentials: credentials),["type":"direct","tag":"direct"]],"route":["rules":rules,"final":"proxy","default_domain_resolver":"local"],"dns":["servers":[["type":"local","tag":"local"]],"final":"local"]]
+        NetworkPolicy.apply(&config,state:state)
         return try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted,.sortedKeys])
     }
 }

@@ -14,8 +14,12 @@ struct ProxyJournal: Codable { var records: [ProxyRecord] }
     public let journal: URL
     private var authorization: AuthorizationRef?
     public var onNetworkChange: (() -> Void)?
+    public var onEnvironmentChange:(() -> Void)?
+    public var log:((String)->Void)?
     private var monitor: SCDynamicStore?
     private var monitoredSignature: String?
+    private var ownedPort:Int?
+    private var ownershipMismatchCount=0
     private let preferencesFactory: (() throws -> SCPreferences)?
     private let commitHandler: ((SCPreferences) throws -> Void)?
     public init(journal: URL, preferencesFactory: (() throws -> SCPreferences)? = nil, commitHandler: ((SCPreferences) throws -> Void)? = nil) {
@@ -45,8 +49,9 @@ struct ProxyJournal: Codable { var records: [ProxyRecord] }
         if let commitHandler {try commitHandler(preferences);return}
         guard SCPreferencesCommitChanges(preferences), SCPreferencesApplyChanges(preferences) else { throw ProxyError("系统代理修改失败，请执行恢复原代理") }
     }
-    public func apply(port: Int) throws {
+    public func apply(port: Int,ownedTunDNS:String?=nil) throws {
         guard !hasRecovery else { throw ProxyError("存在未恢复的代理设置，请先恢复原代理") }
+        if preferencesFactory==nil {try NetworkSafety.check(ownedDNS:ownedTunDNS)}
         let p = try preferences(); defer {SCPreferencesUnlock(p)}
         guard let set = SCNetworkSetCopyCurrent(p), let services = SCNetworkSetCopyServices(set) as? [SCNetworkService] else { throw ProxyError("无法读取当前网络服务") }
         var records: [ProxyRecord] = []
@@ -67,6 +72,8 @@ struct ProxyJournal: Codable { var records: [ProxyRecord] }
             if !record.hadProtocol, !SCNetworkServiceAddProtocolType(service,kSCNetworkProtocolTypeProxies) { throw ProxyError("无法添加代理协议") }
             guard let proto = SCNetworkServiceCopyProtocol(service,kSCNetworkProtocolTypeProxies), SCNetworkProtocolSetConfiguration(proto,try dict(record.applied) as CFDictionary), SCNetworkProtocolSetEnabled(proto,true) else { throw ProxyError("无法设置系统代理") }
         }
+        ownedPort=port;ownershipMismatchCount=0
+        monitoredSignature=signature()
         try commit(p)
     }
     public func restore() throws {
@@ -80,33 +87,91 @@ struct ProxyJournal: Codable { var records: [ProxyRecord] }
             guard let proto = SCNetworkServiceCopyProtocol(service,kSCNetworkProtocolTypeProxies) else { continue }
             let current = SCNetworkProtocolGetConfiguration(proto) as? [String:Any] ?? [:]
             let original = try dict(record.original)
+            let safeOriginal=NetworkSafety.restoration(original,listening:NetworkSafety.loopbackListening)
+            if !NSDictionary(dictionary:safeOriginal).isEqual(to:original){log?("恢复快照中的回环代理已停止监听，恢复本次拥有的设置时不再启用该失效入口")}
             if NSDictionary(dictionary:current).isEqual(to:original), SCNetworkProtocolGetEnabled(proto) == record.originallyEnabled { continue }
-            guard SCNetworkProtocolGetEnabled(proto), let restored = ProxyRecovery.restored(original:original,applied:try dict(record.applied),current:current) else { conflicts.append(record); continue }
+            guard SCNetworkProtocolGetEnabled(proto), let restored = ProxyRecovery.restored(original:safeOriginal,applied:try dict(record.applied),current:current) else { conflicts.append(record); continue }
             guard SCNetworkProtocolSetConfiguration(proto,restored as CFDictionary), SCNetworkProtocolSetEnabled(proto,record.originallyEnabled) else { conflicts.append(record); continue }
             if !record.hadProtocol && restored.isEmpty && !SCNetworkServiceRemoveProtocolType(service,kSCNetworkProtocolTypeProxies) {conflicts.append(record)}
         }
         try commit(p)
+        ownedPort=nil;ownershipMismatchCount=0
+        monitoredSignature=signature()
         if conflicts.isEmpty { try FileManager.default.removeItem(at:journal) }
-        else { try save(conflicts); throw ProxyError("部分网络服务已被外部修改，未覆盖其设置；请检查系统代理后重试恢复") }
+        else { log?("代理恢复存在外部修改冲突，保留恢复记录，未覆盖外部设置");try save(conflicts); throw ProxyError("部分网络服务已被外部修改，未覆盖其设置；请检查系统代理后重试恢复") }
+    }
+    public func verifyApplied() async throws {
+        for _ in 0..<30 {
+            guard hasRecovery,let changes=ownershipChanges(),changes.isEmpty else {throw ProxyError("系统代理提交后的持久配置核对失败")}
+            if let settings=SCDynamicStoreCopyProxies(nil) as? [String:Any],let port=ownedPort,
+               ["HTTP","HTTPS"].allSatisfy({prefix in (settings[prefix+"Enable"] as? NSNumber)?.intValue==1 && settings[prefix+"Proxy"] as? String=="127.0.0.1" && (settings[prefix+"Port"] as? NSNumber)?.intValue==port}) {return}
+            // 系统动态配置可能晚于持久提交收敛，限定预算等待，不把瞬态当成失败。
+            try await Task.sleep(nanoseconds:100_000_000)
+        }
+        throw ProxyError("系统代理入口在三秒内未生效")
     }
     public func startMonitoring() {
         var context = SCDynamicStoreContext(version:0,info:Unmanaged.passUnretained(self).toOpaque(),retain:nil,release:nil,copyDescription:nil)
         monitor = SCDynamicStoreCreate(nil,"轻舟网络监控" as CFString,{ _, _, info in
             guard let info else { return }
             let controller = Unmanaged<SystemProxyController>.fromOpaque(info).takeUnretainedValue()
-            Task { @MainActor in controller.checkNetwork() }
+            Task { @MainActor in
+                // 等待本应用提交的动态设置收敛，随后再判断外部变更。
+                try? await Task.sleep(nanoseconds:300_000_000)
+                controller.checkNetwork()
+            }
         },&context)
         guard let monitor else { return }
-        SCDynamicStoreSetNotificationKeys(monitor,nil,["State:/Network/Global/IPv4","State:/Network/Global/IPv6","Setup:/Network/Global/IPv4","Setup:/Network/Global/IPv6"] as CFArray)
+        SCDynamicStoreSetNotificationKeys(monitor,nil,["State:/Network/Global/IPv4","State:/Network/Global/IPv6","Setup:/Network/Global/IPv4","Setup:/Network/Global/IPv6","State:/Network/Global/DNS","State:/Network/Global/Proxies","State:/Network/Service/.*/DNS","State:/Network/Service/.*/Proxies","Setup:/Network/Service/.*/DNS","Setup:/Network/Service/.*/Proxies"] as CFArray)
         SCDynamicStoreSetDispatchQueue(monitor,DispatchQueue.main)
         monitoredSignature = signature()
     }
     private func signature() -> String {
         guard let monitor else { return "" }
-        return ["State:/Network/Global/IPv4","State:/Network/Global/IPv6"].map {key in
-            let values = SCDynamicStoreCopyValue(monitor,key as CFString) as? [String:Any] ?? [:]
+        let primary=["State:/Network/Global/IPv4","State:/Network/Global/IPv6"].map {key in
+            let values=SCDynamicStoreCopyValue(monitor,key as CFString) as? [String:Any] ?? [:]
             return "\(values["PrimaryService"] ?? "")|\(values["PrimaryInterface"] ?? "")"
-        }.joined(separator:";")
+        }
+        let pattern=ownedPort==nil ? "State:/Network/.*(DNS|Proxies)$":"State:/Network/.*DNS$"
+        let keys=(SCDynamicStoreCopyKeyList(monitor,pattern as CFString) as? [String] ?? []).sorted()
+        let settings=keys.map{key -> String in
+            let values=SCDynamicStoreCopyValue(monitor,key as CFString) as? [String:Any] ?? [:]
+            let data=(try? JSONSerialization.data(withJSONObject:values,options:.sortedKeys)) ?? Data()
+            return key+":"+data.base64EncodedString()
+        }
+        return (primary+settings).joined(separator:";")
     }
-    private func checkNetwork() { let value = signature(); if let old = monitoredSignature, old != value { onNetworkChange?() }; monitoredSignature = value }
+    private func ownershipChanges()->[String]? {
+        guard let data=try? Data(contentsOf:journal),let records=try? JSONDecoder().decode(ProxyJournal.self,from:data),let preferences=SCPreferencesCreate(nil,"轻舟所有权核对" as CFString,nil) else{return nil}
+        var changes=Set<String>()
+        for record in records.records {
+            guard let service=SCNetworkServiceCopy(preferences,record.serviceID as CFString),let proto=SCNetworkServiceCopyProtocol(service,kSCNetworkProtocolTypeProxies),let current=SCNetworkProtocolGetConfiguration(proto) as? [String:Any],let expected=try? dict(record.applied) else{return nil}
+            if !SCNetworkProtocolGetEnabled(proto){changes.insert("ProtocolEnabled")}
+            changes.formUnion(ProxyRecovery.changedOwnedKeys(expected:expected,current:current))
+        }
+        return changes.sorted()
+    }
+    private func checkNetwork() {
+        let value=signature();let environmentChanged=monitoredSignature.map{$0 != value} ?? false
+        monitoredSignature=value
+        guard ownedPort != nil else {ownershipMismatchCount=0;return}
+        // DNS、网络状态及系统合成代理字段变化不代表持久代理所有权丢失。
+        guard let changes=ownershipChanges() else {
+            if environmentChanged{log?("网络监控：所有权暂无法核对，保留连接")}
+            return
+        }
+        if changes.isEmpty {
+            ownershipMismatchCount=0
+            if environmentChanged{log?("网络监控：环境更新，代理所有权正常，重新检测链路");onEnvironmentChange?()}
+            return
+        }
+        ownershipMismatchCount+=1
+        log?("网络监控：持久代理字段变更 keys="+changes.joined(separator:","))
+        if ownershipMismatchCount>=2 {ownershipMismatchCount=0;onNetworkChange?();return}
+        // 再次核对稳定状态，避免系统提交期间的短暂变化被当成外部接管。
+        Task{ @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds:1_000_000_000)
+            self?.checkNetwork()
+        }
+    }
 }

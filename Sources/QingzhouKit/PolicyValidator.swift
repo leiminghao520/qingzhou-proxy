@@ -5,8 +5,15 @@ public enum PolicyValidator {
         switch ref {case .node(let id):return state.nodes.contains{$0.id==id};case .group(let id):return state.groups.contains{$0.id==id};case .automatic:return !state.nodes.isEmpty;case .selected,.direct,.reject:return true}
     }
     public static func validate(_ state:AppState) throws {
+        if let shadow=state.shadowrocket {try shadow.validate()}
+        for rule in state.rules where rule.kind == .geoip || rule.kind == .asn {
+            let key=(rule.kind == .geoip ? "GEOIP:":"IP-ASN:")+rule.value
+            guard state.shadowrocket?.assets[key]?.isEmpty==false else{throw ProxyError("地理或 ASN 规则资产缺失")}
+        }
+        guard !state.rules.contains(where:{$0.kind == .userAgent}) || state.shadowrocket != nil else{throw ProxyError("User-Agent 缺少 HTTP 兼容配置")}
         guard Set(state.nodes.map(\.id)).count==state.nodes.count,Set(state.groups.map(\.id)).count==state.groups.count else {throw ProxyError("节点或策略 ID 重复")}
         guard state.nodes.count<=2000,state.groups.count<=2000,state.rules.count<=50000,state.remoteRules.reduce(0,{$0+$1.rules.count})<=50000,state.tunExcludedCIDRs.count<=100 else{throw ProxyError("配置数量超过限制")}
+        guard state.protectedDomains.count<=100 else{throw ProxyError("内网域名超过限制")};for domain in state.protectedDomains {try ConfigBuilder.validate(RoutingRule(kind:.suffix,value:domain,action:.direct))}
         for cidr in state.tunExcludedCIDRs{try ConfigBuilder.validate(RoutingRule(kind:.cidr,value:cidr,action:.direct))}
         for source in state.remoteRules{for rule in source.rules{try ConfigBuilder.validate(rule)}}
         var visiting=Set<UUID>(),finished=Set<UUID>()

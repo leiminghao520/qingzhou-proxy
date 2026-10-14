@@ -20,9 +20,9 @@ final class ConfigTests: CheckCase {
     }
     func testRulesAndModes() throws {
         var state = AppState();state.rules = [RoutingRule(kind:.domain,value:"example.com",action:.reject),RoutingRule(kind:.suffix,value:"example.org",action:.direct),RoutingRule(kind:.cidr,value:"192.0.2.0/24",action:.proxy)]
-        let config = try build("hy2://p@example.com",state:state);let route = config["route"] as! [String:Any];let rules = route["rules"] as! [[String:Any]]
+        let config = try build("hy2://p@example.com",state:state);let route = config["route"] as! [String:Any];let rules = (route["rules"] as! [[String:Any]]).filter{$0["action"] as? String != "resolve" && $0["ip_version"] == nil}
         expectEqual(rules.count,5);expectEqual(rules[2]["action"] as? String,"reject");expectEqual(route["final"] as? String,"proxy")
-        state.rulesEnabled = false;let all = try build("hy2://p@example.com",state:state);expectEqual(((all["route"] as! [String:Any])["rules"] as! [[String:Any]]).count,0)
+        state.rulesEnabled = false;let all = try build("hy2://p@example.com",state:state);expectEqual(((all["route"] as! [String:Any])["rules"] as! [[String:Any]]).filter{$0["action"] as? String != "resolve" && $0["ip_version"] == nil}.count,0)
         state.listenPort = 0;expectThrows(try build("hy2://p@example.com",state:state))
     }
     func testRuleValidation() throws {

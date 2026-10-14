@@ -43,12 +43,13 @@ public struct UsageInfo: Codable, Sendable {
 }
 public enum ImportScope: String, Codable, Sendable {case nodes, profile}
 public struct Subscription: Codable, Identifiable, Sendable {
+    public var revision:String?
     public var id: UUID; public var name: String; public var sourceRef: String; public var updatedAt: Date
     public var autoUpdate: Bool; public var scope: ImportScope; public var usage: UsageInfo?; public var lastError: String?; public var pendingReview: Bool; public var retryCount: Int; public var retryAfter: Date?
     public init(id: UUID = UUID(), name: String, sourceRef: String = UUID().uuidString, updatedAt: Date = Date()) {self.id=id;self.name=name;self.sourceRef=sourceRef;self.updatedAt=updatedAt;autoUpdate=true;scope = .nodes;pendingReview=false;retryCount=0}
-    enum CodingKeys: String,CodingKey {case id,name,sourceRef,updatedAt,autoUpdate,scope,usage,lastError,pendingReview,retryCount,retryAfter}
+    enum CodingKeys: String,CodingKey {case revision,id,name,sourceRef,updatedAt,autoUpdate,scope,usage,lastError,pendingReview,retryCount,retryAfter}
     public init(from decoder: Decoder) throws {
-        let c=try decoder.container(keyedBy:CodingKeys.self);id=try c.decode(UUID.self,forKey:.id);name=try c.decode(String.self,forKey:.name);sourceRef=try c.decode(String.self,forKey:.sourceRef);updatedAt=try c.decode(Date.self,forKey:.updatedAt)
+        let c=try decoder.container(keyedBy:CodingKeys.self);revision=try c.decodeIfPresent(String.self,forKey:.revision);id=try c.decode(UUID.self,forKey:.id);name=try c.decode(String.self,forKey:.name);sourceRef=try c.decode(String.self,forKey:.sourceRef);updatedAt=try c.decode(Date.self,forKey:.updatedAt)
         autoUpdate=try c.decodeIfPresent(Bool.self,forKey:.autoUpdate) ?? true;scope=try c.decodeIfPresent(ImportScope.self,forKey:.scope) ?? .nodes;usage=try c.decodeIfPresent(UsageInfo.self,forKey:.usage);lastError=try c.decodeIfPresent(String.self,forKey:.lastError);pendingReview=try c.decodeIfPresent(Bool.self,forKey:.pendingReview) ?? false;retryCount=try c.decodeIfPresent(Int.self,forKey:.retryCount) ?? 0;retryAfter=try c.decodeIfPresent(Date.self,forKey:.retryAfter)
     }
 }
@@ -65,10 +66,10 @@ public struct PolicyGroup: Codable,Identifiable,Sendable {
     public init(id:UUID=UUID(),name:String,kind:GroupKind,members:[PolicyReference],selected:PolicyReference?=nil,subscriptionID:UUID?=nil) {self.id=id;self.name=name;self.kind=kind;self.members=members;self.selected=selected;self.subscriptionID=subscriptionID}
 }
 public struct LatencyResult:Codable,Sendable {public var milliseconds:Int?;public var testedAt:Date;public init(milliseconds:Int?,testedAt:Date=Date()){self.milliseconds=milliseconds;self.testedAt=testedAt}}
-public enum RuleKind: String, Codable, CaseIterable, Sendable { case domain, suffix, keyword, cidr, match }
+public enum RuleKind: String, Codable, CaseIterable, Sendable { case domain, suffix, keyword, cidr, match, geoip, asn, userAgent }
 public enum RuleAction: String, Codable, CaseIterable, Sendable { case direct, proxy, reject }
 public struct RoutingRule: Codable, Identifiable, Sendable {
-    public var id = UUID();public var kind: RuleKind;public var value: String;public var action: RuleAction;public var target:PolicyReference?;public var subscriptionID:UUID?
+    public var noResolve:Bool?;public var id = UUID();public var kind: RuleKind;public var value: String;public var action: RuleAction;public var target:PolicyReference?;public var subscriptionID:UUID?
     public init(kind: RuleKind, value: String, action: RuleAction,target:PolicyReference?=nil,subscriptionID:UUID?=nil) {self.kind=kind;self.value=value;self.action=action;self.target=target;self.subscriptionID=subscriptionID}
 }
 public struct RemoteRuleSource:Codable,Identifiable,Sendable {
@@ -76,21 +77,25 @@ public struct RemoteRuleSource:Codable,Identifiable,Sendable {
     public init(name:String,sourceRef:String=UUID().uuidString,target:PolicyReference = .selected){self.name=name;self.sourceRef=sourceRef;self.target=target}
 }
 public struct AppState: Codable, Sendable {
-    public var schemaVersion = 2;public var nodes:[Node]=[];public var subscriptions:[Subscription]=[];public var rules:[RoutingRule]=[]
+    public var httpCompatibilityEnabled=false
+    public var usesHTTPCompatibility:Bool {httpCompatibilityEnabled && shadowrocket != nil}
+    public var shadowrocket:ShadowrocketConfiguration?;public var schemaVersion = 2;public var nodes:[Node]=[];public var subscriptions:[Subscription]=[];public var rules:[RoutingRule]=[]
     public var mode:ProxyMode = .rule;public var listenPort=7890;public var selectedID:UUID?;public var selectedPolicy:PolicyReference?;public var groups:[PolicyGroup]=[];public var remoteRules:[RemoteRuleSource]=[];public var favorites:Set<UUID>=[];public var latency:[String:LatencyResult]=[:];public var ruleFinal:PolicyReference?;public var autoConnect=false;public var loginAtStartup=false
-    public var captureMode:CaptureMode = .systemProxy;public var dnsPreference:DNSPreference = .httpsProxy;public var notes:[String:String]=[:];public var recentUse:[String:Date]=[:];public var compactNodes=false;public var shortcutEnabled=false;public var shortcutKey:UInt32=35;public var shortcutModifiers:UInt32=2304;public var tunExcludedCIDRs:[String]=[]
+    public var addressFamilyPolicy:AddressFamilyPolicy?
+    public var effectiveAddressFamilyPolicy:AddressFamilyPolicy {addressFamilyPolicy ?? .ipv4Only}
+    public var captureMode:CaptureMode = .systemProxy;public var dnsPreference:DNSPreference = .httpsProxy;public var notes:[String:String]=[:];public var recentUse:[String:Date]=[:];public var compactNodes=false;public var shortcutEnabled=false;public var shortcutKey:UInt32=35;public var shortcutModifiers:UInt32=2304;public var tunExcludedCIDRs:[String]=[];public var protectedDomains:[String]=[]
     public var rulesEnabled:Bool {get {mode == .rule} set {mode = newValue ? .rule : .global}}
     public var activePolicy:PolicyReference? {selectedPolicy ?? selectedID.map(PolicyReference.node)}
     public init() {}
-    enum CodingKeys:String,CodingKey {case shortcutEnabled,shortcutKey,shortcutModifiers,tunExcludedCIDRs,captureMode,dnsPreference,notes,recentUse,compactNodes,schemaVersion,nodes,subscriptions,rules,mode,listenPort,selectedID,selectedPolicy,groups,remoteRules,favorites,latency,ruleFinal,autoConnect,loginAtStartup}
+    enum CodingKeys:String,CodingKey {case httpCompatibilityEnabled,protectedDomains,addressFamilyPolicy,shadowrocket,shortcutEnabled,shortcutKey,shortcutModifiers,tunExcludedCIDRs,captureMode,dnsPreference,notes,recentUse,compactNodes,schemaVersion,nodes,subscriptions,rules,mode,listenPort,selectedID,selectedPolicy,groups,remoteRules,favorites,latency,ruleFinal,autoConnect,loginAtStartup}
     enum LegacyKeys:String,CodingKey {case rulesEnabled}
     public init(from decoder:Decoder) throws {
-        let c=try decoder.container(keyedBy:CodingKeys.self);schemaVersion=try c.decodeIfPresent(Int.self,forKey:.schemaVersion) ?? 1
+        let c=try decoder.container(keyedBy:CodingKeys.self);httpCompatibilityEnabled=try c.decodeIfPresent(Bool.self,forKey:.httpCompatibilityEnabled) ?? false;shadowrocket=try c.decodeIfPresent(ShadowrocketConfiguration.self,forKey:.shadowrocket);schemaVersion=try c.decodeIfPresent(Int.self,forKey:.schemaVersion) ?? 1
         nodes=try c.decodeIfPresent([Node].self,forKey:.nodes) ?? [];subscriptions=try c.decodeIfPresent([Subscription].self,forKey:.subscriptions) ?? [];rules=try c.decodeIfPresent([RoutingRule].self,forKey:.rules) ?? []
         let old=try decoder.container(keyedBy:LegacyKeys.self);mode=try c.decodeIfPresent(ProxyMode.self,forKey:.mode) ?? ((try old.decodeIfPresent(Bool.self,forKey:.rulesEnabled) ?? true) ? .rule : .global)
         listenPort=try c.decodeIfPresent(Int.self,forKey:.listenPort) ?? 7890;selectedID=try c.decodeIfPresent(UUID.self,forKey:.selectedID);selectedPolicy=try c.decodeIfPresent(PolicyReference.self,forKey:.selectedPolicy)
         groups=try c.decodeIfPresent([PolicyGroup].self,forKey:.groups) ?? [];remoteRules=try c.decodeIfPresent([RemoteRuleSource].self,forKey:.remoteRules) ?? [];favorites=try c.decodeIfPresent(Set<UUID>.self,forKey:.favorites) ?? [];latency=try c.decodeIfPresent([String:LatencyResult].self,forKey:.latency) ?? [:];ruleFinal=try c.decodeIfPresent(PolicyReference.self,forKey:.ruleFinal)
-        captureMode=try c.decodeIfPresent(CaptureMode.self,forKey:.captureMode) ?? .systemProxy;dnsPreference=try c.decodeIfPresent(DNSPreference.self,forKey:.dnsPreference) ?? .httpsProxy;notes=try c.decodeIfPresent([String:String].self,forKey:.notes) ?? [:];recentUse=try c.decodeIfPresent([String:Date].self,forKey:.recentUse) ?? [:];compactNodes=try c.decodeIfPresent(Bool.self,forKey:.compactNodes) ?? false;shortcutEnabled=try c.decodeIfPresent(Bool.self,forKey:.shortcutEnabled) ?? false;shortcutKey=try c.decodeIfPresent(UInt32.self,forKey:.shortcutKey) ?? 35;shortcutModifiers=try c.decodeIfPresent(UInt32.self,forKey:.shortcutModifiers) ?? 2304;tunExcludedCIDRs=try c.decodeIfPresent([String].self,forKey:.tunExcludedCIDRs) ?? []
+        addressFamilyPolicy=try c.decodeIfPresent(AddressFamilyPolicy.self,forKey:.addressFamilyPolicy);captureMode=try c.decodeIfPresent(CaptureMode.self,forKey:.captureMode) ?? .systemProxy;dnsPreference=try c.decodeIfPresent(DNSPreference.self,forKey:.dnsPreference) ?? .httpsProxy;notes=try c.decodeIfPresent([String:String].self,forKey:.notes) ?? [:];recentUse=try c.decodeIfPresent([String:Date].self,forKey:.recentUse) ?? [:];compactNodes=try c.decodeIfPresent(Bool.self,forKey:.compactNodes) ?? false;shortcutEnabled=try c.decodeIfPresent(Bool.self,forKey:.shortcutEnabled) ?? false;shortcutKey=try c.decodeIfPresent(UInt32.self,forKey:.shortcutKey) ?? 35;shortcutModifiers=try c.decodeIfPresent(UInt32.self,forKey:.shortcutModifiers) ?? 2304;protectedDomains=try c.decodeIfPresent([String].self,forKey:.protectedDomains) ?? [];tunExcludedCIDRs=try c.decodeIfPresent([String].self,forKey:.tunExcludedCIDRs) ?? []
         autoConnect=try c.decodeIfPresent(Bool.self,forKey:.autoConnect) ?? false;loginAtStartup=try c.decodeIfPresent(Bool.self,forKey:.loginAtStartup) ?? false
     }
     public func label(_ ref:PolicyReference?) -> String {
