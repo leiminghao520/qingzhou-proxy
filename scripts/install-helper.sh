@@ -19,7 +19,7 @@ app,root,uid=sys.argv[1:];root=pathlib.Path(root)
 text=subprocess.run(['/usr/bin/codesign','-d','--verbose=4',app],capture_output=True,text=True,check=True).stderr
 match=re.search(r'^CDHash=([0-9a-f]+)$',text,re.M)
 if not match: raise SystemExit('客户端代码身份无法读取')
-manifest={'version':'0.3.0','uid':int(uid),'clientHash':match[1],'coreHash':hashlib.sha256((root/'sing-box').read_bytes()).hexdigest(),'helperHash':hashlib.sha256((root/'QingzhouHelper').read_bytes()).hexdigest()}
+manifest={'version':'0.6.0','uid':int(uid),'clientHash':match[1],'coreHash':hashlib.sha256((root/'sing-box').read_bytes()).hexdigest(),'helperHash':hashlib.sha256((root/'QingzhouHelper').read_bytes()).hexdigest()}
 p=root/'manifest.json';p.write_text(json.dumps(manifest));p.chmod(0o600)
 import plistlib
 value={'Label':'cn.qingzhou.proxy.helper','ProgramArguments':[str(root/'QingzhouHelper')],'RunAtLoad':True,'KeepAlive':True,'ThrottleInterval':10,'UserName':'root','WorkingDirectory':str(root),'Umask':63,'StandardOutPath':'/dev/null','StandardErrorPath':'/dev/null'}

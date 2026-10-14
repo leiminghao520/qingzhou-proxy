@@ -26,6 +26,7 @@ public enum ProfileImporter {
     public static func parse(_ input:String) throws -> ImportPreview {
         guard input.utf8.count<=2*1024*1024 else {throw ProxyError("导入内容超过 2 MiB")}
         let text=input.replacingOccurrences(of:"\u{feff}",with:"").trimmingCharacters(in:.whitespacesAndNewlines)
+        if let result=try FullSubscription.parse(text){return result}
         let first=text.components(separatedBy:.newlines).map{$0.trimmingCharacters(in:.whitespaces)}.first{!$0.isEmpty && !$0.hasPrefix("#")} ?? ""
         if ["hy2://","hysteria2://","ss://","trojan://","vless://"].contains(where:{first.lowercased().hasPrefix($0)}) {return ImportPreview(candidates:try NodeParser.parseList(text))}
         let compact=text.filter{!$0.isWhitespace};var padded=compact.replacingOccurrences(of:"-",with:"+").replacingOccurrences(of:"_",with:"/");padded+=String(repeating:"=",count:(4-padded.count%4)%4)

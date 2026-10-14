@@ -1,6 +1,9 @@
 import Foundation
 
-public enum CaptureMode:String,Codable,CaseIterable,Sendable {case systemProxy,tun}
+public enum CaptureMode:String,Codable,CaseIterable,Sendable {case systemProxy,tun,compatible
+    public var usesTunnel:Bool {self != .systemProxy}
+    public var label:String {switch self {case .systemProxy:return "系统代理";case .tun:return "TUN";case .compatible:return "兼容接管"}}
+}
 public enum DNSPreference:String,Codable,CaseIterable,Sendable {case system,httpsProxy}
 public struct ClientProfile:Codable,Identifiable,Sendable {
     public var id=UUID();public var name:String;public var configuration:AppState

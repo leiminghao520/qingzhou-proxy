@@ -6,6 +6,8 @@ mkdir -p "$output"
 output="$(cd "$output" && pwd)"
 python3 scripts/fetch-core.py
 python3 scripts/verify-yams.py
+mkdir -p .build/httpcompat
+(cd tools/httpcompat && go test -race ./... && go build -trimpath -o ../../.build/httpcompat/qzhttp .)
 scripts/swift-local.sh build -c release --product Qingzhou
 scripts/swift-local.sh build -c release --product QingzhouRunner
 scripts/swift-local.sh build -c release --product QingzhouHelper
@@ -16,6 +18,8 @@ if [ -e "$app" ]; then
 fi
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp .build/release/Qingzhou "$app/Contents/MacOS/Qingzhou"
+cp .build/httpcompat/qzhttp "$app/Contents/Resources/qzhttp"
+cp Resources/shadowrocket-default.json "$app/Contents/Resources/shadowrocket-default.json"
 cp .build/release/QingzhouHelper "$app/Contents/Resources/QingzhouHelper"
 cp scripts/install-helper.sh scripts/uninstall-helper.sh scripts/recover-helper.sh "$app/Contents/Resources/"
 cp .build/release/QingzhouRunner "$app/Contents/Resources/QingzhouRunner"
@@ -32,25 +36,25 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>轻舟代理</string>
 <key>CFBundleDisplayName</key><string>轻舟代理</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.3.0</string>
-<key>CFBundleVersion</key><string>3</string>
+<key>CFBundleShortVersionString</key><string>0.6.0</string>
+<key>CFBundleVersion</key><string>6</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict></plist>
 PLIST
-if [ ! -f .build/AppIcon.icns ]; then
+if [ -f scripts/make-modern-icon.swift ]; then
+    mkdir -p .build/icon-png
+    swift scripts/make-modern-icon.swift .build/icon-png
+    python3 scripts/make-icns.py .build/icon-png .build/AppIcon.icns
+elif [ ! -f .build/AppIcon.icns ]; then
     mkdir -p .build/icon-png .build/AppIcon.iconset
     CLANG_MODULE_CACHE_PATH="$PWD/.build/module-cache" swift -module-cache-path "$PWD/.build/module-cache" scripts/icon.swift .build/icon-png
-    for size in 16 32 128 256 512; do
-        cp ".build/icon-png/size-$size.png" ".build/AppIcon.iconset/icon_${size}x${size}.png"
-        double=$((size * 2))
-        cp ".build/icon-png/size-$double.png" ".build/AppIcon.iconset/icon_${size}x${size}@2x.png"
-    done
     python3 scripts/make-icns.py .build/icon-png .build/AppIcon.icns
 fi
 cp .build/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
+codesign --force --sign - "$app/Contents/Resources/qzhttp"
 codesign --force --sign - "$app/Contents/Resources/sing-box"
 codesign --force --sign - "$app/Contents/Resources/QingzhouRunner"
 codesign --force --sign - "$app/Contents/Resources/QingzhouHelper"

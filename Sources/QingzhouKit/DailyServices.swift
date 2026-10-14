@@ -41,7 +41,7 @@ public enum RuleEvaluator {
     public static func condition(_ rule:RoutingRule)->[String:Any] {let key=rule.kind == .domain ? "domain":rule.kind == .suffix ? "domain_suffix":rule.kind == .keyword ? "domain_keyword":"ip_cidr";return rule.kind == .match ? [:]:[key:[rule.value]]}
     public static func matches(_ rule:RoutingRule,host:String,ip:String?) -> Bool? {
         let host=host.lowercased(),value=rule.value.lowercased()
-        switch rule.kind {case .domain:return host==value;case .suffix:return host==value || host.hasSuffix("."+value);case .keyword:return host.contains(value);case .match:return true;case .cidr:
+        switch rule.kind {case .domain:return host==value;case .suffix:return host==value || host.hasSuffix("."+value);case .keyword:return host.contains(value);case .match:return true;case .geoip,.asn,.userAgent:return nil;case .cidr:
             guard let ip else{return nil};let parts=value.split(separator:"/",omittingEmptySubsequences:false);guard !parts.isEmpty else{return false};var address=[UInt8](repeating:0,count:16),network=[UInt8](repeating:0,count:16)
             let family=ip.withCString{inet_pton(AF_INET,$0,&address)==1 ? AF_INET:inet_pton(AF_INET6,$0,&address)==1 ? AF_INET6:0};guard family != 0,String(parts[0]).withCString({inet_pton(family,$0,&network)})==1 else{return false};guard parts.count<=2,let bits=parts.count==2 ? Int(parts[1]):(family==AF_INET ? 32:128),(0...(family==AF_INET ? 32:128)).contains(bits) else{return false}
             for i in 0..<bits {let mask=UInt8(1 << (7-i%8));if address[i/8]&mask != network[i/8]&mask{return false}};return true

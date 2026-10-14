@@ -21,10 +21,13 @@ import CFNetwork
     }
     public static func portAvailable(_ port: Int) -> Bool {
         let fd = socket(AF_INET,SOCK_STREAM,0); guard fd >= 0 else { return false }; defer {close(fd)}
+        // 与核心监听器一致，允许复用已关闭连接的 TCP 等待状态；仍拒绝活动监听器。
+        var reuse:Int32=1
+        guard setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&reuse,socklen_t(MemoryLayout<Int32>.size))==0 else{return false}
         var address = sockaddr_in(); address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size); address.sin_family = sa_family_t(AF_INET); address.sin_port = UInt16(port).bigEndian; address.sin_addr.s_addr = inet_addr("127.0.0.1")
         return withUnsafePointer(to:&address) {$0.withMemoryRebound(to:sockaddr.self,capacity:1) {Darwin.bind(fd,$0,socklen_t(MemoryLayout<sockaddr_in>.size)) == 0}}
     }
-    public static func listening(_ port: Int) -> Bool {
+    nonisolated public static func listening(_ port: Int) -> Bool {
         let fd = socket(AF_INET,SOCK_STREAM,0); guard fd >= 0 else { return false }; defer {close(fd)}
         var address = sockaddr_in(); address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size); address.sin_family = sa_family_t(AF_INET); address.sin_port = UInt16(port).bigEndian; address.sin_addr.s_addr = inet_addr("127.0.0.1")
         return withUnsafePointer(to:&address) {$0.withMemoryRebound(to:sockaddr.self,capacity:1) {Darwin.connect(fd,$0,socklen_t(MemoryLayout<sockaddr_in>.size)) == 0}}

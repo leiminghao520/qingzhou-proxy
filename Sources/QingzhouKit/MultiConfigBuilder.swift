@@ -18,7 +18,7 @@ public struct CoreControlContext:Codable,Sendable {
 }
 extension ConfigBuilder {
     public static let testURL="https://www.apple.com/library/test/success.html"
-    public static func build(state:AppState,credentials:CredentialStore,control:CoreControlContext) throws -> Data {
+    public static func build(state:AppState,credentials:CredentialStore,control:CoreControlContext,httpCompatibilityPort:Int?=nil) throws -> Data {
         guard (1024...65535).contains(state.listenPort),(1024...65535).contains(control.port),state.listenPort != control.port,control.secret.count>=32 else {throw ProxyError("代理或控制端口、密钥无效")}
         try PolicyValidator.validate(state)
         var outbounds:[[String:Any]]=[]
@@ -37,15 +37,28 @@ extension ConfigBuilder {
             try validate(rule)
             let key=rule.kind == .domain ? "domain" : rule.kind == .suffix ? "domain_suffix" : rule.kind == .keyword ? "domain_keyword" : "ip_cidr"
             let target=override ?? rule.target ?? (rule.action == .direct ? .direct : rule.action == .reject ? .reject : .selected)
-            var object:[String:Any]=RuleEvaluator.condition(rule)
+            var object:[String:Any]=try coreCondition(rule,state:state)
             if target == .reject {object["action"]="reject"} else {object["action"]="route";object["outbound"]=target.tag}
             return object
         }
-        for rule in state.rules {rules.append(try render(rule))}
-        for source in state.remoteRules {for rule in source.rules {rules.append(try render(rule,override:source.target))}}
+        for rule in state.rules where rule.kind != .userAgent {rules.append(try render(rule))}
+        for source in state.remoteRules {for rule in source.rules where rule.kind != .userAgent {rules.append(try render(rule,override:source.target))}}
         var final=state.ruleFinal?.tag ?? "proxy"
         if state.ruleFinal == .reject {rules.append(["action":"reject"]);final="proxy"}
-        let config:[String:Any]=["log":["level":"info","timestamp":true],"inbounds":[["type":"mixed","tag":"mixed-in","listen":"127.0.0.1","listen_port":state.listenPort,"set_system_proxy":false]],"outbounds":outbounds,"route":["rules":rules,"final":final,"default_domain_resolver":"local"],"dns":["servers":[["type":"local","tag":"local"]],"final":"local"],"experimental":["clash_api":["external_controller":"127.0.0.1:\(control.port)","secret":control.secret,"default_mode":state.mode.rawValue,"external_ui":"","access_control_allow_private_network":false,"access_control_allow_origin":["qingzhou://local"]]]]
+        var config:[String:Any]=["log":["level":"info","timestamp":true],"inbounds":[["type":"mixed","tag":"mixed-in","listen":"127.0.0.1","listen_port":state.listenPort,"set_system_proxy":false]],"outbounds":outbounds,"route":["rules":rules,"final":final,"default_domain_resolver":"local"],"dns":["servers":[["type":"local","tag":"local"]],"final":"local"],"experimental":["clash_api":["external_controller":"127.0.0.1:\(control.port)","secret":control.secret,"default_mode":state.mode.rawValue,"external_ui":"","access_control_allow_private_network":false,"access_control_allow_origin":["qingzhou://local"]]]]
+        if let port=httpCompatibilityPort,let shadow=state.shadowrocket {
+            let data=try shadow.gatewayData(listenPort:state.listenPort,corePort:state.listenPort,httpPort:port,control:control,state:state)
+            let object=try JSONSerialization.jsonObject(with:data) as! [String:Any]
+            let policies=object["policies"] as! [String]
+            let users=policies.map{["username":"compat-"+$0.lowercased(),"password":control.secret]}
+            var inbounds=config["inbounds"] as! [[String:Any]]
+            inbounds.append(["type":"http","tag":"http-compat-in","listen":"127.0.0.1","listen_port":port,"users":users])
+            config["inbounds"]=inbounds
+            // 隔离且带认证的入站承接 HTTP 兼容层已经按顺序判定的策略。
+            let forced=policies.map{policy -> [String:Any] in ["inbound":["http-compat-in"],"auth_user":["compat-"+policy.lowercased()],"action":"route","outbound":policy=="DIRECT" ? "direct":policy=="PROXY" ? "proxy":policy]}
+            var route=config["route"] as! [String:Any];route["rules"]=forced+(route["rules"] as! [[String:Any]]);config["route"]=route
+        }
+        NetworkPolicy.apply(&config,state:state)
         return try JSONSerialization.data(withJSONObject:config,options:[.prettyPrinted,.sortedKeys])
     }
 }

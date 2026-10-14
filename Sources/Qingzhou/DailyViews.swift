@@ -4,74 +4,827 @@ import CoreImage
 import Charts
 import QingzhouKit
 
-struct ProfilesView:View {
-    @ObservedObject var model:AppModel
-    @State private var name=""
-    @State private var office=""
-    @State private var copy=false
-    @State private var backup=false
-    @State private var renaming:ClientProfile?
-    @State private var rename=""
-    var body:some View {
-        VStack(alignment:.leading,spacing:14){
-            Text("每份配置独立保存节点、订阅、策略、规则与选择。切换连接中的配置失败时回滚。").font(.caption).foregroundStyle(.secondary)
-            List(model.profiles){profile in HStack{VStack(alignment:.leading){Text(profile.name).font(.headline);Text("\(profile.configuration.nodes.count) 节点 · \(profile.configuration.rules.count) 规则").font(.caption)};Spacer();Button(model.currentProfileID==profile.id ? "当前配置":"切换"){Task{await model.changeProfile(profile.id)}};Button("改名"){rename=profile.name;renaming=profile};Button("删除",role:.destructive){Task{await model.deleteProfile(profile.id)}}.disabled(profile.id==model.currentProfileID)}.disabled(model.locked)}.frame(minHeight:160)
-            TextField("新配置名称",text:$name);Toggle("复制当前配置",isOn:$copy).toggleStyle(.checkbox)
-            if !copy {TextField("办公模板：内网域名，用逗号分隔；留空创建通用模板",text:$office)}
-            HStack{Button("新建配置"){Task{await model.createProfile(name:name,copy:copy,officeDomains:office.split(separator:",").map{$0.trimmingCharacters(in:.whitespaces)});if model.errorMessage==nil{name="";office=""}}}.disabled(model.locked || name.isEmpty);Spacer();Button("加密备份 / 恢复"){backup=true}.disabled(model.locked)}
-        }.sheet(isPresented:$backup){BackupView(model:model)}.sheet(item:$renaming){profile in VStack(spacing:18){Text("配置改名").font(.headline);TextField("名称",text:$rename);HStack{Button("取消"){renaming=nil};Button("保存"){Task{await model.renameProfile(profile.id,name:rename);if model.errorMessage==nil{renaming=nil}}}}}.padding(26).frame(width:440)}
+// MARK: - Profiles View
+struct ProfilesView: View {
+    @ObservedObject var model: AppModel
+    @State private var name = ""
+    @State private var office = ""
+    @State private var copy = false
+    @State private var backup = false
+    @State private var renaming: ClientProfile?
+    @State private var rename = ""
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            SectionHeader(
+                title: "配置方案管理",
+                subtitle: "每份配置独立保存节点、订阅、策略与分流规则。连接中切换配置采用原子校验与回滚保障。",
+                actionTitle: "备份与恢复",
+                actionIcon: "externaldrive.badge.icloud"
+            ) {
+                backup = true
+            }
+            
+            // Profiles List Cards
+            ScrollView {
+                LazyVStack(spacing: 12) {
+                    ForEach(model.profiles) { profile in
+                        let isCurrent = model.currentProfileID == profile.id
+                        HStack(spacing: 14) {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 10)
+                                    .fill(isCurrent ? Theme.connectedGreen.opacity(0.15) : Color.secondary.opacity(0.1))
+                                    .frame(width: 44, height: 44)
+                                Image(systemName: isCurrent ? "checkmark.circle.fill" : "folder.fill")
+                                    .font(.system(size: 20))
+                                    .foregroundStyle(isCurrent ? Theme.connectedGreen : Color.secondary)
+                            }
+                            
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(spacing: 8) {
+                                    Text(profile.name)
+                                        .font(.headline)
+                                    if isCurrent {
+                                        Text("当前运行配置")
+                                            .font(.caption2.bold())
+                                            .foregroundStyle(Theme.connectedGreen)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Theme.connectedGreen.opacity(0.12))
+                                            .clipShape(Capsule())
+                                    }
+                                }
+                                Text("\(profile.configuration.nodes.count) 个节点 · \(profile.configuration.rules.count) 条规则 · \(profile.configuration.subscriptions.count) 个订阅")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            
+                            Spacer()
+                            
+                            HStack(spacing: 8) {
+                                if !isCurrent {
+                                    Button("应用并切换") {
+                                        Task { await model.changeProfile(profile.id) }
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .controlSize(.small)
+                                }
+                                
+                                Button("重命名") {
+                                    rename = profile.name
+                                    renaming = profile
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                
+                                Button(role: .destructive) {
+                                    Task { await model.deleteProfile(profile.id) }
+                                } label: {
+                                    Image(systemName: "trash")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .disabled(isCurrent)
+                            }
+                        }
+                        .padding(14)
+                        .background(Theme.cardBackground)
+                        .clipShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: Theme.cardCornerRadius)
+                                .stroke(isCurrent ? Theme.connectedGreen.opacity(0.4) : Theme.subtleBorder, lineWidth: isCurrent ? 1.5 : 1)
+                        )
+                    }
+                }
+            }
+            .frame(minHeight: 180)
+            
+            // Create Profile Card
+            VStack(alignment: .leading, spacing: 14) {
+                Text("新建配置方案")
+                    .font(.headline)
+                
+                HStack(spacing: 12) {
+                    TextField("配置方案名称", text: $name)
+                        .textFieldStyle(.roundedBorder)
+                    
+                    Toggle("从当前配置复制", isOn: $copy)
+                        .toggleStyle(.checkbox)
+                }
+                
+                if !copy {
+                    TextField("办公模板内网域名（用逗号分隔；留空则为通用模板）", text: $office)
+                        .textFieldStyle(.roundedBorder)
+                }
+                
+                Button {
+                    Task {
+                        await model.createProfile(
+                            name: name,
+                            copy: copy,
+                            officeDomains: office.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                        )
+                        if model.errorMessage == nil { name = ""; office = "" }
+                    }
+                } label: {
+                    Label("创建新配置", systemImage: "plus.circle.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.regular)
+                .disabled(model.locked || name.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            .padding(16)
+            .background(Theme.cardBackground)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.cardCornerRadius)
+                    .stroke(Theme.subtleBorder, lineWidth: 1)
+            )
+        }
+        .sheet(isPresented: $backup) { BackupView(model: model) }
+        .sheet(item: $renaming) { profile in
+            VStack(spacing: 18) {
+                Text("修改配置名称").font(.headline)
+                TextField("名称", text: $rename).textFieldStyle(.roundedBorder)
+                HStack {
+                    Button("取消") { renaming = nil }
+                    Spacer()
+                    Button("保存修改") {
+                        Task {
+                            await model.renameProfile(profile.id, name: rename)
+                            if model.errorMessage == nil { renaming = nil }
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            .padding(24)
+            .frame(width: 420)
+        }
     }
 }
-struct BackupView:View {
-    @ObservedObject var model:AppModel
+
+// MARK: - Backup & Restore View
+struct BackupView: View {
+    @ObservedObject var model: AppModel
     @Environment(\.dismiss) private var dismiss
-    @State private var password=""
-    @State private var confirm=""
-    @State private var snapshot:BackupSnapshot?
-    @State private var message=""
-    @State private var working=false
-    var body:some View {
-        VStack(alignment:.leading,spacing:16){Text("本地加密完整备份").font(.title2.bold());Text("备份包含节点密码、订阅地址等凭据。请妥善保存文件与口令，口令不会写入备份。AES-GCM · PBKDF2-SHA256 600,000 次。").font(.caption).foregroundStyle(.secondary);SecureField("备份或恢复口令",text:$password);SecureField("导出时再次输入口令",text:$confirm)
-            HStack{Button("导出加密备份"){export()}.disabled(password.isEmpty || password != confirm || working);Button("打开备份并预览"){load()}.disabled(password.isEmpty || working);Button("预览升级前快照"){do{snapshot=try model.migrationSnapshot();message="升级前快照已读取，尚未恢复"}catch{message="升级前快照不存在或无法解密；未修改现有数据"}}.disabled(working)}
-            if let snapshot{Text("恢复预览：\(snapshot.catalog.profiles.count) 份配置、\(snapshot.catalog.profiles.reduce(0){$0+$1.configuration.nodes.count}) 个节点；将替换当前配置集合。").font(.headline);Text("只有确认成功后才替换元数据并清理旧凭据，运行配置失败时恢复上一份。").font(.caption);Button("导出 0.2 回退数据并恢复必要旧凭据"){let panel=NSSavePanel();panel.nameFieldStringValue="state-0.2.json";panel.begin{response in if response == .OK,let url=panel.url{do{try BackupService.exportLegacy(snapshot,to:url,credentials:model.credentials);message="回退数据已导出。退出 0.3 并另存当前 state.json，再将导出的文件作为旧版 state.json；没有切换当前配置。"}catch{message=Redactor.redact(error.localizedDescription)}}}}.disabled(model.locked || working);Button("确认恢复全部配置",role:.destructive){Task{working=true;await model.restoreBackup(snapshot);working=false;if model.errorMessage==nil{password="";confirm="";self.snapshot=nil;dismiss()}}}.disabled(model.locked || working)}
-            if working{ProgressView()};if !message.isEmpty{Text(message).font(.caption).foregroundStyle(.orange)}
-            Button("关闭"){password="";confirm="";snapshot=nil;dismiss()}.disabled(working)
-        }.padding(26).frame(width:620)
+    @State private var password = ""
+    @State private var confirm = ""
+    @State private var snapshot: BackupSnapshot?
+    @State private var message = ""
+    @State private var working = false
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack {
+                Label("本地加密备份与迁移", systemImage: "lock.shield.fill")
+                    .font(.title2.bold())
+                Spacer()
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            
+            Text("备份包含全部配置、策略、规则以及节点密码与订阅地址凭据。采用安全加密：AES-GCM · PBKDF2-SHA256 600,000 次，口令不会写入备份文件。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            
+            VStack(spacing: 12) {
+                SecureField("输入备份或恢复口令", text: $password)
+                    .textFieldStyle(.roundedBorder)
+                SecureField("导出时请再次确认口令", text: $confirm)
+                    .textFieldStyle(.roundedBorder)
+            }
+            
+            HStack(spacing: 12) {
+                Button("导出加密备份 (.qzb)") { export() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(password.isEmpty || password != confirm || working)
+                
+                Button("打开备份文件并预览") { load() }
+                    .buttonStyle(.bordered)
+                    .disabled(password.isEmpty || working)
+                
+                Button("预览历史升级快照") {
+                    do {
+                        snapshot = try model.migrationSnapshot()
+                        message = "已成功读取升级前快照，尚未写入现有配置。"
+                    } catch {
+                        message = "升级前快照不存在或无法解密；未修改现有数据。"
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(working)
+            }
+            
+            if let snapshot {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("快照恢复预览：共 \(snapshot.catalog.profiles.count) 份配置、\(snapshot.catalog.profiles.reduce(0) { $0 + $1.configuration.nodes.count }) 个节点。")
+                        .font(.headline)
+                        .foregroundStyle(Theme.accentBlue)
+                    Text("确认恢复将安全替换当前配置集合，若执行启动失败将自动回滚上一份配置。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    
+                    HStack(spacing: 12) {
+                        Button("导出 0.2 回退数据") {
+                            let panel = NSSavePanel()
+                            panel.nameFieldStringValue = "state-0.2.json"
+                            panel.begin { response in
+                                if response == .OK, let url = panel.url {
+                                    do {
+                                        try BackupService.exportLegacy(snapshot, to: url, credentials: model.credentials)
+                                        message = "0.2 回退数据已导出。请另存当前 state.json 后替换。"
+                                    } catch {
+                                        message = Redactor.redact(error.localizedDescription)
+                                    }
+                                }
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        
+                        Button("确认恢复全部配置", role: .destructive) {
+                            Task {
+                                working = true
+                                await model.restoreBackup(snapshot)
+                                working = false
+                                if model.errorMessage == nil {
+                                    password = ""; confirm = ""; self.snapshot = nil
+                                    dismiss()
+                                }
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+                .padding(14)
+                .background(Color.secondary.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
+            
+            if working {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("正在进行加解密运算，请稍候...").font(.caption)
+                }
+            }
+            
+            if !message.isEmpty {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(Theme.amberAccent)
+            }
+        }
+        .padding(26)
+        .frame(width: 640)
     }
-    private func export(){guard let store=model.store else{return};let panel=NSSavePanel();panel.nameFieldStringValue="轻舟配置.qzb";panel.begin{response in guard response == .OK,let url=panel.url else{return};working=true;Task{do{let value=try BackupService.snapshot(store.catalog,credentials:model.credentials);let secret=password;let data=try await Task.detached{try BackupService.encrypt(value,password:secret)}.value;try SecureFile.write(data,to:url);model.recordBackup(url);message="备份已保存"}catch{message=Redactor.redact(error.localizedDescription)};working=false}}}
-    private func load(){let panel=NSOpenPanel();panel.allowsMultipleSelection=false;panel.canChooseDirectories=false;panel.begin{response in guard response == .OK,let url=panel.url else{return};working=true;snapshot=nil;Task{do{let access=url.startAccessingSecurityScopedResource();defer{if access{url.stopAccessingSecurityScopedResource()}};let size=(try FileManager.default.attributesOfItem(atPath:url.path)[.size] as? NSNumber)?.intValue ?? Int.max;guard size<=48*1024*1024 else{throw ProxyError("备份超过大小限制")};let data=try Data(contentsOf:url);let secret=password;snapshot=try await Task.detached{try BackupService.decrypt(data,password:secret)}.value;message="口令及完整性校验通过，尚未恢复"}catch{message="备份无法读取、口令错误或文件损坏；未修改现有配置"};working=false}}}
+    
+    private func export() {
+        guard let store = model.store else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "轻舟配置.qzb"
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            working = true
+            Task {
+                do {
+                    let value = try BackupService.snapshot(store.catalog, credentials: model.credentials)
+                    let secret = password
+                    let data = try await Task.detached { try BackupService.encrypt(value, password: secret) }.value
+                    try SecureFile.write(data, to: url)
+                    model.recordBackup(url)
+                    message = "加密备份导出成功！"
+                } catch {
+                    message = Redactor.redact(error.localizedDescription)
+                }
+                working = false
+            }
+        }
+    }
+    
+    private func load() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            working = true
+            snapshot = nil
+            Task {
+                do {
+                    let access = url.startAccessingSecurityScopedResource()
+                    defer { if access { url.stopAccessingSecurityScopedResource() } }
+                    let size = (try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.intValue ?? Int.max
+                    guard size <= 48 * 1024 * 1024 else { throw ProxyError("备份超过大小限制") }
+                    let data = try Data(contentsOf: url)
+                    let secret = password
+                    snapshot = try await Task.detached { try BackupService.decrypt(data, password: secret) }.value
+                    message = "口令校验通过，请预览并确认恢复。"
+                } catch {
+                    message = "备份无法读取、口令错误或文件损坏；未修改现有配置。"
+                }
+                working = false
+            }
+        }
+    }
 }
-struct DiagnosticsView:View {
-    @ObservedObject var model:AppModel
-    var body:some View {VStack(alignment:.leading,spacing:14){HStack{Button("一键诊断"){Task{await model.diagnose()}}.disabled(model.locked || model.diagnosing);Button("恢复原网络"){Task{await model.recover()}}.disabled(model.locked);if model.diagnosing{ProgressView().controlSize(.small)}};List(model.diagnosticRows){row in VStack(alignment:.leading,spacing:6){HStack{Text(row.stage).font(.headline);Spacer();Text(row.status).foregroundStyle(row.status=="失败" ? Color.red:row.status=="通过" ? Color.green:Color.secondary)};Text(row.detail).font(.caption).textSelection(.enabled)}};Text("诊断导出只含阶段、结果和脱敏说明，节点、订阅地址及密钥不导出。").font(.caption);Button("导出脱敏诊断"){let panel=NSSavePanel();panel.nameFieldStringValue="轻舟诊断.txt";panel.begin{response in if response == .OK,let url=panel.url{try? SecureFile.write(Data(model.diagnosticRows.map{Redactor.redact($0.stage+" · "+$0.status+"："+$0.detail)}.joined(separator:"\n").utf8),to:url)}}}.disabled(model.diagnosticRows.isEmpty)}}
+
+// MARK: - Diagnostics View
+struct DiagnosticsView: View {
+    @ObservedObject var model: AppModel
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            SectionHeader(
+                title: "系统与网络健康诊断",
+                subtitle: "全链路分步检查代理核心、系统权限、端口绑定、TUN 路由、DNS 解析及连通性状态。"
+            )
+            
+            HStack(spacing: 12) {
+                Button {
+                    Task { await model.diagnose() }
+                } label: {
+                    Label(model.diagnosing ? "诊断进行中..." : "一键开始诊断", systemImage: "stethoscope")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.locked || model.diagnosing)
+                
+                Button("恢复原网络设置") {
+                    Task { await model.recover() }
+                }
+                .buttonStyle(.bordered)
+                .disabled(model.locked)
+                
+                Spacer()
+                
+                Button {
+                    let panel = NSSavePanel()
+                    panel.nameFieldStringValue = "轻舟诊断报告.txt"
+                    panel.begin { response in
+                        if response == .OK, let url = panel.url {
+                            try? SecureFile.write(
+                                Data(model.diagnosticRows.map { Redactor.redact("\($0.stage) · \($0.status)：\($0.detail)") }.joined(separator: "\n").utf8),
+                                to: url
+                            )
+                        }
+                    }
+                } label: {
+                    Label("导出脱敏报告", systemImage: "square.and.arrow.up")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(model.diagnosticRows.isEmpty)
+            }
+            
+            if model.diagnosticRows.isEmpty {
+                ContentUnavailableView(
+                    "尚未执行诊断",
+                    systemImage: "waveform.path.ecg",
+                    description: Text("点击上方「一键开始诊断」检测核心组件、路由与网络连接状况。")
+                )
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 10) {
+                        ForEach(Array(model.diagnosticRows.enumerated()), id: \.offset) { _, row in
+                            HStack(alignment: .top, spacing: 14) {
+                                ZStack {
+                                    Circle()
+                                        .fill(statusColor(row.status).opacity(0.14))
+                                        .frame(width: 32, height: 32)
+                                    Image(systemName: statusIcon(row.status))
+                                        .font(.system(size: 14, weight: .bold))
+                                        .foregroundStyle(statusColor(row.status))
+                                }
+                                
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack {
+                                        Text(row.stage)
+                                            .font(.headline)
+                                        Spacer()
+                                        Text(row.status)
+                                            .font(.caption.bold())
+                                            .foregroundStyle(statusColor(row.status))
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 3)
+                                            .background(statusColor(row.status).opacity(0.12))
+                                            .clipShape(Capsule())
+                                    }
+                                    Text(row.detail)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .textSelection(.enabled)
+                                }
+                            }
+                            .padding(14)
+                            .background(Theme.cardBackground)
+                            .clipShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: Theme.cardCornerRadius)
+                                    .stroke(Theme.subtleBorder, lineWidth: 1)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    private func statusColor(_ status: String) -> Color {
+        switch status {
+        case "通过": return Theme.connectedGreen
+        case "失败": return Theme.dangerRed
+        case "需检查": return Theme.amberAccent
+        default: return Color.secondary
+        }
+    }
+    
+    private func statusIcon(_ status: String) -> String {
+        switch status {
+        case "通过": return "checkmark"
+        case "失败": return "xmark"
+        case "需检查": return "exclamationmark"
+        default: return "minus"
+        }
+    }
 }
-struct RuleExplanationView:View {
-    @ObservedObject var model:AppModel
-    @State private var input=""
-    @State private var explanation:RuleExplanation?
-    @State private var message=""
-    var body:some View {VStack(alignment:.leading,spacing:14){Text("模拟规则匹配").font(.headline);TextField("输入域名或 IPv4/IPv6 地址",text:$input).onSubmit{evaluate()};Button("解释匹配顺序"){evaluate()};if let explanation{ScrollView{VStack(alignment:.leading,spacing:8){ForEach(Array(explanation.steps.enumerated()),id:\.offset){Text($0.element)};Text("最终策略："+(explanation.target.map{model.state.label($0)} ?? "需要实际 DNS 结果才能确定")).bold();if let limit=explanation.uncertainty{Text(limit).foregroundStyle(.orange)}}.frame(maxWidth:.infinity,alignment:.leading)}};if !message.isEmpty{Text(message).foregroundStyle(.red)};Text("这是模拟结果。真实核心命中只在连接详情中显示，核心未提供时标为未提供。").font(.caption).foregroundStyle(.secondary)}}
-    private func evaluate(){do{explanation=try RuleEvaluator.explain(input,state:model.state);message=""}catch{explanation=nil;message=error.localizedDescription}}
+
+// MARK: - Rule Explanation Simulation View
+struct RuleExplanationView: View {
+    @ObservedObject var model: AppModel
+    @State private var input = ""
+    @State private var explanation: RuleExplanation?
+    @State private var message = ""
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            SectionHeader(
+                title: "分流规则模拟匹配",
+                subtitle: "输入域名或 IP 测试匹配链路与命中顺序（包含私网直连、自定义规则、远程规则集及默认兜底策略）。"
+            )
+            
+            HStack(spacing: 10) {
+                TextField("输入需要测试的域名或 IP 地址（例如 github.com, 1.1.1.1）", text: $input)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { evaluate() }
+                
+                Button("开始测试") { evaluate() }
+                    .buttonStyle(.borderedProminent)
+            }
+            
+            if let explanation {
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack {
+                        Text("命中策略结果：")
+                            .font(.headline)
+                        Text(explanation.target.map { model.state.label($0) } ?? "需要实际 DNS 结果后确定")
+                            .font(.headline.bold())
+                            .foregroundStyle(Theme.accentBlue)
+                    }
+                    
+                    Divider()
+                    
+                    Text("判定执行链路：").font(.subheadline.bold())
+                    
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(Array(explanation.steps.enumerated()), id: \.offset) { index, step in
+                                HStack(alignment: .top, spacing: 8) {
+                                    Text("\(index + 1).")
+                                        .font(.caption.bold())
+                                        .foregroundStyle(.secondary)
+                                    Text(step)
+                                        .font(.system(.caption, design: .monospaced))
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 240)
+                    
+                    if let limit = explanation.uncertainty {
+                        HStack(spacing: 6) {
+                            Image(systemName: "info.circle.fill")
+                            Text(limit)
+                        }
+                        .font(.caption)
+                        .foregroundStyle(Theme.amberAccent)
+                    }
+                }
+                .padding(16)
+                .background(Theme.cardBackground)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.cardCornerRadius)
+                        .stroke(Theme.subtleBorder, lineWidth: 1)
+                )
+            }
+            
+            if !message.isEmpty {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(Theme.dangerRed)
+            }
+            
+            Spacer()
+        }
+    }
+    
+    private func evaluate() {
+        guard !input.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        do {
+            explanation = try RuleEvaluator.explain(input, state: model.state)
+            message = ""
+        } catch {
+            explanation = nil
+            message = error.localizedDescription
+        }
+    }
 }
-struct ShareRequest:Identifiable {let id=UUID();let node:Node}
-struct ShareView:View {
-    @ObservedObject var model:AppModel
-    let node:Node
+
+// MARK: - Share Node Modal
+struct ShareRequest: Identifiable {
+    let id = UUID()
+    let node: Node
+}
+
+struct ShareView: View {
+    @ObservedObject var model: AppModel
+    let node: Node
     @Environment(\.dismiss) private var dismiss
-    @State private var acknowledged=false
-    @State private var link=""
-    @State private var qr:NSImage?
-    var body:some View {VStack(alignment:.leading,spacing:16){Text("分享节点："+node.name).font(.title2.bold());Text("分享链接和二维码包含连接凭据，接收者可使用此节点。请只分享给可信的人。").foregroundStyle(.orange);if !acknowledged{Button("确认生成含凭据的分享内容"){do{link=try NodeShare.link(node,credentials:model.credentials);let filter=CIFilter(name:"CIQRCodeGenerator")!;filter.setValue(Data(link.utf8),forKey:"inputMessage");filter.setValue("M",forKey:"inputCorrectionLevel");if let output=filter.outputImage,let cg=CIContext().createCGImage(output.transformed(by:CGAffineTransform(scaleX:7,y:7)),from:output.extent.applying(CGAffineTransform(scaleX:7,y:7))){qr=NSImage(cgImage:cg,size:NSSize(width:280,height:280))};acknowledged=true}catch{model.errorMessage=error.localizedDescription}}}else{if let qr{Image(nsImage:qr).interpolation(.none).resizable().scaledToFit().frame(width:280,height:280)};Button("复制分享链接"){NSPasteboard.general.clearContents();NSPasteboard.general.setString(link,forType:.string)};Button("保存二维码"){guard let qr,let tiff=qr.tiffRepresentation,let rep=NSBitmapImageRep(data:tiff),let png=rep.representation(using:.png,properties:[:]) else{return};let panel=NSSavePanel();panel.nameFieldStringValue="节点二维码.png";panel.begin{response in if response == .OK,let url=panel.url{try? SecureFile.write(png,to:url)}}};Text("关闭窗口后分享内容从界面内存移除；已复制的内容仍在系统剪贴板中。").font(.caption)};Button("关闭"){link="";qr=nil;dismiss()}}.padding(26).frame(width:580)}
+    @State private var acknowledged = false
+    @State private var link = ""
+    @State private var qr: NSImage?
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("分享节点")
+                        .font(.title2.bold())
+                    Text(node.name)
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            
+            if !acknowledged {
+                VStack(spacing: 14) {
+                    Image(systemName: "lock.trianglebadge.exclamationmark.fill")
+                        .font(.system(size: 42))
+                        .foregroundStyle(Theme.amberAccent)
+                    Text("安全提醒")
+                        .font(.headline)
+                    Text("分享链接与二维码内包含解密后的节点密码与服务器凭据。接收者将具备完全使用权限，请务必只分享给值得信赖的人。")
+                        .font(.caption)
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.secondary)
+                    
+                    Button("确认生成安全二维码与分享链接") {
+                        generate()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.regular)
+                }
+                .padding(20)
+                .frame(maxWidth: .infinity)
+                .background(Theme.cardBackground)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
+            } else {
+                VStack(spacing: 16) {
+                    if let qr {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 12)
+                                .fill(Color.white)
+                                .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 4)
+                            Image(nsImage: qr)
+                                .interpolation(.none)
+                                .resizable()
+                                .scaledToFit()
+                                .padding(14)
+                        }
+                        .frame(width: 240, height: 240)
+                    }
+                    
+                    HStack(spacing: 12) {
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(link, forType: .string)
+                        } label: {
+                            Label("复制分享链接", systemImage: "doc.on.doc")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        
+                        Button {
+                            saveImage()
+                        } label: {
+                            Label("保存二维码图片", systemImage: "arrow.down.to.line")
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    
+                    Text("关闭窗口后分享内容将从界面内存立即擦除。")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(26)
+        .frame(width: 520)
+    }
+    
+    private func generate() {
+        do {
+            link = try NodeShare.link(node, credentials: model.credentials)
+            let filter = CIFilter(name: "CIQRCodeGenerator")!
+            filter.setValue(Data(link.utf8), forKey: "inputMessage")
+            filter.setValue("M", forKey: "inputCorrectionLevel")
+            if let output = filter.outputImage,
+               let cg = CIContext().createCGImage(output.transformed(by: CGAffineTransform(scaleX: 8, y: 8)), from: output.extent.applying(CGAffineTransform(scaleX: 8, y: 8))) {
+                qr = NSImage(cgImage: cg, size: NSSize(width: 280, height: 280))
+            }
+            acknowledged = true
+        } catch {
+            model.errorMessage = error.localizedDescription
+        }
+    }
+    
+    private func saveImage() {
+        guard let qr,
+              let tiff = qr.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff),
+              let png = rep.representation(using: .png, properties: [:]) else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "\(node.name)-二维码.png"
+        panel.begin { response in
+            if response == .OK, let url = panel.url {
+                try? SecureFile.write(png, to: url)
+            }
+        }
+    }
 }
-struct RateChart:View {
-    let samples:[RateSample]
-    var body:some View {VStack(alignment:.leading){Text("最近 30 分钟速率 · 仅保存在内存").font(.caption);Chart(samples){sample in LineMark(x:.value("时间",sample.time),y:.value("速率",sample.upload)).foregroundStyle(by:.value("方向","上传"));LineMark(x:.value("时间",sample.time),y:.value("速率",sample.download)).foregroundStyle(by:.value("方向","下载"))}.chartYAxis{AxisMarks{value in AxisGridLine();AxisValueLabel{if let n=value.as(Int64.self){Text(bytes(n)+"/s")}}}}.frame(height:150)}}
+
+// MARK: - Modern Rate Chart (Area + Line)
+struct RateChart: View {
+    let samples: [RateSample]
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("实时速率波动 (最近 30 分钟)", systemImage: "waveform.path.ecg")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                HStack(spacing: 12) {
+                    HStack(spacing: 4) {
+                        Circle().fill(Theme.connectedGreen).frame(width: 7, height: 7)
+                        Text("上传").font(.caption2).foregroundStyle(.secondary)
+                    }
+                    HStack(spacing: 4) {
+                        Circle().fill(Theme.accentBlue).frame(width: 7, height: 7)
+                        Text("下载").font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            
+            if samples.isEmpty {
+                VStack {
+                    Spacer()
+                    Text("暂无网络速率数据，连接代理后实时绘制")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .frame(height: 155)
+                .frame(maxWidth: .infinity)
+                .background(Color.secondary.opacity(0.04))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+            } else {
+                Chart {
+                    ForEach(samples) { sample in
+                        AreaMark(
+                            x: .value("时间", sample.time),
+                            y: .value("速率", sample.download)
+                        )
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [Theme.accentBlue.opacity(0.28), Theme.accentBlue.opacity(0.02)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                        .interpolationMethod(.monotone)
+                        
+                        LineMark(
+                            x: .value("时间", sample.time),
+                            y: .value("速率", sample.download)
+                        )
+                        .foregroundStyle(Theme.accentBlue)
+                        .lineStyle(StrokeStyle(lineWidth: 2))
+                        .interpolationMethod(.monotone)
+                        
+                        AreaMark(
+                            x: .value("时间", sample.time),
+                            y: .value("速率", sample.upload)
+                        )
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [Theme.connectedGreen.opacity(0.25), Theme.connectedGreen.opacity(0.02)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                        .interpolationMethod(.monotone)
+                        
+                        LineMark(
+                            x: .value("时间", sample.time),
+                            y: .value("速率", sample.upload)
+                        )
+                        .foregroundStyle(Theme.connectedGreen)
+                        .lineStyle(StrokeStyle(lineWidth: 1.8))
+                        .interpolationMethod(.monotone)
+                    }
+                }
+                .chartYAxis {
+                    AxisMarks(position: .leading) { value in
+                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [4, 4]))
+                            .foregroundStyle(Color.secondary.opacity(0.2))
+                        AxisValueLabel {
+                            if let n = value.as(Int64.self) {
+                                Text(formatRate(n))
+                                    .font(.system(size: 9, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                .chartXAxis {
+                    AxisMarks(values: .automatic(desiredCount: 6)) { _ in
+                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [4, 4]))
+                            .foregroundStyle(Color.secondary.opacity(0.15))
+                        AxisValueLabel(format: .dateTime.minute().second())
+                    }
+                }
+                .frame(height: 155)
+            }
+        }
+        .padding(14)
+        .background(Theme.cardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.cardCornerRadius)
+                .stroke(Theme.subtleBorder, lineWidth: 1)
+        )
+    }
 }
-struct RuleDraftView:View {
-    @ObservedObject var model:AppModel
-    var draft:RoutingRule
+
+// MARK: - Rule Draft Modal
+struct RuleDraftView: View {
+    @ObservedObject var model: AppModel
+    var draft: RoutingRule
     @Environment(\.dismiss) private var dismiss
-    @State private var value=""
-    @State private var target=PolicyReference.selected
-    var body:some View{VStack(alignment:.leading,spacing:18){Text("确认新规则").font(.title2.bold());Text("从连接目标生成，尚未应用；应用归属和真实命中信息不会用于猜测规则。").font(.caption);TextField(draft.kind == .domain ? "域名":"IP/CIDR",text:$value);RuleTargetPicker(state:model.state,target:$target);HStack{Button("取消"){dismiss()};Spacer();Button("确认添加"){var next=draft;next.value=value;next.target=target;next.action=target == .direct ? .direct:target == .reject ? .reject:.proxy;Task{await model.addRule(next);if model.errorMessage==nil{dismiss()}}}.disabled(model.locked)}}.padding(26).frame(width:550).onAppear{value=draft.value}}
+    @State private var value = ""
+    @State private var target = PolicyReference.selected
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("确认添加分流规则").font(.title2.bold())
+            Text("从实时连接的目标地址直接生成，确认后添加至当前规则配置。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            
+            TextField(draft.kind == .domain ? "目标域名" : "IP / CIDR 网段", text: $value)
+                .textFieldStyle(.roundedBorder)
+            
+            RuleTargetPicker(state: model.state, target: $target)
+            
+            HStack {
+                Button("取消") { dismiss() }
+                Spacer()
+                Button("确认添加规则") {
+                    var next = draft
+                    next.value = value
+                    next.target = target
+                    next.action = target == .direct ? .direct : target == .reject ? .reject : .proxy
+                    Task {
+                        await model.addRule(next)
+                        if model.errorMessage == nil { dismiss() }
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.locked || value.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(26)
+        .frame(width: 520)
+        .onAppear { value = draft.value }
+    }
 }
