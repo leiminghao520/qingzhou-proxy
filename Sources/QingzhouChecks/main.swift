@@ -259,7 +259,9 @@ do{let t=NetworkSafetyTests();run("NetworkSafety.proxyOwnership",t){t.testPersis
 do{let t=NetworkPolicyTests();run("NetworkPolicy.preparationRace",t){try t.testPreparationRaceAndDNSBudget()};run("NetworkPolicy.tunAddresses",t){try t.testTunAddressAllocation()};run("NetworkPolicy.corporateRoutes",t){t.testSpecificCorporateRoutesAndSystemTunnels()};run("NetworkPolicy.migration",t){try t.testMigrationAndImport()};run("NetworkPolicy.coreMatrix",t){try t.testCoreNetworkMatrix()}}
 do{let t=CapturePlanTests();run("CapturePlan.protection",t){try t.testProtectionAndResolverSelection()};run("CapturePlan.loopback",t){try t.testLoopbackRelay()};run("CapturePlan.dnsRetries",t){try t.testDNSRetriesAndNoPublicFallback()};run("CapturePlan.routesOwnership",t){try t.testRouteParsingAndOwnership()};run("CapturePlan.core",t){try t.testCoreConfigurationProtectionPrecedence()}}
 do{let t=KeychainUXTests();run("KeychainUX.authorization",t){try t.testAuthorizationRetryAndCache()};run("KeychainUX.errors",t){try t.testDistinctErrorsAndAtomicCache()}}
+do{let t=StabilityTests();run("Stability.snapshotRetryAndLatency",t){t.testSnapshotRetryAndLatency()};run("Stability.dnsQueueBoundsBudgetAndStop",t){t.testDNSQueueBoundsBudgetAndStop()};run("Stability.subscriptionClassificationAndRetry",t){t.testSubscriptionClassificationAndRetry()}}
 Task {
+    await runStabilityAsyncChecks()
     await runCaptureActivationChecks()
     await runRecoveryContinuationChecks()
     await runHelperRecoveryPolicyChecks()

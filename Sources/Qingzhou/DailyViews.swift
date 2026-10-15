@@ -356,7 +356,7 @@ struct DiagnosticsView: View {
                     Task { await model.recover() }
                 }
                 .buttonStyle(.bordered)
-                .disabled(model.locked)
+                .disabled(model.loadingFailed || model.recovering)
                 
                 Spacer()
                 

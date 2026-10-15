@@ -60,9 +60,11 @@ public final class DiagnosticLog {
     private let url:URL
     public init(url:URL){self.url=url}
     public func append(_ line:String) throws {
+        try appendBatch([line])
+    }
+    public func appendBatch(_ lines:[String]) throws {
         var data=(try? Data(contentsOf:url)) ?? Data()
-        let safe=Redactor.redact(line)+"\n"
-        data.append(Data(safe.utf8))
+        for line in lines {data.append(Data((Redactor.redact(line)+"\n").utf8))}
         if data.count>512*1024 {data=Data(data.suffix(256*1024));if let newline=data.firstIndex(of:10){data.removeSubrange(data.startIndex...newline)}}
         try SecureFile.write(data,to:url)
     }

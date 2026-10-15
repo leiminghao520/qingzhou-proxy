@@ -65,8 +65,9 @@ struct LatencyBadge: View {
     let delayText: String
     
     private var color: Color {
+        if delayText.contains("历史结果") {return Color.secondary}
         if delayText.contains("ms") {
-            let num = Int(delayText.replacingOccurrences(of: " ms", with: "").trimmingCharacters(in: .whitespaces)) ?? 999
+            let num = Int(delayText.split(separator:" ").first.map(String.init) ?? "") ?? 999
             if num <= 100 { return Theme.connectedGreen }
             if num <= 250 { return Theme.accentBlue }
             if num <= 500 { return Theme.amberAccent }
@@ -83,6 +84,8 @@ struct LatencyBadge: View {
                 .fill(color)
                 .frame(width: 6, height: 6)
             Text(delayText)
+                .lineLimit(2)
+                .help(delayText)
                 .font(.system(size: 11, weight: .medium, design: .monospaced))
                 .foregroundStyle(color)
         }

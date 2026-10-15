@@ -20,6 +20,9 @@ final class Service {
     var networkStore:SCDynamicStore?
     var routeEvents:DispatchSourceRead?
     var pendingNetworkChange:Date?
+    var snapshotRetry=NetworkSnapshotRetry()
+    var networkStatus:String {phase=="networkRetry" ? "网络变化，正在重新检查":lastFailure ?? HelperPaths.version}
+    var networkSummary:[String] {(capturePlan?.summary ?? [])+(dnsForwarder.map{[$0.diagnostics]} ?? [])}
     var lastFailure:String?
     var process:Process?
     var activatePrepared:(() throws -> Void)?
@@ -47,7 +50,7 @@ final class Service {
     func field(_ label:String,_ text:String)->String?{text.components(separatedBy:.newlines).first{$0.trimmingCharacters(in:.whitespaces).hasPrefix(label+":")}.map{$0.components(separatedBy:":").dropFirst().joined(separator:":").trimmingCharacters(in:.whitespaces)}}
     func prefix(_ info:String)->String? {NetworkInspection.routePrefix(destination:field("destination",info),mask:field("mask",info),host:info.contains("HOST"))}
     func stop() throws {
-        activatePrepared=nil;activeRequest=nil;networkTimer?.cancel();networkTimer=nil;if let networkStore {SCDynamicStoreSetDispatchQueue(networkStore,nil)};networkStore=nil;routeEvents?.cancel();routeEvents=nil;pendingNetworkChange=nil;dnsForwarder?.stop();dnsForwarder=nil;capturePlan=nil
+        activatePrepared=nil;activeRequest=nil;networkTimer?.cancel();networkTimer=nil;if let networkStore {SCDynamicStoreSetDispatchQueue(networkStore,nil)};networkStore=nil;routeEvents?.cancel();routeEvents=nil;pendingNetworkChange=nil;snapshotRetry.reset();dnsForwarder?.stop();dnsForwarder=nil;capturePlan=nil
         guard let record=journal else{        if let process,process.isRunning {process.terminate();for _ in 0..<40 {if !process.isRunning{break};usleep(50000)};if process.isRunning{kill(process.processIdentifier,SIGKILL)};process.waitUntilExit()};process=nil;owner=nil;try? FileManager.default.removeItem(at:root.appendingPathComponent("runtime.json"))
 return};var conflict=false
         do{conflict = !(try restoreProxy(record.proxies ?? []))}catch{conflict=true}
@@ -179,9 +182,9 @@ return};var conflict=false
             if request.verifyNetwork==true,let record=journal,process?.isRunning==true {
                 let tunnels=record.routes.filter{$0.interface==record.interface};let verified=tunnels.count==4 && tunnels.allSatisfy{route in guard let info=try? routeInfo(route.destination,ipv6:route.ipv6,scope:route.scope),let current=prefix(info) else{return false};return NetworkInspection.samePrefix(current,route.destination) && field("interface",info)==route.interface && field("gateway",info)==route.gateway}
                 let current=SCDynamicStoreCopyValue(dynamic,record.dnsKey as CFString) as? NSDictionary;let expected=try PropertyListSerialization.propertyList(from:record.expectedDNS,format:nil) as! NSDictionary
-                return TunReply(ok:true,message:lastFailure ?? HelperPaths.version,running:true,routesVerified:verified,dnsVerified:current==expected,proxyVerified:verifyProxy(),protectionVerified:verifyProtection(),protectionSummary:capturePlan?.summary,phase:phase)
+                return TunReply(ok:true,message:networkStatus,running:true,routesVerified:verified,dnsVerified:current==expected,proxyVerified:verifyProxy(),protectionVerified:verifyProtection(),protectionSummary:networkSummary,phase:phase)
             }
-            return TunReply(ok:true,message:(lastFailure ?? HelperPaths.version)+(journal != nil && process==nil ? " · 存在待恢复记录":""),running:process?.isRunning==true,protectionSummary:capturePlan?.summary,phase:phase)
+            return TunReply(ok:true,message:networkStatus+(journal != nil && process==nil ? " · 存在待恢复记录":""),running:process?.isRunning==true,protectionSummary:networkSummary,phase:phase)
         case "prepare":lastFailure=nil;do{try start(request,fd:fd)}catch{let original=error;try stop();throw original};phase="prepared";return TunReply(ok:true,message:"核心已准备，网络尚未接管",running:true,dnsServer:journal.map{String($0.address4.split(separator:"/")[0])})
         case "activate":
             guard request.protocolVersion==3,owner==fd,process?.isRunning==true,let activate=activatePrepared else{throw ProxyError("TUN 准备状态无效")}

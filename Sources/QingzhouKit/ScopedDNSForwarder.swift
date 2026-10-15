@@ -35,7 +35,8 @@ public final class ScopedDNSForwarder {
     private let descriptor:Int32
     private let plan:CapturePlan
     private let transport:((Data,String,String)->Data?)?
-    private let limit=DispatchSemaphore(value:32)
+    private let work=DNSWorkQueue()
+    public var diagnostics:String {work.snapshot.summary}
     private let lock=NSLock()
     private var stopped=false
     private var started=false
@@ -51,7 +52,7 @@ public final class ScopedDNSForwarder {
     }
     deinit {if !started {close(descriptor)}}
     public func start() {lock.lock();guard !started,!stopped else{lock.unlock();return};started=true;lock.unlock();DispatchQueue.global().async{[self] in receive()}}
-    public func stop() {lock.lock();stopped=true;lock.unlock()}
+    public func stop() {lock.lock();stopped=true;lock.unlock();work.stop()}
     private var isStopped:Bool {lock.lock();defer{lock.unlock()};return stopped}
     private func receive() {
         defer{lock.lock();close(descriptor);lock.unlock()}
@@ -65,26 +66,27 @@ public final class ScopedDNSForwarder {
                 }
                 continue
             }
-            guard limit.wait(timeout:.now()) == .success else {
-                let response=DNSPacket.failure(query)
-                _=response.withUnsafeBytes{bytes in withUnsafePointer(to:&sender){$0.withMemoryRebound(to:sockaddr.self,capacity:1){sendto(descriptor,bytes.baseAddress,response.count,0,$0,size)}}}
-                continue
-            }
-            DispatchQueue.global().async{[self,sender,size] in
-                defer{limit.signal()};let response=resolve(query,name:name);var peer=sender
-                lock.lock();defer{lock.unlock()};guard !stopped else{return}
-                _=response.withUnsafeBytes{bytes in withUnsafePointer(to:&peer){$0.withMemoryRebound(to:sockaddr.self,capacity:1){sendto(descriptor,bytes.baseAddress,response.count,0,$0,size)}}}
-            }
+            work.submit(run:{[self,sender,size] budget in
+                let response=resolve(query,name:name,budget:budget)
+                send(response,to:sender,size:size)
+            },reject:{[self,sender,size] in send(DNSPacket.failure(query),to:sender,size:size)})
         }
     }
-    public func resolve(_ query:Data,name:String,exchange:((Data,String,String)->Data?)?=nil)->Data {
-        let deadline=Date().addingTimeInterval(5)
+    private func send(_ response:Data,to sender:sockaddr_storage,size:socklen_t) {
+        var peer=sender
+        lock.lock();defer{lock.unlock()};guard !stopped else{return}
+        _=response.withUnsafeBytes{bytes in withUnsafePointer(to:&peer){$0.withMemoryRebound(to:sockaddr.self,capacity:1){sendto(descriptor,bytes.baseAddress,response.count,0,$0,size)}}}
+    }
+    public func resolve(_ query:Data,name:String,exchange:((Data,String,String)->Data?)?=nil,budget:TimeInterval=5)->Data {
+        let deadline=Date().addingTimeInterval(min(5,max(0,budget)))
         for resolver in plan.resolvers(for:name) {for server in resolver.servers {
-            guard Date()<deadline else{return DNSPacket.failure(query)}
+            guard !isStopped else{return DNSPacket.failure(query)}
+            guard Date()<deadline else{work.recordTimeout();return DNSPacket.failure(query)}
             let response:Data?
             if let hook=exchange ?? transport {response=hook(query,server,resolver.interface)}else{response=Self.exchange(query,server,resolver.interface,deadline:deadline)}
             if let response,Date()<deadline,DNSPacket.acceptable(response,query:query){return response}
         }}
+        if Date()>=deadline {work.recordTimeout()}
         return DNSPacket.failure(query)
     }
     public func probe(_ resolver:DNSResolverScope)->Bool {

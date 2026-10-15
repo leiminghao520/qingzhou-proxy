@@ -6,7 +6,7 @@ final class FixtureProtocol: URLProtocol {
     override class func canonicalRequest(for request:URLRequest) -> URLRequest {request}
     override func startLoading() {
         let path = request.url!.path
-        let status = path == "/expired" ? 403 : 200
+        let status = path == "/expired" ? 403 : Int(path.dropFirst()) ?? 200
         let headers = path == "/usage" ? ["subscription-userinfo":"upload=12; download=34; total=56; expire=200000"] : path == "/declared-large" ? ["Content-Length":"3000000"] : ["Content-Type":"text/plain"]
         let response = HTTPURLResponse(url:request.url!,statusCode:status,httpVersion:"HTTP/1.1",headerFields:headers)!
         client?.urlProtocol(self,didReceive:response,cacheStoragePolicy:.notAllowed)
@@ -25,6 +25,10 @@ func runAsyncChecks() async {
         do {_ = try await BoundedDownload.fetch(URL(string:"https://fixture.invalid/"+path)!,limit:100,protocolClasses:[FixtureProtocol.self]);CheckHarness.failure("订阅错误未被拒绝",file:#filePath,line:#line)} catch {expectFalse(error.localizedDescription.contains("fixture.invalid"));print("PASS DownloadTests.\(path)")}
     }
     do {_ = try await ImportService.preview("http://example.com/private-token");CheckHarness.failure("HTTP 订阅应被拒绝",file:#filePath,line:#line)} catch {expectFalse(error.localizedDescription.contains("private-token"));print("PASS DownloadTests.httpsRequired")}
+    for code in [401,403,404,410,429,500,503,400] {
+        do {_ = try await BoundedDownload.fetch(URL(string:"https://fixture.invalid/\(code)?token=synthetic")!,protocolClasses:[FixtureProtocol.self]);CheckHarness.failure("错误响应未被拒绝",file:#filePath,line:#line)}
+        catch {expectEqual(error as? SubscriptionFailure,SubscriptionFailure.status(code));expectFalse(error.localizedDescription.contains("synthetic"))}
+    }
     let framer = LogFramer(secrets:["split-secret"])
     expectEqual(framer.receive(Data("value=split-".utf8)).count,0)
     let lines = framer.receive(Data("secret\nnext\n".utf8));expectEqual(lines.count,2);expectFalse(lines[0].contains("split-"));expectFalse(lines[0].contains("secret"))

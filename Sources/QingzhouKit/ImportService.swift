@@ -10,12 +10,12 @@ public enum ImportService {
     public static func preview(_ input:String) async throws -> ImportPreview {
         let text=input.trimmingCharacters(in:.whitespacesAndNewlines)
         if text.lowercased().hasPrefix("https://") {
-            guard let url=URL(string:text),url.host != nil else {throw ProxyError("订阅地址无效")}
+            guard let url=URL(string:text),url.host != nil else {throw SubscriptionFailure.invalidURL}
             let response=try await BoundedDownload.fetchResponse(url)
-            guard let content=String(data:response.data,encoding:.utf8) else {throw ProxyError("订阅必须为 UTF-8 文本")}
-            var result=try ProfileImporter.parse(content);result.source=text;result.usage=UsageInfo.parse(response.usageHeader);return result
+            guard let content=String(data:response.data,encoding:.utf8) else {throw SubscriptionFailure.format}
+            var result:ImportPreview;do{result=try ProfileImporter.parse(content)}catch{throw SubscriptionFailure.format};result.source=text;result.usage=UsageInfo.parse(response.usageHeader);return result
         }
-        if text.lowercased().hasPrefix("http://"){throw ProxyError("订阅地址必须使用 HTTPS")}
+        if text.lowercased().hasPrefix("http://"){throw SubscriptionFailure.invalidURL}
         return try ProfileImporter.parse(text)
     }
 }
@@ -35,38 +35,39 @@ public final class BoundedDownload: NSObject, URLSessionDataDelegate, @unchecked
         try await fetchResponse(url,limit:limit,protocolClasses:protocolClasses).data
     }
     public static func fetchResponse(_ url:URL,limit:Int=2*1024*1024,protocolClasses:[AnyClass]?=nil) async throws -> DownloadResult {
-        guard url.scheme?.lowercased()=="https" else {throw ProxyError("下载地址必须使用 HTTPS")}
+        guard url.scheme?.lowercased()=="https" else {throw SubscriptionFailure.invalidURL}
         let download=BoundedDownload(limit:limit,protocolClasses:protocolClasses)
         return try await withTaskCancellationHandler(operation:{try await withCheckedThrowingContinuation{download.start(url,$0)}},onCancel:{download.cancel()})
     }
     private func start(_ url: URL, _ continuation: CheckedContinuation<DownloadResult, Error>) {
         lock.lock(); defer {lock.unlock()}
         self.continuation = continuation
-        if failure != nil { self.continuation = nil; continuation.resume(throwing: ProxyError("订阅下载已取消")); return }
+        if failure != nil { self.continuation = nil; continuation.resume(throwing: SubscriptionFailure.cancelled); return }
         let config = URLSessionConfiguration.ephemeral; config.timeoutIntervalForRequest = 15; config.timeoutIntervalForResource = 15; config.urlCache = nil; config.httpCookieStorage = nil
         config.protocolClasses = protocolClasses
         session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
         task = session!.dataTask(with: url); task!.resume()
     }
     private func setFailure(_ error: Error) {lock.lock(); failure = error; lock.unlock()}
-    private func cancel() { lock.lock(); failure = ProxyError("订阅下载已取消"); let task = self.task; lock.unlock(); task?.cancel() }
+    private func cancel() { lock.lock(); failure = SubscriptionFailure.cancelled; let task = self.task; lock.unlock(); task?.cancel() }
     public func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
-        guard request.url?.scheme == "https" else { setFailure(ProxyError("订阅重定向必须使用 HTTPS")); completionHandler(nil); return }
+        guard request.url?.scheme == "https" else { setFailure(SubscriptionFailure.invalidURL); completionHandler(nil); return }
         completionHandler(request)
     }
     public func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else { setFailure(ProxyError("订阅请求失败，请检查链接是否过期或被撤销")); completionHandler(.cancel); return }
-        guard response.expectedContentLength <= Int64(limit) else { setFailure(ProxyError("订阅超过 2 MiB 限制")); completionHandler(.cancel); return }
+        guard let http = response as? HTTPURLResponse else {setFailure(SubscriptionFailure.http);completionHandler(.cancel);return}
+        guard (200...299).contains(http.statusCode) else {setFailure(SubscriptionFailure.status(http.statusCode));completionHandler(.cancel);return}
+        guard response.expectedContentLength <= Int64(limit) else { setFailure(SubscriptionFailure.tooLarge); completionHandler(.cancel); return }
         usageHeader=http.value(forHTTPHeaderField:"subscription-userinfo")
         completionHandler(.allow)
     }
     public func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        if self.data.count + data.count > limit { setFailure(ProxyError("订阅超过 2 MiB 限制")); dataTask.cancel() } else { self.data.append(data) }
+        if self.data.count + data.count > limit { setFailure(SubscriptionFailure.tooLarge); dataTask.cancel() } else { self.data.append(data) }
     }
     public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         lock.lock(); let continuation = self.continuation; let failure = self.failure; self.continuation = nil; lock.unlock()
         if let failure { continuation?.resume(throwing: failure) }
-        else if error != nil { continuation?.resume(throwing: ProxyError("订阅下载失败，请检查网络、证书和链接有效性")) }
+        else if let error { continuation?.resume(throwing: SubscriptionFailure.classify(error)) }
         else { continuation?.resume(returning: DownloadResult(data:data,usageHeader:usageHeader)) }
         session.finishTasksAndInvalidate(); self.session = nil
     }

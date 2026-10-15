@@ -44,7 +44,7 @@ import QingzhouKit
                     else { await model.connect() }
                 }
             }
-            .disabled(model.locked || (model.state.activePolicy == nil && model.state.mode != .direct))
+            .disabled(model.stopDisabled || (model.state.activePolicy == nil && model.state.mode != .direct && model.connection != .connected))
             
             Menu("配置") {
                 ForEach(model.profiles) { profile in
@@ -56,7 +56,7 @@ import QingzhouKit
             .disabled(model.locked)
             
             Button("暂停代理") { Task { await model.disconnect() } }
-                .disabled(model.locked || model.connection != .connected)
+                .disabled(!model.canStop || model.connection != .connected)
             
             Button("一键诊断") { Task { await model.diagnose() } }
                 .disabled(model.locked)
@@ -96,7 +96,7 @@ import QingzhouKit
             
             Button("复制终端代理命令") { model.copyTerminalProxy() }
             Button("恢复原代理") { Task { await model.recover() } }
-                .disabled(model.locked)
+                .disabled(model.loadingFailed || model.recovering)
             
             Divider()
             Button("显示主窗口") {
@@ -131,13 +131,7 @@ func formatRate(_ value: Int64) -> String {
 }
 
 @MainActor func latency(_ node: Node, _ model: AppModel) -> String {
-    if let result = model.state.latency[node.id.uuidString] {
-        return result.milliseconds.map { "\($0) ms" } ?? "检测失败"
-    }
-    if let delay = model.proxyInfo[PolicyReference.node(node.id).tag]?.history?.last?.delay, delay > 0 {
-        return "\(delay) ms"
-    }
-    return "未检测"
+    LatencyPresentation.label(model.state.latency[node.id.uuidString],invalidatedAt:model.latencyInvalidatedAt,now:model.latencyClock)
 }
 
 // MARK: - Main Content View
@@ -261,13 +255,14 @@ struct ContentView: View {
                             .frame(width: 8, height: 8)
                         
                         VStack(alignment: .leading, spacing: 1) {
-                            Text(model.connection == .connected ? model.connectionSummary : "代理未开启")
+                            Text(model.recovering ? "正在恢复网络":model.stopRequested ? "等待安全断开":model.networkRechecking ? "网络变化 · 检查中":model.connection.rawValue)
                                 .font(.system(size: 11, weight: .bold))
                                 .lineLimit(1)
-                            Text(model.connection == .connected ? model.selectedName : model.state.captureMode.label)
+                            Text(model.connection == .connected ? model.actualName : "尚未连接")
                                 .font(.system(size: 10))
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
+                                .help(model.actualName)
                         }
                         
                         Spacer()
@@ -278,7 +273,7 @@ struct ContentView: View {
                                 else { await model.connect() }
                             }
                         } label: {
-                            if model.busy {
+                            if model.busy && model.connection != .connected {
                                 ProgressView().controlSize(.small)
                             } else {
                                 Text(model.connection == .connected ? "断开" : "开启")
@@ -293,7 +288,7 @@ struct ContentView: View {
                         }
                         .buttonStyle(.plain)
                         .contentShape(Capsule())
-                        .disabled(model.locked || (model.state.activePolicy == nil && model.state.mode != .direct))
+                        .disabled(model.stopDisabled || (model.state.activePolicy == nil && model.state.mode != .direct && model.connection != .connected))
                     }
                     
                     // Row 2: Mode Selector Pills (Rule / Global / Direct)
@@ -318,33 +313,21 @@ struct ContentView: View {
                         }
                     }
                     
-                    // Row 3: Bottom info (sing-box + real-time rates if connected)
+                    // 接管方式与速率分行，窄侧栏优先保留可操作的连接状态。
                     HStack {
-                        Text(model.state.captureMode.label)
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                        
-                        Spacer(minLength: 4)
-                        
-                        if model.connection == .connected {
-                            Text("↑ \(formatRate(model.uploadRate))  ↓ \(formatRate(model.downloadRate))")
-                                .font(.system(size: 9, design: .monospaced))
-                                .monospacedDigit()
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .frame(width: 146, alignment: .trailing)
-                        } else {
-                            Text("sing-box")
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
+                        Text(model.state.captureMode.label).font(.system(size:10)).fixedSize()
+                        Spacer(minLength:4)
+                        if model.healthChecking {Text("检测中").font(.system(size:10)).foregroundStyle(.secondary)}
                     }
-                    .frame(height: 16)
+                    if model.connection == .connected {
+                        Text("↑ \(formatRate(model.uploadRate))  ↓ \(formatRate(model.downloadRate))")
+                            .font(.system(size:9,design:.monospaced)).monospacedDigit()
+                            .frame(maxWidth:.infinity,alignment:.leading).lineLimit(1).minimumScaleFactor(0.8)
+                    }
+
                 }
                 .padding(10)
-                .frame(maxWidth: .infinity, minHeight: 102, maxHeight: 102)
+                .frame(maxWidth: .infinity, minHeight: 126, maxHeight: 126)
                 .background(Color.secondary.opacity(0.06))
                 .clipShape(RoundedRectangle(cornerRadius: 10))
                 .overlay(
@@ -404,27 +387,7 @@ struct ContentView: View {
         case "订阅": SubscriptionsView(model: model)
         case "分流规则": RuleView(model: model)
         case "连接": ConnectionsView(model: model)
-        case "运行日志":
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("最近 500 行 · 敏感链接与凭据已自动脱敏保护")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("清空日志") { model.logs = [] }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                }
-                ScrollView {
-                    Text(model.logs.joined(separator: "\n"))
-                        .font(.system(.caption, design: .monospaced))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                        .padding(14)
-                }
-                .background(Color(nsColor: .textBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: Theme.cornerRadius))
-            }
+        case "运行日志": RuntimeLogView(buffer: model.logBuffer)
         default: SettingsView(model: model)
         }
     }
@@ -644,7 +607,7 @@ struct OverviewView: View {
                 Button("恢复网络") { Task { await model.recover() } }
                     .buttonStyle(.bordered)
                     .controlSize(.regular)
-                    .disabled(model.locked)
+                    .disabled(model.loadingFailed || model.recovering)
             }
             
             // Big Hero Action Button
@@ -668,7 +631,7 @@ struct OverviewView: View {
             .buttonStyle(.borderedProminent)
             .tint(model.connection == .connected ? Theme.dangerRed : Theme.accentBlue)
             .controlSize(.large)
-            .disabled(model.locked || (model.state.activePolicy == nil && model.state.mode != .direct) || (model.recoveryPending && model.connection != .connected))
+            .disabled(model.stopDisabled || (model.state.activePolicy == nil && model.state.mode != .direct && model.connection != .connected) || (model.recoveryPending && model.connection != .connected))
         }
         .padding(16)
         .frame(maxWidth: .infinity, minHeight: 76, maxHeight: 76, alignment: .leading)
@@ -780,8 +743,8 @@ struct NodesView: View {
             let fa = model.state.favorites.contains(a.id), fb = model.state.favorites.contains(b.id)
             if fa != fb { return fa }
             if sort == "HTTPS 延迟" {
-                let av = model.state.latency[a.id.uuidString]?.milliseconds ?? Int.max
-                let bv = model.state.latency[b.id.uuidString]?.milliseconds ?? Int.max
+                let av = LatencyPresentation.sortValue(model.state.latency[a.id.uuidString],invalidatedAt:model.latencyInvalidatedAt,now:model.latencyClock)
+                let bv = LatencyPresentation.sortValue(model.state.latency[b.id.uuidString],invalidatedAt:model.latencyInvalidatedAt,now:model.latencyClock)
                 if av != bv { return av < bv }
             }
             if sort == "最近使用" {
@@ -848,11 +811,14 @@ struct NodesView: View {
                     }
                     .frame(width: 140)
                     
-                    // View Toggle
+                    // 保留用户视图偏好，同时明确按钮的当前状态与操作结果。
                     Toggle(isOn: Binding(get: { model.state.compactNodes }, set: { model.setCompact($0) })) {
-                        Image(systemName: model.state.compactNodes ? "list.bullet" : "square.grid.2x2")
+                        Label(model.state.compactNodes ? "列表" : "卡片",systemImage:model.state.compactNodes ? "list.bullet" : "square.grid.2x2")
                     }
                     .toggleStyle(.button)
+                    .accessibilityLabel("节点视图")
+                    .accessibilityValue(model.state.compactNodes ? "紧凑列表":"卡片")
+                    .help(model.state.compactNodes ? "切换到卡片视图":"切换到紧凑列表")
                     .controlSize(.regular)
                 }
             }
@@ -1473,7 +1439,7 @@ struct SettingsView: View {
             
             Section {
                 Button("恢复原始系统网络与代理设置") { Task { await model.recover() } }
-                    .disabled(model.locked)
+                    .disabled(model.loadingFailed || model.recovering)
             } header: {
                 Label("应急恢复", systemImage: "arrow.counterclockwise")
             } footer: {

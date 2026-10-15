@@ -16,8 +16,10 @@ extension Service {
             routes.contains{actual in NetworkInspection.samePrefix(actual.destination,expected.destination) && actual.interface==expected.interface && actual.scope==nil}
         }
     }
-    func verifyOwnedNetwork()->Bool {
-        guard let record=journal,let table=try? NetworkInspection.command("/usr/sbin/netstat",["-rn"]),let expected=try? PropertyListSerialization.propertyList(from:record.expectedDNS,format:nil) as? NSDictionary else{return false}
+    func verifyOwnedNetwork()->Bool {(try? inspectOwnedNetwork()) == true}
+    func inspectOwnedNetwork() throws -> Bool {
+        guard let record=journal,let expected=try PropertyListSerialization.propertyList(from:record.expectedDNS,format:nil) as? NSDictionary else{return false}
+        let table=try NetworkInspection.command("/usr/sbin/netstat",["-rn"])
         let routes=NetworkSnapshot.parseRoutes(table)
         guard (SCDynamicStoreCopyValue(dynamic,record.dnsKey as CFString) as? NSDictionary)==expected else{return false}
         return record.routes.allSatisfy{owned in routes.contains{current in NetworkInspection.samePrefix(current.destination,owned.destination) && current.interface==owned.interface && current.scope==owned.scope && current.gateway==owned.gateway}}
@@ -48,26 +50,40 @@ extension Service {
         timer.setEventHandler{[weak self] in self?.checkNetworkChange()};timer.resume()
     }
     func checkNetworkChange() {
-        guard phase=="active",let previous=capturePlan,let request=activeRequest,let fd=owner else{return}
+        guard ["active","networkRetry"].contains(phase),let previous=capturePlan,let request=activeRequest,let fd=owner else{return}
+        // 每次通知和重试等待期间都先核对所有权，不能用退避掩盖外部改写。
+        do {
+            guard try inspectOwnedNetwork(),request.systemProxyPort == nil || verifyProxy() else {
+                failNetworkChange("网络所有权冲突：接管设置被外部修改");return
+            }
+        } catch {retrySnapshot(error);return}
+        guard snapshotRetry.ready(now:ProcessInfo.processInfo.systemUptime) else{return}
+        let fresh:CapturePlan
         do {
             var snapshot=try currentSnapshot();snapshot.proxies=previous.snapshot.proxies
-            let fresh=try CapturePlan.make(snapshot:snapshot,extraCIDRs:request.state?.tunExcludedCIDRs ?? [],extraDomains:request.state?.protectedDomains ?? [])
-            let defaultsChanged=fresh.snapshot.routes.filter{$0.destination.hasSuffix("/0")} != previous.snapshot.routes.filter{$0.destination.hasSuffix("/0")}
-            let ownedNetworkChanged = !verifyOwnedNetwork()
-            let ownedProxyChanged=request.systemProxyPort != nil && !verifyProxy()
-            let changed=fresh.snapshot.primaryInterface != previous.snapshot.primaryInterface || fresh.snapshot.resolvers != previous.snapshot.resolvers || fresh.protectedRoutes != previous.protectedRoutes || defaultsChanged || ownedProxyChanged || ownedNetworkChanged
-            if !changed {pendingNetworkChange=nil;return}
-            guard let pending=pendingNetworkChange else{pendingNetworkChange=Date();return}
-            guard Date().timeIntervalSince(pending)>=1 else{return}
-            phase="networkReplan"
-            try stop()
-            guard !ownedProxyChanged,!ownedNetworkChanged else{throw ProxyError("接管设置被外部修改，已停止接管并保留外部设置")}
-            try start(request,fd:fd)
-            guard let activate=activatePrepared else{throw ProxyError("网络重规划未完成")};try activate();activatePrepared=nil;phase="active"
-        }catch{
-            let message="内网保护更新失败："+error.localizedDescription
-            do{try stop();lastFailure=message+"；原网络已恢复"}catch{lastFailure=message+"；恢复冲突："+error.localizedDescription}
-            phase="networkProtectionFailed"
-        }
+            fresh=try CapturePlan.make(snapshot:snapshot,extraCIDRs:request.state?.tunExcludedCIDRs ?? [],extraDomains:request.state?.protectedDomains ?? [])
+        } catch {retrySnapshot(error);return}
+        snapshotRetry.reset();phase="active"
+        let defaultsChanged=fresh.snapshot.routes.filter{$0.destination.hasSuffix("/0")} != previous.snapshot.routes.filter{$0.destination.hasSuffix("/0")}
+        let changed=fresh.snapshot.primaryInterface != previous.snapshot.primaryInterface || fresh.snapshot.resolvers != previous.snapshot.resolvers || fresh.protectedRoutes != previous.protectedRoutes || defaultsChanged
+        if !changed {pendingNetworkChange=nil;return}
+        guard let pending=pendingNetworkChange else{pendingNetworkChange=Date();return}
+        guard Date().timeIntervalSince(pending)>=1 else{return}
+        do {
+            phase="networkReplan";try stop();try start(request,fd:fd)
+            guard let activate=activatePrepared else{throw ProxyError("网络重规划未完成")}
+            try activate();activatePrepared=nil;phase="active";lastFailure=nil
+        } catch {failNetworkChange("网络重新激活失败："+error.localizedDescription)}
+    }
+    private func retrySnapshot(_ error:Error) {
+        let now=ProcessInfo.processInfo.systemUptime
+        // 事件风暴不能提前耗尽下一次重试预算。
+        guard snapshotRetry.ready(now:now) else{return}
+        if snapshotRetry.failed(now:now) {phase="networkRetry"}
+        else {failNetworkChange("网络快照重试耗尽："+error.localizedDescription)}
+    }
+    private func failNetworkChange(_ reason:String) {
+        do{try stop();lastFailure=reason+"；原网络已恢复"}catch{lastFailure=reason+"；恢复冲突："+error.localizedDescription}
+        phase="networkProtectionFailed"
     }
 }
