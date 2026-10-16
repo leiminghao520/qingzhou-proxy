@@ -75,14 +75,19 @@ public actor CoreAPIClient {
     }
     public func initializeFallback(_ group:PolicyGroup) async throws -> UUID? {
         guard group.kind == .fallback else{return nil}
-        // 启动时按优先级寻找可用成员，避免默认成员失效让整个回退组无法启动。
-        for member in group.members {
-            try Task.checkCancellation()
-            if case .node(let id)=member,case .available=await probe(id) {
-                try await select(member,group:PolicyReference.group(group.id).tag);return id
-            }
+        let selected = try await FallbackBootstrap.initialize(groups: [group], probe: { await self.probe($0) }, select: { groupID, nodeID in
+            try await self.select(.node(nodeID), group: PolicyReference.group(groupID).tag)
+        })
+        return selected[group.id]
+    }
+    public func initializeFallbacks(state: AppState) async throws {
+        let groups = FallbackBootstrap.groups(in: state)
+        let selected = try await FallbackBootstrap.initialize(groups: groups, probe: { await self.probe($0) }, select: { groupID, nodeID in
+            try await self.select(.node(nodeID), group: PolicyReference.group(groupID).tag)
+        })
+        guard groups.allSatisfy({ selected[$0.id] != nil }) else {
+            throw ProxyError("使用中的回退组没有可按优先级确认的可用节点")
         }
-        return nil
     }
     public func closeConnection(_ id:String) async throws {guard UUID(uuidString:id) != nil else {throw ProxyError("连接 ID 无效")};_=try await send(request("/connections/"+id,method:"DELETE"))}
     public func closeAllConnections() async throws {_=try await send(request("/connections",method:"DELETE"))}

@@ -39,7 +39,7 @@ import QingzhouKit
             Text("\(model.connectionSummary) · \(model.state.mode.label)")
             Text(model.actualName + " · " + model.state.captureMode.label)
             if model.connection == .connected {
-                Text("↑ \(formatRate(model.uploadRate))  ↓ \(formatRate(model.downloadRate))")
+                Text("↑ \(model.uploadRateText)  ↓ \(model.downloadRateText)")
             }
             Button(model.connection == .connected ? "断开" : model.connection == .connecting ? "取消连接" : "连接") {
                 Task {
@@ -337,7 +337,7 @@ struct ContentView: View {
                             if model.healthChecking {Text("检测中").font(.system(size:10)).foregroundStyle(.secondary)}
                         }
                         if model.connection == .connected {
-                            Text("↑ \(formatRate(model.uploadRate))  ↓ \(formatRate(model.downloadRate))")
+                            Text("↑ \(model.uploadRateText)  ↓ \(model.downloadRateText)")
                                 .font(.system(size:9,design:.monospaced)).monospacedDigit()
                                 .frame(maxWidth:.infinity,alignment:.leading).lineLimit(1).minimumScaleFactor(0.8)
                         }
@@ -465,13 +465,13 @@ struct OverviewView: View {
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)], spacing: 14) {
                     ModernStatCard(
                         title: "实时下载速率",
-                        value: formatRate(model.downloadRate),
+                        value: model.downloadRateText,
                         icon: "arrow.down.circle.fill",
                         iconColor: Theme.accentBlue
                     )
                     ModernStatCard(
                         title: "实时上传速率",
-                        value: formatRate(model.uploadRate),
+                        value: model.uploadRateText,
                         icon: "arrow.up.circle.fill",
                         iconColor: Theme.connectedGreen
                     )

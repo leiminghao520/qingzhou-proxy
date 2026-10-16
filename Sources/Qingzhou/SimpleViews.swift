@@ -163,7 +163,7 @@ struct SimpleConnectionView: View {
                                     .font(.caption)
                                     .foregroundStyle(result.status == .failed ? Theme.amberAccent : Color.secondary)
                             }
-                            Text("↑ \(formatRate(model.uploadRate))    ↓ \(formatRate(model.downloadRate))")
+                            Text("↑ \(model.uploadRateText)    ↓ \(model.downloadRateText)")
                                 .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
                         }
                     }

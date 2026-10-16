@@ -4,6 +4,21 @@ import Darwin
 import SystemConfiguration
 
 let args = CommandLine.arguments
+if args.count == 3 && args[1] == "traffic-transport-checks", let port = Int(args[2]), (1...65535).contains(port) {
+    Task { @MainActor in
+        await runTrafficTransportChecks(port: port)
+        exit(CheckHarness.failures == 0 ? 0 : 1)
+    }
+    dispatchMain()
+}
+if args.count == 2 && args[1] == "optimization-checks" {
+    Task { @MainActor in
+        await runRuntimeOptimizationChecks()
+        print("RESULT optimization_assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
+        exit(CheckHarness.failures == 0 ? 0 : 1)
+    }
+    dispatchMain()
+}
 if args.count>=2 && args[1]=="network-acceptance" {
     Task{@MainActor in do {try await runNetworkAcceptance(args);exit(0)}catch{print("实网检查失败："+Redactor.redact(error.localizedDescription));exit(1)}}
     dispatchMain()
@@ -297,6 +312,7 @@ do{let t=CapturePlanTests();run("CapturePlan.protection",t){try t.testProtection
 do{let t=KeychainUXTests();run("KeychainUX.authorization",t){try t.testAuthorizationRetryAndCache()};run("KeychainUX.errors",t){try t.testDistinctErrorsAndAtomicCache()}}
 do{let t=StabilityTests();run("Stability.snapshotRetryAndLatency",t){t.testSnapshotRetryAndLatency()};run("Stability.dnsQueueBoundsBudgetAndStop",t){t.testDNSQueueBoundsBudgetAndStop()};run("Stability.subscriptionClassificationAndRetry",t){t.testSubscriptionClassificationAndRetry()}}
 Task {
+    await runRuntimeOptimizationChecks()
     await runStabilityAsyncChecks()
     await runCaptureActivationChecks()
     await runRecoveryContinuationChecks()
@@ -309,7 +325,7 @@ Task {
     await runNetworkProbeChecks()
     await runAsyncChecks()
     do{try await runTransactionChecks()}catch{CheckHarness.failure("事务场景异常",file:#filePath,line:#line)}
-    print("RESULT scenarios=\(scenarios + 39) assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
+    print("RESULT scenarios=\(scenarios + 45) assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
     exit(CheckHarness.failures == 0 ? 0 : 1)
 }
 dispatchMain()

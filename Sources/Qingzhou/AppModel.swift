@@ -53,7 +53,10 @@ import QingzhouKit
     @Published var connections:[CoreConnection]=[]
     @Published var proxyInfo:[String:ProxyInfo]=[:]
     @Published var monitorPaused=false
-    @Published var monitorStatus="未连接"
+    @Published var monitor = RuntimeMonitorState()
+    var monitorStatus: String { monitor.summary }
+    var uploadRateText: String { monitor.rateLabel(uploadRate, paused: monitorPaused, format: formatRate) }
+    var downloadRateText: String { monitor.rateLabel(downloadRate, paused: monitorPaused, format: formatRate) }
     private(set) var store:NodeStore?
     let credentials=KeychainStore()
     let core:CoreController
@@ -143,10 +146,7 @@ import QingzhouKit
         let client=CoreAPIClient(context:control)
         do {
             _=try await client.proxies()
-            for group in next.groups where group.kind == .fallback {
-                let chosen=try await client.initializeFallback(group)
-                if chosen==nil,next.activePolicy == .group(group.id) {throw ProxyError("当前回退组没有已确认可用的节点")}
-            }
+            try await client.initializeFallbacks(state: next)
             let results=await ConnectivityProbe.all(port:next.listenPort,client:client,mode:next.mode)
             connectivityResults=results;reachability=ConnectivityResult.combinedSummary(results)
             for result in results {log(result.summary)}
@@ -164,7 +164,10 @@ import QingzhouKit
             try capture.activateSystemProxy(port:next.listenPort,protectedDomains:next.protectedDomains)
             if next.captureMode == .systemProxy {try await proxy.verifyApplied()}
             guard capture.running else {throw ProxyError("核心已经退出")}
-            connection = .connected;recoveryPending=proxy.hasRecovery;startTelemetry(client)
+            try Task.checkCancellation()
+            connection = .connected;recoveryPending=proxy.hasRecovery
+            if stopRequested || pendingRecovery { await client.shutdown() }
+            else { startTelemetry(client) }
         } catch {
             await client.shutdown()
             let original=error
@@ -293,16 +296,16 @@ import QingzhouKit
             stopTelemetry();connection = .error;report(original)
         }
     }
-    private func disconnectInternal() async throws {cancelHealthRefresh();epoch=UUID();connectivityEpoch=UUID();connection = .disconnecting;do{try await capture.stop()}catch{recoveryPending=true;connection = .error;throw error};stopTelemetry();recoveryPending=proxy.hasRecovery;connection = .disconnected;connectivityResults=[];reachability="尚未检测";log("本次连接已停止；本地代理恢复完成，辅助服务是否恢复取决于本次接管状态")}
+    private func disconnectInternal() async throws {stopTelemetry();connection = .disconnecting;do{try await capture.stop()}catch{recoveryPending=true;connection = .error;throw error};recoveryPending=proxy.hasRecovery;connection = .disconnected;connectivityResults=[];reachability="尚未检测";log("本次连接已停止；本地代理恢复完成，辅助服务是否恢复取决于本次接管状态")}
     func disconnect() async {
         guard canStop else{return}
-        cancelHealthRefresh();cancelMeasurement();stopRequested=true
+        stopTelemetry();cancelMeasurement();stopRequested=true
         drainPendingDisconnect()
     }
     func recover() async {
         guard !loadingFailed,!recovering else{return}
         recovering=true;pendingRecovery=true;stopRequested=false
-        cancelHealthRefresh();cancelMeasurement();drainPendingDisconnect()
+        stopTelemetry();cancelMeasurement();drainPendingDisconnect()
     }
     private func performRecovery() async {
         busy=true;defer{recovering=false;busy=false};connection = .disconnecting
@@ -333,7 +336,7 @@ import QingzhouKit
         maintenanceTask=Task{[weak self] in while !Task.isCancelled {await self?.maintenance();try? await Task.sleep(nanoseconds:60_000_000_000)}}
     }
     private func startTelemetry(_ client:CoreAPIClient) {
-        stopTelemetry();healthFailures=HealthFailureCounter();rateHistory=[];trafficByNode=[:];trafficByTarget=[:];observedConnections=[:];fallbackStates=[:];failedHealthCycles=0;api=client;let token=UUID();epoch=token;monitorStatus="实时监控"
+        stopTelemetry();healthFailures=HealthFailureCounter();rateHistory=[];trafficByNode=[:];trafficByTarget=[:];observedConnections=[:];fallbackStates=[:];failedHealthCycles=0;api=client;let token=UUID();epoch=token;monitor=RuntimeMonitorState();monitor.active=true
         healthTask=Task{[weak self] in while !Task.isCancelled {
             if let self,self.epoch==token,!self.locked,!self.healthChecking {self.scheduleHealthRefresh(delay:0)}
             try? await Task.sleep(nanoseconds:60_000_000_000)
@@ -343,20 +346,33 @@ import QingzhouKit
                 guard let self,self.epoch==token else{return}
                 let hidden=NSApplication.shared.isHidden || NSApplication.shared.windows.filter{$0.canBecomeMain}.allSatisfy{!$0.isVisible || $0.isMiniaturized}
                 if !self.monitorPaused {
-                    do {if self.capture.activeMode?.usesTunnel == true {let status=try await self.capture.helperStatus();self.helperStatus=status.message;self.protectionSummary=status.protectionSummary ?? [];if !status.running {self.log(status.message);self.coreFailed=true;self.drainPendingDisconnect();return}}
-                    let snapshot=try await client.connections();let info=try await client.proxies();guard self.epoch==token,!Task.isCancelled else{return};self.aggregate(snapshot.connections);self.connections=snapshot.connections;self.uploadTotal=snapshot.uploadTotal;self.downloadTotal=snapshot.downloadTotal;let changed=CoreAPIClient.actualTag(self.proxyInfo) != CoreAPIClient.actualTag(info);self.proxyInfo=info;self.monitorStatus="实时监控";if changed,self.connectivityResults != ConnectivityResult.pending {Task{await self.checkConnectivity()}}}
-                    catch {if self.epoch==token,!Task.isCancelled{self.monitorStatus="监控暂不可用"}}
+                    do {if self.capture.activeMode?.usesTunnel == true {let status=try await self.capture.helperStatus();guard self.epoch==token,!Task.isCancelled else{return};self.helperStatus=status.message;self.protectionSummary=status.protectionSummary ?? [];if !status.running {self.log(status.message);self.coreFailed=true;self.drainPendingDisconnect();return}}
+                    let snapshot=try await client.connections();let info=try await client.proxies();guard self.epoch==token,!Task.isCancelled else{return};self.aggregate(snapshot.connections);self.connections=snapshot.connections;self.uploadTotal=snapshot.uploadTotal;self.downloadTotal=snapshot.downloadTotal;let changed=CoreAPIClient.actualTag(self.proxyInfo) != CoreAPIClient.actualTag(info);self.proxyInfo=info;self.monitor.connections = .available;if changed,self.connectivityResults != ConnectivityResult.pending {Task{await self.checkConnectivity()}}}
+                    catch {if self.epoch==token,!Task.isCancelled{self.monitor.connections = .unavailable}}
                 }
                 try? await Task.sleep(nanoseconds:hidden ? 5_000_000_000 : 1_000_000_000)
             }
         }
-        trafficTask=Task{[weak self] in
-            do {let stream=try await client.traffic();var last=Date.distantPast
-                for try await rate in stream {guard let self,!Task.isCancelled,self.epoch==token else{return};let hidden=NSApplication.shared.isHidden || NSApplication.shared.windows.filter{$0.canBecomeMain}.allSatisfy{!$0.isVisible || $0.isMiniaturized};if !self.monitorPaused && Date().timeIntervalSince(last)>=(hidden ? 5 : 0.8){self.uploadRate=max(0,rate.up);self.downloadRate=max(0,rate.down);last=Date();self.rateHistory.append(RateSample(upload:self.uploadRate,download:self.downloadRate));self.rateHistory.removeAll{Date().timeIntervalSince($0.time)>1800}}}
-            }catch{if let self,self.epoch==token,!Task.isCancelled{self.monitorStatus="流量通道暂不可用"}}
+        trafficTask=Task { [weak self] in
+            var last=Date.distantPast
+            await TrafficMonitor.run(connect: { try await client.traffic() }, receive: { [weak self] rate in
+                guard let self, !Task.isCancelled, self.epoch==token else { return }
+                if self.monitor.traffic != .available { self.monitor.traffic = .available }
+                let hidden=NSApplication.shared.isHidden || NSApplication.shared.windows.filter{$0.canBecomeMain}.allSatisfy{!$0.isVisible || $0.isMiniaturized}
+                if !self.monitorPaused && Date().timeIntervalSince(last)>=(hidden ? 5 : 0.8) {
+                    self.uploadRate=max(0,rate.up);self.downloadRate=max(0,rate.down);last=Date()
+                    self.rateHistory.append(RateSample(upload:self.uploadRate,download:self.downloadRate))
+                    self.rateHistory.removeAll{Date().timeIntervalSince($0.time)>1800}
+                }
+            }, disconnected: { [weak self] in
+                guard let self, !Task.isCancelled, self.epoch==token else { return }
+                self.monitor.traffic = .unavailable
+                self.uploadRate=0;self.downloadRate=0;last = .distantPast
+            })
         }
     }
-    private func stopTelemetry() {cancelHealthRefresh();epoch=UUID();connectivityEpoch=UUID();healthRefreshPending=false;healthTask?.cancel();healthTask=nil;telemetryTask?.cancel();trafficTask?.cancel();telemetryTask=nil;trafficTask=nil;if let old=api{Task{await old.shutdown()}};api=nil;connections=[];proxyInfo=[:];uploadRate=0;downloadRate=0;uploadTotal=0;downloadTotal=0;monitorStatus="未连接"}
+    private func stopTelemetry() {cancelHealthRefresh();epoch=UUID();connectivityEpoch=UUID();healthRefreshPending=false;healthTask?.cancel();healthTask=nil;telemetryTask?.cancel();trafficTask?.cancel();telemetryTask=nil;trafficTask=nil;if let old=api{Task{await old.shutdown()}};api=nil;connections=[];proxyInfo=[:];uploadRate=0;downloadRate=0;uploadTotal=0;downloadTotal=0;monitor=RuntimeMonitorState()}
+
     func closeConnection(_ id:String?) async {guard !locked,let api else{return};do{if let id{try await api.closeConnection(id)}else{try await api.closeAllConnections()}}catch{report(error)}}
     func measure(_ ids:[UUID]?=nil) {
         guard !locked,!state.nodes.isEmpty else{return};measuring=true;measurementProgress="准备测速"
@@ -540,19 +556,19 @@ import QingzhouKit
         // 控制通道和节点健康独立评估，未知节点不阻断其他回退组的判定。
         do {_ = try await client.proxies();guard epoch==token,!Task.isCancelled,!locked else{return};failedHealthCycles=0}
         catch {
-            guard epoch==token,!Task.isCancelled,!locked else{return};failedHealthCycles+=1
+            guard epoch==token,!Task.isCancelled,!locked else{return};monitor.health="节点健康暂无法核对";failedHealthCycles+=1
             log("健康检查：控制接口失败 category="+ConnectivityResult.category(error)+" consecutive=\(failedHealthCycles)")
             if failedHealthCycles>=2 {busy=true;defer{busy=false};do{try await disconnectInternal();connection = .error;errorMessage="核心控制接口连续不可达，已恢复网络"}catch{report(error)}}
             return
         }
-        if statuses.contains(where:{if case .unknown=$0{return true};return false}) {monitorStatus="节点健康部分无法确定"}
+        monitor.health = statuses.contains(where:{if case .unknown=$0{return true};return false}) ? "节点健康部分无法确定" : statuses.contains(where:{if case .unavailable=$0{return true};return false}) ? "部分节点检测失败" : nil
         if healthFailures.update(statuses) {busy=true;defer{busy=false};do{try await disconnectInternal();connection = .error;errorMessage="全部节点不可用，代理已失效，原网络已恢复"}catch{report(error)};return}
         for group in state.groups where group.kind == .fallback && group.members.contains(where:{if case .node(let id)=$0{return relevant.contains(id)};return false}) {
             guard epoch==token,!Task.isCancelled,!locked else{return}
             let priority=group.members.compactMap{ref -> UUID? in if case .node(let id)=ref{return id};return nil};let currentTag=proxyInfo[PolicyReference.group(group.id).tag]?.now
             let current=priority.first{PolicyReference.node($0).tag==currentTag} ?? {if case .node(let id)=group.selected{return id};return nil}()
             var controller=fallbackStates[group.id] ?? FallbackController();let decision=controller.evaluate(priority:priority,current:current,results:results);fallbackStates[group.id]=controller
-            if decision.unavailable {monitorStatus="回退组 \(group.name) 全部不可用";if state.activePolicy == .group(group.id){busy=true;defer{busy=false};do{try await disconnectInternal();connection = .error;errorMessage="回退组全部不可用，代理已失效，原网络已恢复"}catch{report(error)}};continue}
+            if decision.unavailable {monitor.health="回退组 \(group.name) 全部不可用";if state.activePolicy == .group(group.id){busy=true;defer{busy=false};do{try await disconnectInternal();connection = .error;errorMessage="回退组全部不可用，代理已失效，原网络已恢复"}catch{report(error)}};continue}
             if let selected=decision.selected,selected != current {do{try await client.select(.node(selected),group:PolicyReference.group(group.id).tag);guard epoch==token,!Task.isCancelled,!locked else{return};log("优先级回退已切换，已有连接保留")}catch{report(error)}}
         }
     }

@@ -18,6 +18,12 @@ final class Service {
     var capturePlan:CapturePlan?
     var dnsForwarder:ScopedDNSForwarder?
     var activeRequest:TunRequest?
+    var networkChecks: NetworkCheckScheduler?
+    var routeSample: () throws -> NetworkRouteSample = { try NetworkRouteSample() }
+    var networkDNSRead: ((String) -> NSDictionary?)?
+    var networkSnapshotRead: ((NetworkRouteSample) throws -> NetworkSnapshot)?
+    var networkClock: () -> Date = { Date() }
+    var networkUptime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     var networkTimer:DispatchSourceTimer?
     var networkStore:SCDynamicStore?
     var routeEvents:DispatchSourceRead?
@@ -57,7 +63,7 @@ final class Service {
     func prefix(_ info:String)->String? {NetworkInspection.routePrefix(destination:field("destination",info),mask:field("mask",info),host:info.contains("HOST"))}
     func stop(preserveExternal:Bool=false) throws {
         coreOutput?.fileHandleForReading.readabilityHandler=nil;coreOutput=nil
-        captureGeneration=UUID();domainRouteSummary=[];activatePrepared=nil;activeRequest=nil;networkTimer?.cancel();networkTimer=nil;if let networkStore {SCDynamicStoreSetDispatchQueue(networkStore,nil)};networkStore=nil;routeEvents?.cancel();routeEvents=nil;pendingNetworkChange=nil;snapshotRetry.reset();dnsForwarder?.stop();dnsForwarder=nil;capturePlan=nil
+        captureGeneration=UUID();domainRouteSummary=[];activatePrepared=nil;activeRequest=nil;networkChecks?.cancel();networkChecks=nil;networkTimer?.cancel();networkTimer=nil;if let networkStore {SCDynamicStoreSetDispatchQueue(networkStore,nil)};networkStore=nil;routeEvents?.cancel();routeEvents=nil;pendingNetworkChange=nil;snapshotRetry.reset();dnsForwarder?.stop();dnsForwarder=nil;capturePlan=nil
         guard let record=journal else{        if let process,process.isRunning {process.terminate();for _ in 0..<40 {if !process.isRunning{break};usleep(50000)};if process.isRunning{kill(process.processIdentifier,SIGKILL)};process.waitUntilExit()};process=nil;owner=nil;try? FileManager.default.removeItem(at:root.appendingPathComponent("runtime.json"))
 return};var issues:[String]=[]
         // 仅管理员显式选择保留外部网络时跳过代理写入；先确认所有服务已离开轻舟入口。

@@ -46,6 +46,20 @@ struct InterfaceChecks {
             checks += 1
             print("PASS " + message)
         }
+        // 监控失效时所有速率入口显示不可用，列表成功不覆盖通道或健康错误。
+        model.monitor.active = true
+        model.monitor.traffic = .unavailable
+        model.monitor.connections = .available
+        model.monitor.health = "节点健康部分无法确定"
+        model.uploadRate = 100; model.downloadRate = 200
+        try check(model.uploadRateText == "不可用" && model.downloadRateText == "不可用", "失效速率不显示历史值")
+        try check(model.monitorStatus.contains("流量通道") && model.monitorStatus.contains("节点健康"), "列表成功不掩盖流量与健康错误")
+        model.monitor.traffic = .available
+        try check(model.downloadRateText == formatRate(200), "流量恢复后显示新速率")
+        model.monitorPaused = true
+        try check(model.uploadRateText == "不可用", "暂停期间不显示历史速率")
+        model.monitorPaused = false; model.monitor = RuntimeMonitorState()
+        model.uploadRate = 0; model.downloadRate = 0
         try check(preferences.string(forKey: "interfaceMode") == nil, "首次使用没有模式偏好，使用简洁默认值")
         try check(preferences.string(forKey: "appearancePreference") == nil, "首次使用默认跟随系统外观")
         let root = ContentView(model: model).defaultAppStorage(preferences).tint(Theme.accentBlue)
