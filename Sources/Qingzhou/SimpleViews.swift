@@ -57,8 +57,7 @@ struct SimpleCard<Content: View>: View {
         VStack(alignment: .leading, spacing: 16, content: content)
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Theme.cardBackground, in: RoundedRectangle(cornerRadius: 14))
-            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.subtleBorder))
+            .liquidContentSurface()
     }
 }
 
@@ -101,7 +100,6 @@ struct SimpleConnectionView: View {
                 SimpleCard {
                     VStack(spacing: 18) {
                         ZStack {
-                            Circle().fill(Theme.accentBlue.opacity(0.08)).frame(width: 80, height: 80)
                             if transitioning { ProgressView().controlSize(.large) }
                             else {
                                 Image(systemName: model.connection == .connected ? "paperplane.fill" : "power")
@@ -109,16 +107,19 @@ struct SimpleConnectionView: View {
                                     .foregroundStyle(Theme.accentBlue)
                             }
                         }
+                        .frame(width: 80, height: 80)
+                        .liquidControl(in: Circle(), tint: Theme.accentBlue.opacity(0.1), interactive: false)
+                        .accessibilityHidden(true)
                         Text(status).font(.title2.bold()).multilineTextAlignment(.center)
                         if needsImport && model.connection != .connected {
                             Text("添加订阅或节点，开始使用轻舟。")
                                 .foregroundStyle(.secondary)
                             Button("添加订阅或节点", action: onImport)
-                                .buttonStyle(.borderedProminent).controlSize(.large)
+                                .liquidAction(prominent: true).controlSize(.large)
                                 .disabled(model.locked)
                         } else if needsSelection && model.connection != .connected {
                             Text("选择一条线路后即可连接。").foregroundStyle(.secondary)
-                            Button("选择线路", action: onLines).buttonStyle(.borderedProminent).disabled(model.locked)
+                            Button("选择线路", action: onLines).liquidAction(prominent: true).disabled(model.locked)
                         } else {
                             Button {
                                 Task {
@@ -129,7 +130,7 @@ struct SimpleConnectionView: View {
                                 Text(model.connection == .connected ? "断开连接" : model.connection == .connecting ? "取消连接" : "连接")
                                     .fontWeight(.semibold).frame(minWidth: 140)
                             }
-                            .buttonStyle(.borderedProminent).controlSize(.large)
+                            .liquidAction(prominent: true, tint: model.connection == .connected ? Theme.dangerRed : Theme.accentBlue).controlSize(.large)
                             .disabled(model.stopDisabled || (model.recoveryPending && model.connection != .connected))
                             .accessibilityIdentifier("primaryConnectionButton")
                         }
@@ -147,7 +148,7 @@ struct SimpleConnectionView: View {
                             }
                         }
                         Spacer(minLength: 12)
-                        Button("更换", action: onLines).disabled(model.locked)
+                        Button("更换", action: onLines).liquidAction().disabled(model.locked)
                     }
                     if model.connection == .connected {
                         Divider()
@@ -243,7 +244,7 @@ struct SimpleLinesView: View {
                     if model.state.activePolicy == .automatic { Image(systemName: "checkmark.circle.fill") }
                 }.padding(12).contentShape(Rectangle())
             }
-            .buttonStyle(.plain).background(Theme.accentBlue.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+            .buttonStyle(.plain).liquidControl(in: RoundedRectangle(cornerRadius: 14), tint: Theme.accentBlue.opacity(0.08))
             .disabled(model.locked || model.state.nodes.isEmpty)
             .accessibilityLabel("自动选择线路")
             if model.state.nodes.isEmpty {
@@ -307,7 +308,7 @@ struct SimpleLinesView: View {
             Button { detail = node } label: { Image(systemName: "info.circle") }
                 .buttonStyle(.borderless).accessibilityLabel("线路详情：" + node.name)
         }
-        .padding(14).background(Theme.cardBackground, in: RoundedRectangle(cornerRadius: 10))
+        .padding(14).liquidContentSurface(cornerRadius: 14)
     }
 }
 
@@ -320,7 +321,7 @@ struct SimpleSubscriptionsView: View {
                 HStack {
                     Text("订阅").font(.largeTitle.bold())
                     Spacer()
-                    Button("添加订阅", action: onImport).buttonStyle(.borderedProminent).disabled(model.locked)
+                    Button("添加订阅", action: onImport).liquidAction(prominent: true).disabled(model.locked)
                 }
                 Text("粘贴服务商提供的订阅链接，更新后即可选择线路。")
                     .font(.callout).foregroundStyle(.secondary)
@@ -366,6 +367,7 @@ struct SimpleSettingsView: View {
                     Toggle("登录 macOS 时启动", isOn: Binding(get: { model.state.loginAtStartup }, set: { model.setLoginAtStartup($0) }))
                 }.disabled(model.locked)
                 Section("界面") {
+                    AppearanceSetting()
                     Picker("界面模式", selection: $interfaceMode) {
                         Text("简洁").tag(InterfaceMode.simple)
                         Text("专业").tag(InterfaceMode.professional)
@@ -385,6 +387,7 @@ struct SimpleSettingsView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }.formStyle(.grouped)
+                .scrollContentBackground(.hidden)
         }
     }
 }

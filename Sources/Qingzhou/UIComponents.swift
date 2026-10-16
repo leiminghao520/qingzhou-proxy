@@ -139,12 +139,7 @@ struct ModernStatCard: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, minHeight: 96, maxHeight: 96, alignment: .leading)
-        .background(Theme.cardBackground)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.cardCornerRadius)
-                .stroke(Theme.subtleBorder, lineWidth: 1)
-        )
+        .liquidContentSurface(cornerRadius: Theme.cardCornerRadius)
     }
 }
 
@@ -273,13 +268,14 @@ struct UsageProgressBar: View {
     }
 }
 
-// MARK: - Sidebar Navigation Item Row (Full-Width Hit Testing & Hover)
+// MARK: - 侧栏导航与玻璃选中态
 struct SidebarNavItemRow: View {
     let name: String
     let icon: String
     let isSelected: Bool
     var badgeText: String? = nil
     var badgeColor: Color? = nil
+    var selectionNamespace: Namespace.ID? = nil
     let action: () -> Void
     
     @State private var isHovered = false
@@ -311,10 +307,11 @@ struct SidebarNavItemRow: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
             .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: Theme.controlRadius)
-                    .fill(isSelected ? Theme.accentBlue.opacity(0.14) : (isHovered ? Color.primary.opacity(0.06) : Color.clear))
-            )
+            .background {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(!isSelected && isHovered ? Color.primary.opacity(0.06) : .clear)
+            }
+            .modifier(LiquidSelectionSurface(selected: isSelected, namespace: selectionNamespace, id: "sidebar-selection", cornerRadius: 12))
             .contentShape(RoundedRectangle(cornerRadius: Theme.controlRadius))
         }
         .buttonStyle(.plain)

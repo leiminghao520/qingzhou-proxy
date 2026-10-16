@@ -7,6 +7,9 @@ struct InterfaceChecks {
     @MainActor static func main() {
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
+        if let resources = Bundle.main.resourceURL, let icon = NSImage(contentsOf: resources.appendingPathComponent("AppIcon.icns")) {
+            app.applicationIconImage = icon
+        }
         app.activate(ignoringOtherApps: true)
         Task { @MainActor in
             do { try await run(); exit(0) }
@@ -44,22 +47,34 @@ struct InterfaceChecks {
             print("PASS " + message)
         }
         try check(preferences.string(forKey: "interfaceMode") == nil, "首次使用没有模式偏好，使用简洁默认值")
+        try check(preferences.string(forKey: "appearancePreference") == nil, "首次使用默认跟随系统外观")
         let root = ContentView(model: model).defaultAppStorage(preferences).tint(Theme.accentBlue)
-        let host = NSHostingView(rootView: root)
+        let host = NSHostingView(rootView: AnyView(root))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 820, height: 620), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.contentView = host
         window.makeKeyAndOrderFront(nil)
         func settle() async {
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            try? await Task.sleep(nanoseconds: 600_000_000)
             host.layoutSubtreeIfNeeded()
         }
         func capture(_ name: String, _ appearance: NSAppearance.Name = .aqua) async throws {
+            window.makeKeyAndOrderFront(nil)
+            NSApplication.shared.activate(ignoringOtherApps: true)
             window.appearance = NSAppearance(named: appearance)
             await settle()
             try screenshot(window, to: output.appendingPathComponent(name + ".png"))
         }
         try await capture("simple-empty-light")
         try await capture("simple-empty-dark", .darkAqua)
+        // 只在独立检查程序中注入 SDK 的环境存储值，不改变系统辅助功能设置。
+        host.rootView = AnyView(root.environment(\._accessibilityReduceTransparency, true))
+        try await capture("simple-reduced-transparency-light")
+        try await capture("simple-reduced-transparency-dark", .darkAqua)
+        host.rootView = AnyView(root.environment(\._accessibilityReduceMotion, true))
+        try await capture("simple-reduced-motion")
+        host.rootView = AnyView(root.environment(\._colorSchemeContrast, .increased))
+        try await capture("simple-increased-contrast")
+        host.rootView = AnyView(root)
         let first = Node(name: "香港 · 日常线路", kind: .shadowsocks, server: "example.invalid", port: 443)
         let long = Node(name: "日本 · 东京 · 这是一条用于检查窄窗口中文长名称和英文 Tokyo Premium Route 的测试线路", kind: .trojan, server: "example.invalid", port: 443)
         model.state.nodes = [first, long]
@@ -107,6 +122,28 @@ struct InterfaceChecks {
         preferences.set(InterfaceMode.simple.rawValue, forKey: "interfaceMode")
         window.setContentSize(NSSize(width: 820, height: 620))
         try await capture("simple-after-switch")
+        let appearanceState = try JSONSerialization.jsonObject(with: JSONEncoder().encode(model.state)) as! NSDictionary
+        preferences.set(AppearancePreference.light.rawValue, forKey: "appearancePreference")
+        await settle()
+        try check(host.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .aqua, "白天外观应用到窗口")
+        try await capture("appearance-day", .darkAqua)
+        preferences.set(AppearancePreference.dark.rawValue, forKey: "appearancePreference")
+        await settle()
+        try check(host.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua, "夜间外观应用到窗口")
+        try await capture("appearance-night", .aqua)
+        preferences.synchronize()
+        try check(UserDefaults(suiteName: suite)?.string(forKey: "appearancePreference") == "dark", "外观偏好持久保存")
+        preferences.set(AppearancePreference.system.rawValue, forKey: "appearancePreference")
+        window.appearance = NSAppearance(named: .darkAqua)
+        await settle()
+        try check(host.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua, "跟随系统恢复深色继承")
+        try await capture("appearance-system-dark", .darkAqua)
+        window.appearance = NSAppearance(named: .aqua)
+        await settle()
+        try check(host.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .aqua, "跟随系统响应浅色继承")
+        try await capture("appearance-system-light")
+        let afterAppearanceState = try JSONSerialization.jsonObject(with: JSONEncoder().encode(model.state)) as! NSDictionary
+        try check(appearanceState == afterAppearanceState && model.connection == connection, "外观切换不改变代理配置和连接状态")
         let after = try JSONEncoder().encode(model.state)
         // JSON 对象比较不受字典键输出顺序影响。
         let beforeObject = try JSONSerialization.jsonObject(with: before) as! NSDictionary
@@ -119,7 +156,7 @@ struct InterfaceChecks {
             panel.contentView = view
             panel.appearance = NSAppearance(named: .aqua)
             panel.makeKeyAndOrderFront(nil)
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            try? await Task.sleep(nanoseconds: 600_000_000)
             view.layoutSubtreeIfNeeded()
             try screenshot(panel, to: output.appendingPathComponent(name + ".png"))
             panel.orderOut(nil)
@@ -128,7 +165,7 @@ struct InterfaceChecks {
         try await component(SimpleSubscriptionsView(model: model, onImport: {}), "simple-subscriptions")
         try await component(SimpleSettingsView(model: model, onAdvanced: {}, onDiagnose: {}).defaultAppStorage(preferences), "simple-settings")
         try check(!FileManager.default.fileExists(atPath: model.directory.appendingPathComponent("proxy-recovery.json").path), "截图未创建代理接管记录")
-        print("INTERFACE_CHECKS_OK assertions=\(checks) screenshots=18")
+        print("INTERFACE_CHECKS_OK assertions=\(checks) screenshots=26")
         if CommandLine.arguments.contains("--interactive") {
             window.makeKeyAndOrderFront(nil)
             NSApplication.shared.activate(ignoringOtherApps: true)

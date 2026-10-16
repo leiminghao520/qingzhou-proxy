@@ -3,7 +3,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 scripts/swift-local.sh build --product Qingzhou
 stage="$PWD/.build/interface-checks"
-mkdir -p "$stage/InterfaceChecks.app/Contents/MacOS"
+mkdir -p "$stage/InterfaceChecks.app/Contents/MacOS" "$stage/InterfaceChecks.app/Contents/Resources"
+if [ -f .build/AppIcon.icns ]; then cp .build/AppIcon.icns "$stage/InterfaceChecks.app/Contents/Resources/AppIcon.icns"; fi
 cat > "$stage/InterfaceChecks.app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -12,6 +13,7 @@ cat > "$stage/InterfaceChecks.app/Contents/Info.plist" <<'PLIST'
 <key>CFBundleIdentifier</key><string>cn.qingzhou.interfacechecks</string>
 <key>CFBundleName</key><string>轻舟界面检查</string>
 <key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleIconFile</key><string>AppIcon</string>
 <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict></plist>
 PLIST

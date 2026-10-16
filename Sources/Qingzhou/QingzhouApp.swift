@@ -161,9 +161,12 @@ func formatRate(_ value: Int64) -> String {
 // MARK: - Main Content View
 struct ContentView: View {
     @ObservedObject var model: AppModel
+    @AppStorage("appearancePreference") private var appearance = AppearancePreference.system
     @AppStorage("interfaceMode") private var interfaceMode = InterfaceMode.simple
     @State private var page = AppPage.home
     @State private var utility: UtilityPage?
+    @Namespace private var navigationGlass
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var importing = false
     @State private var editing: EditorRequest?
 
@@ -220,41 +223,44 @@ struct ContentView: View {
                 Divider().opacity(0.6)
 
                 ScrollView(showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 14) {
-                        ForEach(navSections, id: \.title) { section in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(section.title)
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(.secondary)
-                                    .padding(.horizontal, 10)
-                                    .padding(.top, 4)
-                                ForEach(section.items) { item in
-                                    let isSelected = page == item
-                                    let badgeText: String? = {
-                                        if (item == .nodes || item == .lines) {
-                                            return "\(model.state.nodes.count)"
-                                        } else if item == .connections && !model.connections.isEmpty {
-                                            return "\(model.connections.count)"
-                                        }
-                                        return nil
-                                    }()
-                                    let badgeColor: Color? = (item == .connections) ? Theme.connectedGreen : nil
+                    LiquidGlassGroup(spacing: 6) {
+                        VStack(alignment: .leading, spacing: 14) {
+                            ForEach(navSections, id: \.title) { section in
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(section.title)
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(.secondary)
+                                        .padding(.horizontal, 10)
+                                        .padding(.top, 4)
+                                    ForEach(section.items) { item in
+                                        let isSelected = page == item
+                                        let badgeText: String? = {
+                                            if (item == .nodes || item == .lines) {
+                                                return "\(model.state.nodes.count)"
+                                            } else if item == .connections && !model.connections.isEmpty {
+                                                return "\(model.connections.count)"
+                                            }
+                                            return nil
+                                        }()
+                                        let badgeColor: Color? = (item == .connections) ? Theme.connectedGreen : nil
 
-                                    SidebarNavItemRow(
-                                        name: item.title,
-                                        icon: item.icon,
-                                        isSelected: isSelected,
-                                        badgeText: badgeText,
-                                        badgeColor: badgeColor
-                                    ) {
-                                        page = item
+                                        SidebarNavItemRow(
+                                            name: item.title,
+                                            icon: item.icon,
+                                            isSelected: isSelected,
+                                            badgeText: badgeText,
+                                            badgeColor: badgeColor,
+                                            selectionNamespace: navigationGlass
+                                        ) {
+                                            withAnimation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.86)) { page = item }
+                                        }
                                     }
                                 }
                             }
                         }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 12)
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 12)
                 }
 
                 Divider().opacity(0.6)
@@ -347,13 +353,11 @@ struct ContentView: View {
                     )
                     .padding(10)
                 }
-                Picker("界面模式", selection: $interfaceMode) {
-                    Text("简洁").tag(InterfaceMode.simple)
-                    Text("专业").tag(InterfaceMode.professional)
-                }
-                .pickerStyle(.segmented)
-                .accessibilityIdentifier("interfaceModePicker")
-                .padding(12)
+                LiquidModePicker(selection: $interfaceMode)
+                    .padding(12)
+                AppearanceMenu()
+                    .frame(maxWidth: .infinity)
+                    .padding(.bottom, 12)
             }
             .navigationSplitViewColumnWidth(min: 210, ideal: 225, max: 250)
         } detail: {
@@ -371,8 +375,9 @@ struct ContentView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .background(Color(nsColor: .windowBackgroundColor))
+            .background { LiquidCanvas() }
         }
+        .preferredColorScheme(appearance.colorScheme)
         .onAppear {
             page = interfaceMode == .simple ? .home : .overview
         }
@@ -681,15 +686,13 @@ struct OverviewView: View {
                 .font(.system(size: 14, weight: .semibold))
                 .frame(minWidth: 70)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(model.connection == .connected ? Theme.dangerRed : Theme.accentBlue)
+            .liquidAction(prominent: true, tint: model.connection == .connected ? Theme.dangerRed : Theme.accentBlue)
             .controlSize(.large)
             .disabled(model.stopDisabled || (model.state.activePolicy == nil && model.state.mode != .direct && model.connection != .connected) || (model.recoveryPending && model.connection != .connected))
         }
         .padding(16)
         .frame(maxWidth: .infinity, minHeight: 76, maxHeight: 76, alignment: .leading)
-        .background(Theme.cardBackground)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
+        .liquidContentSurface(cornerRadius: Theme.cardCornerRadius)
         .overlay(
             RoundedRectangle(cornerRadius: Theme.cardCornerRadius)
                 .stroke(model.connection == .connected ? Theme.connectedGreen.opacity(0.3) : Theme.subtleBorder, lineWidth: 1)
@@ -1424,6 +1427,12 @@ struct SettingsView: View {
     }
     var body: some View {
         Form {
+            Section("界面外观") {
+                AppearanceSetting()
+                Text("立即生效，并记住你的选择。跟随系统会随 macOS 外观自动切换。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
             Section {
                 Picker("接管方式", selection: $draftCapture) {
                     Text("系统代理（默认）").tag(CaptureMode.systemProxy)
