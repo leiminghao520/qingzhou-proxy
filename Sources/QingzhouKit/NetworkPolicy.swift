@@ -20,6 +20,9 @@ public enum NetworkPolicy {
             if target == .reject {condition["action"]="reject"} else {condition["action"]="route";condition["server"]=target == .direct || state.dnsPreference == .system ? "local":"remote"}
             dnsRules.append(condition)
         }}
+        if state.captureMode == .compatible,state.mode == .rule {
+            var domestic=DomesticRouting.domainCondition;domestic["action"]="route";domestic["server"]="local";dnsRules.append(domestic)
+        }
         let useRemote=state.mode != .direct && state.dnsPreference == .httpsProxy
         object["dns"]=["servers":[local,remote],"rules":dnsRules,"final":useRemote ? "remote":"local","strategy":family.strategy,"reverse_mapping":true]
         var route=object["route"] as! [String:Any]

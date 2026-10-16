@@ -34,14 +34,15 @@ public final class ScopedDNSForwarder {
     public let port:Int
     private let descriptor:Int32
     private let plan:CapturePlan
+    private let protectAnswers:((String,[String],DNSResolverScope,Date)throws->Void)?
     private let transport:((Data,String,String)->Data?)?
     private let work=DNSWorkQueue()
     public var diagnostics:String {work.snapshot.summary}
     private let lock=NSLock()
     private var stopped=false
     private var started=false
-    public init(plan:CapturePlan,transport:((Data,String,String)->Data?)?=nil) throws {
-        self.plan=plan;self.transport=transport
+    public init(plan:CapturePlan,transport:((Data,String,String)->Data?)?=nil,protectAnswers:((String,[String],DNSResolverScope,Date)throws->Void)?=nil) throws {
+        self.plan=plan;self.transport=transport;self.protectAnswers=protectAnswers
         let fd=socket(AF_INET,SOCK_DGRAM,0);guard fd>=0 else{throw ProxyError("DNS 转发监听创建失败")}
         var address=sockaddr_in();address.sin_len=UInt8(MemoryLayout<sockaddr_in>.size);address.sin_family=sa_family_t(AF_INET);address.sin_addr.s_addr=inet_addr("127.0.0.1")
         let result=withUnsafePointer(to:&address){$0.withMemoryRebound(to:sockaddr.self,capacity:1){Darwin.bind(fd,$0,socklen_t(MemoryLayout<sockaddr_in>.size))}}
@@ -84,7 +85,13 @@ public final class ScopedDNSForwarder {
             guard Date()<deadline else{work.recordTimeout();return DNSPacket.failure(query)}
             let response:Data?
             if let hook=exchange ?? transport {response=hook(query,server,resolver.interface)}else{response=Self.exchange(query,server,resolver.interface,deadline:deadline)}
-            if let response,Date()<deadline,DNSPacket.acceptable(response,query:query){return response}
+            if let response,Date()<deadline,DNSPacket.acceptable(response,query:query){
+                if plan.protects(name),let protectAnswers {
+                    do {try protectAnswers(name,DNSPacket.addresses(response),resolver,deadline)} catch {return DNSPacket.failure(query)}
+                }
+                guard Date()<deadline,!isStopped else {return DNSPacket.failure(query)}
+                return response
+            }
         }}
         if Date()>=deadline {work.recordTimeout()}
         return DNSPacket.failure(query)

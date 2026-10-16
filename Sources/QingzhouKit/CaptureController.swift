@@ -24,7 +24,7 @@ import Foundation
             }
             try await CaptureActivationTransaction.run(prepare:{
                 let status=try await self.helper.request(TunRequest(operation:"status"))
-                guard status.protocolVersion==3 else{throw ProxyError("辅助服务协议过旧，请更新后再开启组合接管")}
+                guard status.protocolVersion==4 else{throw ProxyError("辅助服务协议过旧，请更新后再开启组合接管")}
                 let reply=try await self.helper.request(TunRequest(operation:"prepare",state:runtime,credentials:values,control:control,httpCompatibilityPort:compatibilityPort,systemProxyPort:state.captureMode == .compatible ? state.listenPort:nil))
                 self.ownedTunDNS=reply.dnsServer;self.helperRunning=reply.running;self.activeMode = state.captureMode
             },compatibility:{
@@ -33,7 +33,7 @@ import Foundation
                     try await compatibility.start(configuration:shadow.gatewayData(listenPort:state.listenPort,corePort:runtime.listenPort,httpPort:compatibilityPort,control:control,state:state),port:state.listenPort)
                 }
             },activate:{
-                _=try await self.helper.request(TunRequest(operation:"activate"))
+                // 这里只准备组件；应用显式代理检测通过后才提交系统接管。
             },rollback:{
                 try await self.emergencyRecover()
                 await self.helper.closeChannel()
@@ -51,7 +51,11 @@ import Foundation
             activeMode = .systemProxy
         }
     }
-    public func activateSystemProxy(port:Int) throws{guard activeMode == .systemProxy || (activeMode == .tun && httpCompatibility != nil) else{return};try proxy.apply(port:port,ownedTunDNS:activeMode == .tun ? ownedTunDNS:nil)}
+    public func activateTunnel() async throws {
+        guard activeMode?.usesTunnel == true else {return}
+        _=try await helper.request(TunRequest(operation:"activate"))
+    }
+    public func activateSystemProxy(port:Int,protectedDomains:[String]=[]) throws{guard activeMode == .systemProxy || (activeMode == .tun && httpCompatibility != nil) else{return};try proxy.apply(port:port,ownedTunDNS:activeMode == .tun ? ownedTunDNS:nil,protectedDomains:activeMode == .systemProxy ? protectedDomains:[])}
     public func stop() async throws {
         let needsHelper=activeMode?.usesTunnel == true || helperRunning
         try await restoreAll(includeHelper:needsHelper)

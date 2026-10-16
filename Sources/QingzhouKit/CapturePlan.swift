@@ -34,15 +34,18 @@ public struct NetworkSnapshot:Codable,Equatable,Sendable {
     public init(primaryInterface:String,routes:[ProtectedRoute],resolvers:[DNSResolverScope],proxies:Data=Data()) {
         self.primaryInterface=primaryInterface;self.routes=routes;self.resolvers=resolvers;self.proxies=proxies
     }
-    public static func parseRoutes(_ table:String)->[ProtectedRoute] {
+    public static func parseRoutes(_ table:String,includeTransient:Bool=false)->[ProtectedRoute] {
         var ipv6=false
         return table.components(separatedBy:.newlines).compactMap {line in
             if line=="Internet6:" {ipv6=true};if line=="Internet:" {ipv6=false}
             let fields=line.split(whereSeparator:{$0.isWhitespace}).map(String.init)
             guard fields.count>=4,let interface=fields.dropFirst(3).first(where:{$0.range(of:"^[a-z][a-z0-9]{0,15}$",options:.regularExpression) != nil}),let prefix=(fields[0]=="default" ? (ipv6 ? "::/0":"0.0.0.0/0"):TunAddressPlan.routePrefixes(line).first) else{return nil}
-            // 缓存主机路由不参与持久规划，避免普通公网连接缓存改变保护集合。
-            guard !fields[2].contains("W"),!fields[2].contains("L") else{return nil}
-            return ProtectedRoute(destination:prefix,gateway:fields[1],interface:interface,scope:fields[2].contains("I") ? interface:nil)
+            // 保留 VPN 主机路由用于确认企业虚拟地址；物理公网缓存不参与规划。
+            guard includeTransient || (!fields[2].contains("W") && !fields[2].contains("L")) || CapturePlan.isVPN(interface) else{return nil}
+            // 链路路由可能显示链路索引、ARP 地址或本机地址，统一为接口直连身份。
+            let index=if_nametoindex(interface)
+            let gateway=(!fields[2].contains("G") && index>0) ? "link#"+String(index):fields[1]
+            return ProtectedRoute(destination:prefix,gateway:gateway,interface:interface,scope:fields[2].contains("I") ? interface:nil)
         }
     }
     public static func read(store:SCDynamicStore,primary:String,routes:String,ownedDNSKey:String?=nil,ownedTunnel:String?=nil) throws -> NetworkSnapshot {
@@ -99,9 +102,35 @@ public struct CapturePlan:Codable,Equatable,Sendable {
             let bits=Int(route.destination.split(separator:"/").last ?? "0") ?? 0
             guard bits>(route.ipv6 ? 3:8) || (!route.ipv6 && route.destination.hasPrefix("10.")) else{throw ProxyError("企业隧道正在接管公网大范围路由，无法安全兼容")}
         }
+        // 已被同接口企业网段覆盖的主机缓存不增加保护项，避免每次业务连接触发重连。
+        let stableRoutes=routes.filter {route in
+            let bits=Int(route.destination.split(separator:"/").last ?? "0") ?? 0
+            guard bits==(route.ipv6 ? 128:32),Self.isVPN(route.interface) else {return true}
+            let address=String(route.destination.split(separator:"/")[0])
+            return !routes.contains {other in
+                other.interface==route.interface && other.scope==route.scope && (Int(other.destination.split(separator:"/").last ?? "0") ?? 0)<bits && RuleEvaluator.matches(RoutingRule(kind:.cidr,value:other.destination,action:.direct),host:address,ip:address)==true
+            }
+        }
         let autoDomains=snapshot.resolvers.flatMap(\.protectedDomains)
         guard extraDomains.isEmpty || snapshot.resolvers.contains(where:{Self.isVPN($0.interface)}) else{throw ProxyError("补充内网域名需要可识别的企业 DNS 接口")}
-        return CapturePlan(snapshot:snapshot,protectedRoutes:routes.sorted{(Int($0.destination.split(separator:"/").last ?? "0") ?? 0)>(Int($1.destination.split(separator:"/").last ?? "0") ?? 0)},domains:Array(Set(autoDomains+extraDomains)).map{$0.lowercased()}.sorted(),exclusions:Array(Set(Self.localCIDRs+extraCIDRs)).sorted())
+        return CapturePlan(snapshot:snapshot,protectedRoutes:stableRoutes.sorted{(Int($0.destination.split(separator:"/").last ?? "0") ?? 0)>(Int($1.destination.split(separator:"/").last ?? "0") ?? 0)},domains:Array(Set(autoDomains+extraDomains)).map{$0.lowercased()}.sorted(),exclusions:Array(Set(Self.localCIDRs+extraCIDRs)).sorted())
+    }
+    public func protects(_ domain:String)->Bool {
+        let name=domain.lowercased().trimmingCharacters(in:CharacterSet(charactersIn:"."))
+        return !name.contains(".") || domains.contains{name==$0 || name.hasSuffix("."+$0)}
+    }
+    public func originalRoute(for address:String)->ProtectedRoute? {
+        snapshot.routes.filter{$0.scope==nil && RuleEvaluator.matches(RoutingRule(kind:.cidr,value:$0.destination,action:.direct),host:address,ip:address)==true}.max{(Int($0.destination.split(separator:"/").last ?? "0") ?? 0)<(Int($1.destination.split(separator:"/").last ?? "0") ?? 0)}
+    }
+    public func domainRoute(address:String,resolver:DNSResolverScope) throws -> ProtectedRoute {
+        let loopback=["127.0.0.0/8","::1/128"].contains{RuleEvaluator.matches(RoutingRule(kind:.cidr,value:$0,action:.direct),host:address,ip:address)==true}
+        let candidates=snapshot.routes.filter{($0.interface==resolver.interface || (loopback && $0.interface=="lo0")) && RuleEvaluator.matches(RoutingRule(kind:.cidr,value:$0.destination,action:.direct),host:address,ip:address)==true}
+        let original=candidates.max{(Int($0.destination.split(separator:"/").last ?? "0") ?? 0)<(Int($1.destination.split(separator:"/").last ?? "0") ?? 0)}
+        guard let original else {throw ProxyError("保护域名解析地址的原路径无法确认，拒绝返回未保护地址")}
+        // 原物理网卡的局域网及回环同样需要保留，不能因为不是 VPN 而误拒绝本地设备。
+        let local=Self.localCIDRs.contains{RuleEvaluator.matches(RoutingRule(kind:.cidr,value:$0,action:.direct),host:address,ip:address)==true}
+        guard Self.isVPN(original.interface) || (local && original.interface==snapshot.primaryInterface) || (loopback && original.interface=="lo0") else {throw ProxyError("企业解析地址的原 VPN 路径无法确认，拒绝返回未保护地址")}
+        return ProtectedRoute(destination:address+(address.contains(":") ? "/128":"/32"),gateway:original.gateway,interface:original.interface,source:"企业域名动态保护")
     }
     public func originalInterface(for address:String)->String {
         let matches=snapshot.routes.filter{$0.scope==nil && RuleEvaluator.matches(RoutingRule(kind:.cidr,value:$0.destination,action:.direct),host:address,ip:address)==true}

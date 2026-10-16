@@ -14,8 +14,9 @@ final class ConnectivityFixtureProtocol:URLProtocol {
             body=port==18405 ? "{}":"{\"proxies\":{\"proxy\":{\"type\":\"Selector\",\"name\":\"proxy\",\"now\":\"group-a\"},\"group-a\":{\"type\":\"Selector\",\"name\":\"group-a\",\"now\":\"\(tag)\"},\"\(tag)\":{\"type\":\"Hysteria2\",\"name\":\"\(tag)\"}}}"
         }else if url.path.hasSuffix("/delay") {
             expectTrue(url.path.contains("00000000-0000-0000-0000-000000000001"),"必须使用核心实际选中的节点")
-            expectTrue(URLComponents(url:url,resolvingAgainstBaseURL:false)?.queryItems?.contains{$0.name=="url" && $0.value==ConfigBuilder.testURL}==true)
-            code=port==18401 ? 503:port==18403 ? 401:200;body="{\"delay\":42}"
+            let target=URLComponents(url:url,resolvingAgainstBaseURL:false)?.queryItems?.first{$0.name=="url"}?.value
+            expectTrue([ConfigBuilder.testURL,ConfigBuilder.secondaryTestURL].contains(target ?? ""))
+            code=(port==18401 || (port==18406 && target==ConfigBuilder.testURL)) ? 503:port==18403 ? 401:200;body="{\"delay\":42}"
         }
         client?.urlProtocol(self,didReceive:HTTPURLResponse(url:url,statusCode:code,httpVersion:"HTTP/1.1",headerFields:nil)!,cacheStoragePolicy:.notAllowed)
         client?.urlProtocol(self,didLoad:Data(body.utf8));client?.urlProtocolDidFinishLoading(self)
@@ -39,11 +40,11 @@ func runConnectivityChecks() async {
     expectEqual(ConnectivityResult.combinedSummary([ConnectivityResult("入口",.passed,""),ConnectivityResult("节点",.notApplicable,"")]),"适用路径的 HTTPS 连通性正常")
     expectEqual(ConnectivityResult.combinedSummary([ConnectivityResult("入口",.notApplicable,"")]),"连通性尚未完成检测")
     expectFalse(results[1].summary.contains("正常"));expectFalse(results[1].summary.contains("通过"));await failed.shutdown()
-    for port in [18402,18403,18404,18405] {
+    for port in [18402,18403,18404,18405,18406] {
         let client=CoreAPIClient(context:CoreControlContext(port:port,secret:"synthetic"),protocolClasses:[ConnectivityFixtureProtocol.self])
         let result=await ConnectivityProbe.node(client:client,mode:.rule)
-        expectEqual(result.status,port==18402 ? .passed:.failed)
-        if port==18402{expectEqual(result.milliseconds,42)}
+        expectEqual(result.status,[18402,18406].contains(port) ? .passed:.failed)
+        if [18402,18406].contains(port){expectEqual(result.milliseconds,42)}
         if port==18403{expectEqual(result.category,"鉴权")}
         if port==18404{expectEqual(result.category,"超时")}
         if port==18405{expectEqual(result.category,"控制接口响应格式")}

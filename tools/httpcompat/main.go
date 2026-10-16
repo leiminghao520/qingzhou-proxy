@@ -121,6 +121,12 @@ func prepare(config configuration) (*gateway, error) {
 				}
 				c.prefixes = append(c.prefixes, prefix)
 			}
+		case "DOMAIN-REGEX":
+			var e error
+			c.agent, e = regexp.Compile(item.Value)
+			if e != nil {
+				return nil, e
+			}
 		case "USER-AGENT":
 			if item.Value == "" {
 				return nil, fmt.Errorf("empty agent")
@@ -224,6 +230,8 @@ func (g *gateway) pick(ctx context.Context, host, agent, mode string) (string, e
 			matched = host == suffix || strings.HasSuffix(host, "."+suffix)
 		case "DOMAIN-KEYWORD":
 			matched = strings.Contains(host, strings.ToLower(item.Value))
+		case "DOMAIN-REGEX":
+			matched = item.agent.MatchString(host)
 		case "USER-AGENT":
 			matched = item.agent.MatchString(agent)
 		case "IP-CIDR", "IP-CIDR6", "GEOIP", "IP-ASN":

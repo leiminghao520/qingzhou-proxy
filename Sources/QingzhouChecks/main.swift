@@ -9,8 +9,40 @@ if args.count>=2 && args[1]=="network-acceptance" {
     dispatchMain()
 }
 
+if args.count==3 && args[1]=="original-route-check" {
+    do {
+        let cidrs=try JSONDecoder().decode([String].self,from:Data(args[2].utf8))
+        let table=try NetworkInspection.command("/usr/sbin/netstat",["-rn"]),prefixes=TunAddressPlan.routePrefixes(table)
+        for cidr in cidrs {
+            try ConfigBuilder.validate(RoutingRule(kind:.cidr,value:cidr,action:.direct))
+            if TunAddressPlan.containsRoute(cidr,prefixes:prefixes) {print("EXISTING "+cidr);continue}
+            let host=String(cidr.split(separator:"/")[0])
+            let info=try NetworkInspection.command("/sbin/route",NetworkInspection.routeArguments(.get,destination:host,ipv6:host.contains(":")))
+            guard let gateway=NetworkInspection.routeGateway(info),let interface=NetworkInspection.routeField("interface",info) else {throw ProxyError("原出口无法确认："+cidr)}
+            print("PLANNED "+cidr+" → "+interface+" / "+gateway)
+        }
+        print("ORIGINAL_ROUTE_CHECK_OK（只读，未写路由）");exit(0)
+    }catch{print("ORIGINAL_ROUTE_CHECK_FAILED "+error.localizedDescription);exit(1)}
+}
 if args.count==2 && args[1]=="capture-snapshot" {
     do {let store=SCDynamicStoreCreate(nil,"轻舟只读快照" as CFString,nil,nil)!;let global=SCDynamicStoreCopyValue(store,"State:/Network/Global/IPv4" as CFString) as! [String:Any];let routes=try NetworkInspection.command("/usr/sbin/netstat",["-rn"]);let snapshot=try NetworkSnapshot.read(store:store,primary:global["PrimaryInterface"] as! String,routes:routes);let plan=try CapturePlan.make(snapshot:snapshot,extraCIDRs:[],extraDomains:[]);print("SNAPSHOT_OK routes=\(snapshot.routes.count) protected=\(plan.protectedRoutes.count)");for resolver in snapshot.resolvers {print("DNS interface=\(resolver.interface) servers=\(resolver.servers.count) default=\(resolver.defaultResolver) domains=\(resolver.protectedDomains.count)")};exit(0)}catch{print("SNAPSHOT_FAILED "+error.localizedDescription);exit(1)}
+}
+if args.count==4 && args[1]=="full-capture-fixture" {
+    do {
+        let folder=URL(fileURLWithPath:args[2]),ports=try JSONDecoder().decode([String:Int].self,from:Data(args[3].utf8))
+        let node=try NodeParser.parse("ss://aes-128-gcm:synthetic@127.0.0.1:\(ports["server"]!)")
+        let credentials=MemoryCredentials();try credentials.set(node.secret,for:node.node.credentialRef)
+        var state=AppState();state.nodes=[node.node];state.selectedPolicy = .node(node.node.id);state.captureMode = .compatible;state.listenPort=ports["core"]!;state.addressFamilyPolicy = .ipv4Only
+        state.rules=[RoutingRule(kind:.domain,value:"override.test",action:.direct),RoutingRule(kind:.domain,value:"qq.com",action:.proxy)]
+        let shadow=try JSONDecoder().decode(ShadowrocketConfiguration.self,from:Data(#"{"version":1,"name":"synthetic","sourceFile":"fixture","sourceMode":"Config","general":{},"hosts":{},"rules":[{"kind":"FINAL","value":"","policy":"PROXY","noResolve":false}],"rewrites":[],"assets":{},"assetHashes":{}}"#.utf8))
+        state.shadowrocket=shadow;state.httpCompatibilityEnabled=true
+        let control=CoreControlContext(port:ports["control"]!,secret:String(repeating:"a",count:64))
+        let data=try ConfigBuilder.build(state:state,credentials:credentials,control:control,httpCompatibilityPort:ports["http"]!)
+        try SecureFile.write(shadow.gatewayData(listenPort:ports["gateway"]!,corePort:ports["core"]!,httpPort:ports["http"]!,control:control,state:state),to:folder.appendingPathComponent("gateway.json"))
+        var object=try JSONSerialization.jsonObject(with:data) as! [String:Any]
+        var dns=object["dns"] as! [String:Any];dns["servers"]=["local","remote"].map{["type":"udp","tag":$0,"server":"127.0.0.1","server_port":ports[$0+"DNS"]!] as [String:Any]};object["dns"]=dns
+        try SecureFile.write(JSONSerialization.data(withJSONObject:object),to:folder.appendingPathComponent("core.json"));print("FULL_CAPTURE_FIXTURE_READY");exit(0)
+    }catch{print(error.localizedDescription);exit(1)}
 }
 if args.count==4 && ["combined-fixture","tun-config-fixture"].contains(args[1]) {
     do {
@@ -228,6 +260,10 @@ do { let instance = ParserTests(); run("ParserTests.testInvalidInputsAreRejected
 do { let instance = ParserTests(); run("ParserTests.testListIsAtomicAndBounded",instance) { try instance.testListIsAtomicAndBounded() } }
 do { let instance = ParserTests(); run("ParserTests.testPortRanges",instance) { try instance.testPortRanges() } }
 do { let instance = ParserTests(); run("ParserTests.testRedaction",instance) { try instance.testRedaction() } }
+do {let t=FullCaptureTests();run("FullCapture.domestic",t){try t.testDomesticPriorityAndDNS()};run("FullCapture.dynamicProtection",t){try t.testDynamicAddressProtectionAndFailure()};run("FullCapture.loopback",t){try t.testLoopbackAndCorporateFallback()};run("FullCapture.frozenPathsAndDiagnostics",t){try t.testFrozenBypassPlanAndDiagnostics()};run("FullCapture.ownershipView",t){try t.testOwnershipUsesCompleteRouteView()};run("FullCapture.multicastScope",t){try t.testMulticastPreservesSystemScope()}}
+do {let instance=RepairTests();run("RepairTests.corporateProxyBypass",instance){try instance.testCorporateProxyBypass()}}
+do {let instance=RepairTests();run("RepairTests.tongdunProtectionDraft",instance){try instance.testTongdunProtectionDraft()}}
+do {let instance=FullCaptureTests();run("FullCapture.effectiveDNSPriority",instance){try instance.testEffectiveDNSPriority()};run("FullCapture.reclaimedCorporateHostRoute",instance){try instance.testReclaimedCorporateHostRoute()}}
 do { let instance = RecoveryTests(); run("RecoveryTests.testOriginalPACAndProxyRestored",instance) { try instance.testOriginalPACAndProxyRestored() } }
 do { let instance = RecoveryTests(); run("RecoveryTests.testUnrelatedExternalChangesPreserved",instance) { try instance.testUnrelatedExternalChangesPreserved() } }
 do { let instance = RecoveryTests(); run("RecoveryTests.testOwnedFieldConflictDoesNotOverwrite",instance) { try instance.testOwnedFieldConflictDoesNotOverwrite() } }
@@ -265,6 +301,7 @@ Task {
     await runCaptureActivationChecks()
     await runRecoveryContinuationChecks()
     await runHelperRecoveryPolicyChecks()
+    await runHelperReadinessChecks()
     try await runDNSResolutionPolicyChecks()
     await runPortReuseChecks()
     await runConnectivityChecks()
@@ -272,7 +309,7 @@ Task {
     await runNetworkProbeChecks()
     await runAsyncChecks()
     do{try await runTransactionChecks()}catch{CheckHarness.failure("事务场景异常",file:#filePath,line:#line)}
-    print("RESULT scenarios=\(scenarios + 38) assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
+    print("RESULT scenarios=\(scenarios + 39) assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
     exit(CheckHarness.failures == 0 ? 0 : 1)
 }
 dispatchMain()

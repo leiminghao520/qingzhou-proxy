@@ -18,10 +18,10 @@ import QingzhouKit
     let original: [String:Any] = ["HTTPEnable":1,"HTTPProxy":"original.invalid","HTTPPort":8080,"ProxyAutoConfigEnable":1,"ProxyAutoConfigURLString":"https://example.invalid/proxy.pac","ExceptionsList":["local"]]
     expectTrue(SCNetworkProtocolSetConfiguration(proto,original as CFDictionary));expectTrue(SCNetworkProtocolSetEnabled(proto,true));expectTrue(SCPreferencesCommitChanges(p))
     let controller = SystemProxyController(journal:dir.appendingPathComponent("journal.json"),preferencesFactory:preferences,commitHandler:{p in if !SCPreferencesCommitChanges(p) {throw ProxyError("隔离文件提交失败")}})
-    try controller.apply(port:7890);expectTrue(controller.hasRecovery)
+    try controller.apply(port:7890,protectedDomains:["corp.example"]);expectTrue(controller.hasRecovery)
     let appliedPrefs = try preferences();let appliedService = SCNetworkServiceCopy(appliedPrefs,SCNetworkServiceGetServiceID(service)!)!;let appliedProto = SCNetworkServiceCopyProtocol(appliedService,kSCNetworkProtocolTypeProxies)!
     let value = SCNetworkProtocolGetConfiguration(appliedProto) as! [String:Any]
-    expectEqual(value["HTTPProxy"] as? String,"127.0.0.1");expectEqual(value["ProxyAutoConfigEnable"] as? Int,0)
+    expectEqual(value["ExceptionsList"] as? [String],["local","corp.example","*.corp.example"]);expectEqual(value["HTTPProxy"] as? String,"127.0.0.1");expectEqual(value["ProxyAutoConfigEnable"] as? Int,0)
     expectThrows(try controller.apply(port:7890))
     try controller.restore();expectFalse(controller.hasRecovery)
     let restoredPrefs = try preferences();let restoredService = SCNetworkServiceCopy(restoredPrefs,SCNetworkServiceGetServiceID(service)!)!;let restoredProto = SCNetworkServiceCopyProtocol(restoredService,kSCNetworkProtocolTypeProxies)!
@@ -38,7 +38,7 @@ import QingzhouKit
     let cancelled = SystemProxyController(journal:dir.appendingPathComponent("cancelled.json"),preferencesFactory:{throw ProxyError("模拟授权取消")})
     expectThrows(try cancelled.apply(port:7890));expectFalse(cancelled.hasRecovery);print("PASS SystemProxyTests.authorizationCancelled")
     let failing = SystemProxyController(journal:dir.appendingPathComponent("failed.json"),preferencesFactory:preferences,commitHandler:{_ in throw ProxyError("模拟提交失败")})
-    expectThrows(try failing.apply(port:7890));expectTrue(failing.hasRecovery)
+    expectThrows(try failing.apply(port:7890,protectedDomains:["corp.example"]));expectTrue(failing.hasRecovery)
     let recovery = SystemProxyController(journal:failing.journal,preferencesFactory:preferences,commitHandler:{p in if !SCPreferencesCommitChanges(p) {throw ProxyError("隔离文件提交失败")}})
     try recovery.restore();expectFalse(recovery.hasRecovery);print("PASS SystemProxyTests.failedCommitRecovery")
 }

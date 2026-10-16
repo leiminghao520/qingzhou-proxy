@@ -4,10 +4,12 @@ import SwiftUI
 import AppKit
 import CoreImage
 import ServiceManagement
+import SystemConfiguration
 import QingzhouKit
 
 @MainActor final class AppModel:ObservableObject {
     enum Connection:String {case disconnected="未连接",connecting="连接中",connected="已连接",disconnecting="断开中",error="错误"}
+    @Published var pendingMode:ProxyMode?
     @Published var state=AppState()
     @Published var connection=Connection.disconnected
     @Published var reachability="尚未检测"
@@ -145,18 +147,31 @@ import QingzhouKit
                 let chosen=try await client.initializeFallback(group)
                 if chosen==nil,next.activePolicy == .group(group.id) {throw ProxyError("当前回退组没有已确认可用的节点")}
             }
-            let results=await ConnectivityProbe.all(port:next.captureMode.usesTunnel ? nil:next.listenPort,client:client,mode:next.mode)
+            let results=await ConnectivityProbe.all(port:next.listenPort,client:client,mode:next.mode)
             connectivityResults=results;reachability=ConnectivityResult.combinedSummary(results)
             for result in results {log(result.summary)}
             guard ConnectivityHealth.evaluate(results) == .healthy else {throw ProxyError("启动连通性检查失败："+reachability)}
             guard !networkChanged,!coreFailed else {throw ProxyError("启动期间核心或网络发生变化")}
-            try capture.activateSystemProxy(port:next.listenPort)
+            try await capture.activateTunnel()
+            if next.captureMode.usesTunnel {
+                let captured=await ConnectivityProbe.all(port:nil,client:client,mode:next.mode)
+                connectivityResults=captured;reachability=ConnectivityResult.combinedSummary(captured)
+                for result in captured {log("接管后 · "+result.summary)}
+                let status=try await capture.helperStatus()
+                guard status.running else {throw ProxyError("TUN 保护流程已停止核心："+status.message)}
+                guard ConnectivityHealth.evaluate(captured) == .healthy else {throw ProxyError("TUN 实际接管路径检查失败："+reachability)}
+            }
+            try capture.activateSystemProxy(port:next.listenPort,protectedDomains:next.protectedDomains)
             if next.captureMode == .systemProxy {try await proxy.verifyApplied()}
             guard capture.running else {throw ProxyError("核心已经退出")}
             connection = .connected;recoveryPending=proxy.hasRecovery;startTelemetry(client)
         } catch {
             await client.shutdown()
             let original=error
+            if next.captureMode.usesTunnel,let status=try? await capture.helperStatus() {
+                log("辅助服务失败阶段："+(status.phase ?? "未知")+"；原因："+status.message)
+                for line in status.coreDiagnostics ?? [] {log("TUN 核心："+line)}
+            }
             do{try await capture.emergencyRecover()}catch{recoveryPending=true;throw ProxyError("启动失败："+original.localizedDescription+"；"+error.localizedDescription)}
             throw original
         }
@@ -214,7 +229,8 @@ import QingzhouKit
             log("已选择 \(state.label(ref))，已有连接保留");if connection == .connected{await checkConnectivity()}
         } catch {report(error)}
     }
-    func setMode(_ mode:ProxyMode) async {
+    func setMode(_ mode:ProxyMode,confirmed:Bool=false) async {
+        if state.captureMode == .compatible,connection == .connected,!confirmed {pendingMode=mode;return}
         guard !locked,let store,mode != state.mode else{return};busy=true;defer{busy=false}
         do {var next=state;next.mode=mode;try await apply(store.prepareChange(next));log("模式与 DNS 策略已同步切换为"+mode.label)}catch{report(error)}
     }
@@ -226,6 +242,30 @@ import QingzhouKit
     func setRuleFinal(_ ref:PolicyReference) async {guard !locked,let store else{return};busy=true;defer{busy=false};do{var next=state;next.ruleFinal=ref;try await apply(store.prepareChange(next))}catch{report(error)}}
     func removeRule(_ id:UUID) async {guard !locked,let store else{return};busy=true;defer{busy=false};do{var next=state;next.rules.removeAll{$0.id==id};try await apply(store.prepareChange(next))}catch{report(error)}}
     func moveRule(_ id:UUID,by offset:Int) async {guard !locked,let store,let i=state.rules.firstIndex(where:{$0.id==id}),state.rules.indices.contains(i+offset) else{return};busy=true;defer{busy=false};do{var next=state;next.rules.swapAt(i,i+offset);try await apply(store.prepareChange(next))}catch{report(error)}}
+    func ruleRevision() throws -> Data {
+        let encoder=JSONEncoder();encoder.outputFormatting=[.sortedKeys]
+        var data=try encoder.encode(state.rules);data.append(try encoder.encode(state.ruleFinal));data.append(Data((currentProfileID?.uuidString ?? "").utf8));return data
+    }
+    func applyRuleDraft(_ rules:[RoutingRule],final:PolicyReference,revision:Data) async -> Bool {
+        guard !locked,let store else {return false}
+        busy=true;defer{busy=false}
+        do {
+            guard try ruleRevision()==revision else {throw ProxyError("原规则或配置已变化，请撤销草稿后重新编辑")}
+            var next=state;next.rules=rules;next.ruleFinal=final
+            try PolicyValidator.validate(next);try await apply(store.prepareChange(next));return true
+        }catch{report(error);return false}
+    }
+    func reorderRules(_ order:[UUID],expectedOrder:[UUID]) async -> Bool {
+        guard !locked,let store else {return false}
+        // 只有用户点击应用才提交排序，预览拖动不生成配置或重连。
+        guard state.rules.map(\.id)==expectedOrder,order.count==expectedOrder.count,Set(order)==Set(expectedOrder) else {report(ProxyError("规则列表已变化，请重新排序"));return false}
+        guard order != expectedOrder else {return true}
+        let rules=Dictionary(uniqueKeysWithValues:state.rules.map {($0.id,$0)})
+        var next=state;next.rules=order.compactMap {rules[$0]}
+        busy=true;defer{busy=false}
+        do {try await apply(store.prepareChange(next));return true} catch {report(error);return false}
+    }
+
     func saveGroup(_ group:PolicyGroup) async {guard !locked,let store else{return};busy=true;defer{busy=false};do{var next=state;next.groups.removeAll{$0.id==group.id};next.groups.append(group);try PolicyValidator.validate(next);try await apply(store.prepareChange(next))}catch{report(error)}}
     func deleteGroup(_ id:UUID) async {guard !locked,let store else{return};busy=true;defer{busy=false};do{var next=state;next.groups.removeAll{$0.id==id};PolicyValidator.repair(&next);try await apply(store.prepareChange(next))}catch{report(error)}}
     func selectMember(_ group:PolicyGroup,_ ref:PolicyReference) async {
@@ -394,7 +434,18 @@ import QingzhouKit
     private func synchronizeShortcut(){do{try shortcuts.configure(enabled:state.shortcutEnabled,key:state.shortcutKey,modifiers:state.shortcutModifiers)}catch{log("快捷键冲突，未注册全局快捷键")}}
     func setShortcut(enabled:Bool,key:UInt32,modifiers:UInt32){guard !locked else{return};let old=state;do{guard [UInt32(35),2,15].contains(key),[UInt32(2304),4352,6144,6400].contains(modifiers) else{throw ProxyError("不支持的快捷键组合")};try shortcuts.configure(enabled:enabled,key:key,modifiers:modifiers);var next=state;next.shortcutEnabled=enabled;next.shortcutKey=key;next.shortcutModifiers=modifiers;do{try persist(next)}catch{try? shortcuts.configure(enabled:old.shortcutEnabled,key:old.shortcutKey,modifiers:old.shortcutModifiers);throw error}}catch{report(error)}}
     func saveTunExclusions(_ input:String) async {guard !locked,let store else{return};busy=true;defer{busy=false};do{var next=state;next.tunExcludedCIDRs=input.components(separatedBy:CharacterSet(charactersIn:",\n")).map{$0.trimmingCharacters(in:.whitespaces)}.filter{!$0.isEmpty};try PolicyValidator.validate(next);try await apply(store.prepareChange(next))}catch{report(error)}}
-    func saveProtectedDomains(_ input:String) async {guard !locked,let store else{return};busy=true;defer{busy=false};do{var next=state;next.protectedDomains=input.components(separatedBy:CharacterSet(charactersIn:",\n")).map{$0.trimmingCharacters(in:.whitespacesAndNewlines).lowercased()}.filter{!$0.isEmpty};try PolicyValidator.validate(next);try await apply(store.prepareChange(next))}catch{report(error)}}
+    func applyCaptureSettings(mode:CaptureMode,dns:DNSPreference,family:AddressFamilyPolicy,httpCompatibility:Bool,domains:String,exclusions:String) async -> Bool {
+        guard !locked,let store else {return false}
+        busy=true;defer{busy=false}
+        do {
+            var next=state;next.captureMode=mode;next.dnsPreference=dns;next.addressFamilyPolicy=family;next.httpCompatibilityEnabled=httpCompatibility
+            next.tunExcludedCIDRs=exclusions.components(separatedBy:CharacterSet(charactersIn:",\n")).map{$0.trimmingCharacters(in:.whitespacesAndNewlines)}.filter{!$0.isEmpty}
+            next.protectedDomains=try ProtectedDomainPolicy.normalize(domains.components(separatedBy:CharacterSet(charactersIn:",\n")).filter{!$0.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty})
+            if mode == .compatible {next.ruleFinal = .selected;try DomesticRouting.validate()}
+            try await apply(store.prepareChange(next));return true
+        } catch {report(error);return false}
+    }
+    func saveProtectedDomains(_ input:String) async {guard !locked,let store else{return};busy=true;defer{busy=false};do{var next=state;next.protectedDomains=try ProtectedDomainPolicy.normalize(input.components(separatedBy:CharacterSet(charactersIn:",\n")).filter{!$0.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty});try PolicyValidator.validate(next);try await apply(store.prepareChange(next))}catch{report(error)}}
     func setCaptureMode(_ mode:CaptureMode) async {guard !locked,let store,state.captureMode != mode else{return};busy=true;defer{busy=false};do{var next=state;next.captureMode=mode;try await apply(store.prepareChange(next))}catch{report(error)}}
     func setAddressFamily(_ policy:AddressFamilyPolicy) async {guard !locked,let store else{return};busy=true;defer{busy=false};do{var next=state;next.addressFamilyPolicy=policy;try await apply(store.prepareChange(next))}catch{report(error)}}
     func setDNS(_ mode:DNSPreference) async {guard !locked,let store,state.dnsPreference != mode else{return};busy=true;defer{busy=false};do{var next=state;next.dnsPreference=mode;try await apply(store.prepareChange(next))}catch{report(error)}}
@@ -403,8 +454,9 @@ import QingzhouKit
         busy=true;defer{busy=false};NSApplication.shared.activate(ignoringOtherApps:true)
         do {
             try await HelperInstaller.install(app:Bundle.main.bundleURL)
-            await capture.helper.closeChannel();let status=try await capture.helperStatus()
-            guard status.protocolVersion==3 else{throw ProxyError("安装后辅助服务协议仍不匹配")}
+            await capture.helper.closeChannel()
+            let status=try await HelperReadiness.wait {try await self.capture.helperStatus()}
+            guard status.protocolVersion==4 else{throw ProxyError("安装后辅助服务协议仍不匹配")}
             try await capture.emergencyRecover();recoveryPending=false;connection = .disconnected;helperStatus="辅助服务更新完成并已核对";log(helperStatus)
         }catch {helperStatus="辅助服务安装/核对未完成";report(error)}
     }
@@ -517,6 +569,15 @@ import QingzhouKit
     func diagnose() async {
         guard !locked,!diagnosing else{return};diagnosing=true;defer{diagnosing=false}
         diagnosticRows=DiagnosticService.local(state:state,corePath:core.binary.path,connected:connection == .connected)
+        let effective=(SCDynamicStoreCopyProxies(nil) as? [String:Any])?["ExceptionsList"] as? [String] ?? []
+        let expected=(try? ProtectedDomainPolicy.exceptions(state.protectedDomains)) ?? []
+        let bypassStatus:String
+        if state.captureMode != .systemProxy || connection != .connected {bypassStatus="未验证"}
+        else {bypassStatus=expected.allSatisfy{effective.contains($0)} ? "通过":"失败"}
+        let configuredDomains=state.protectedDomains.joined(separator:",")
+        let effectiveExceptions=effective.joined(separator:",")
+        let explanation="配置："+configuredDomains+"；系统例外："+effectiveExceptions
+        diagnosticRows.append(DiagnosticResult("企业域名系统代理绕过",bypassStatus,explanation+"。核心 DIRECT 仍经过 sing-box；显式指定代理的命令可能不遵循系统例外。"))
         if state.captureMode.usesTunnel{do{let status=try await capture.helper.request(TunRequest(operation:"status",verifyNetwork:true));diagnosticRows.append(DiagnosticResult("管理员权限/辅助服务","通过","已通过固定客户端身份认证："+status.message));diagnosticRows.append(DiagnosticResult("TUN 路由",status.routesVerified==true ? "通过":status.running ? "失败":"未验证",status.running ? "核对四条接管路由及其接口、网关":"未启用接管"));protectionSummary=status.protectionSummary ?? [];diagnosticRows.append(DiagnosticResult("内网保护",status.protectionVerified==true ? "通过":status.running ? "失败":"未验证",protectionSummary.joined(separator:"；")));if state.captureMode == .compatible {diagnosticRows.append(DiagnosticResult("代理入口",status.proxyVerified==true ? "通过":"失败","核对兼容接管拥有的系统代理字段"))};diagnosticRows.append(DiagnosticResult("TUN DNS",status.dnsVerified==true ? "通过":status.running ? "失败":"未验证","核对当前 DNS 与本次所有权记录"))}catch{diagnosticRows.append(DiagnosticResult("管理员权限/辅助服务","失败",Redactor.redact(error.localizedDescription)))}}else{diagnosticRows.append(DiagnosticResult("系统代理权限","未验证","需要在连接时完成系统管理员授权；诊断不会自动申请"))}
         diagnosticRows.append(DiagnosticResult("系统代理恢复",proxy.hasRecovery ? "需检查":"通过",proxy.hasRecovery ? "保留恢复记录，可使用恢复入口":"没有待恢复记录"))
         if let node=selected ?? state.nodes.first{diagnosticRows.append(await DiagnosticService.dns(node.server))}else{diagnosticRows.append(DiagnosticResult("节点 DNS","未验证","尚未选择节点"))}

@@ -18,6 +18,7 @@ struct ProxyJournal: Codable { var records: [ProxyRecord] }
     public var log:((String)->Void)?
     private var monitor: SCDynamicStore?
     private var monitoredSignature: String?
+    private var requiredExceptions:[String]=[]
     private var ownedPort:Int?
     private var ownershipMismatchCount=0
     private let preferencesFactory: (() throws -> SCPreferences)?
@@ -49,7 +50,7 @@ struct ProxyJournal: Codable { var records: [ProxyRecord] }
         if let commitHandler {try commitHandler(preferences);return}
         guard SCPreferencesCommitChanges(preferences), SCPreferencesApplyChanges(preferences) else { throw ProxyError("系统代理修改失败，请执行恢复原代理") }
     }
-    public func apply(port: Int,ownedTunDNS:String?=nil) throws {
+    public func apply(port: Int,ownedTunDNS:String?=nil,protectedDomains:[String]=[]) throws {
         guard !hasRecovery else { throw ProxyError("存在未恢复的代理设置，请先恢复原代理") }
         if preferencesFactory==nil {try NetworkSafety.check(ownedDNS:ownedTunDNS)}
         let p = try preferences(); defer {SCPreferencesUnlock(p)}
@@ -60,7 +61,7 @@ struct ProxyJournal: Codable { var records: [ProxyRecord] }
             let id = serviceID as String
             let existing = SCNetworkServiceCopyProtocol(service,kSCNetworkProtocolTypeProxies)
             let original = existing.flatMap {SCNetworkProtocolGetConfiguration($0) as? [String:Any]} ?? [:]
-            let applied = ProxyRecovery.applied(to:original,port:port)
+            let applied = try ProxyRecovery.applied(to:original,port:port,protectedDomains:protectedDomains)
             let record = ProxyRecord(serviceID:id,original:try encode(original),applied:try encode(applied),originallyEnabled:existing.map {SCNetworkProtocolGetEnabled($0)} ?? false,hadProtocol:existing != nil)
             records.append(record)
         }
@@ -72,6 +73,7 @@ struct ProxyJournal: Codable { var records: [ProxyRecord] }
             if !record.hadProtocol, !SCNetworkServiceAddProtocolType(service,kSCNetworkProtocolTypeProxies) { throw ProxyError("无法添加代理协议") }
             guard let proto = SCNetworkServiceCopyProtocol(service,kSCNetworkProtocolTypeProxies), SCNetworkProtocolSetConfiguration(proto,try dict(record.applied) as CFDictionary), SCNetworkProtocolSetEnabled(proto,true) else { throw ProxyError("无法设置系统代理") }
         }
+        requiredExceptions=try ProtectedDomainPolicy.exceptions(protectedDomains)
         ownedPort=port;ownershipMismatchCount=0
         monitoredSignature=signature()
         try commit(p)
@@ -95,7 +97,7 @@ struct ProxyJournal: Codable { var records: [ProxyRecord] }
             if !record.hadProtocol && restored.isEmpty && !SCNetworkServiceRemoveProtocolType(service,kSCNetworkProtocolTypeProxies) {conflicts.append(record)}
         }
         try commit(p)
-        ownedPort=nil;ownershipMismatchCount=0
+        requiredExceptions=[];ownedPort=nil;ownershipMismatchCount=0
         monitoredSignature=signature()
         if conflicts.isEmpty { try FileManager.default.removeItem(at:journal) }
         else { log?("代理恢复存在外部修改冲突，保留恢复记录，未覆盖外部设置");try save(conflicts); throw ProxyError("部分网络服务已被外部修改，未覆盖其设置；请检查系统代理后重试恢复") }
@@ -104,6 +106,7 @@ struct ProxyJournal: Codable { var records: [ProxyRecord] }
         for _ in 0..<30 {
             guard hasRecovery,let changes=ownershipChanges(),changes.isEmpty else {throw ProxyError("系统代理提交后的持久配置核对失败")}
             if let settings=SCDynamicStoreCopyProxies(nil) as? [String:Any],let port=ownedPort,
+               requiredExceptions.allSatisfy({(settings["ExceptionsList"] as? [String] ?? []).contains($0)}),
                ["HTTP","HTTPS"].allSatisfy({prefix in (settings[prefix+"Enable"] as? NSNumber)?.intValue==1 && settings[prefix+"Proxy"] as? String=="127.0.0.1" && (settings[prefix+"Port"] as? NSNumber)?.intValue==port}) {return}
             // 系统动态配置可能晚于持久提交收敛，限定预算等待，不把瞬态当成失败。
             try await Task.sleep(nanoseconds:100_000_000)
@@ -147,7 +150,10 @@ struct ProxyJournal: Codable { var records: [ProxyRecord] }
         for record in records.records {
             guard let service=SCNetworkServiceCopy(preferences,record.serviceID as CFString),let proto=SCNetworkServiceCopyProtocol(service,kSCNetworkProtocolTypeProxies),let current=SCNetworkProtocolGetConfiguration(proto) as? [String:Any],let expected=try? dict(record.applied) else{return nil}
             if !SCNetworkProtocolGetEnabled(proto){changes.insert("ProtocolEnabled")}
-            changes.formUnion(ProxyRecovery.changedOwnedKeys(expected:expected,current:current))
+            let original=try? dict(record.original)
+            let protectsExceptions = !NSArray(array:(original?["ExceptionsList"] as? [String]) ?? []).isEqual(to:(expected["ExceptionsList"] as? [String]) ?? [])
+            // 本轮不修改简单主机名开关，因此不把它认领为本应用所有。
+            changes.formUnion(ProxyRecovery.changedOwnedKeys(expected:expected,current:current,protectsExceptions:protectsExceptions).filter{$0 != "ExcludeSimpleHostnames"})
         }
         return changes.sorted()
     }

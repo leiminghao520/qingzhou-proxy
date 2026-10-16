@@ -87,7 +87,19 @@ public struct ShadowrocketConfiguration:Codable,Sendable {
         for source in state.remoteRules {rows += source.rules.map{rule in ["kind":kinds[rule.kind]!,"value":rule.value,"policy":policy(source.target),"noResolve":rule.noResolve ?? false]}}
         // MATCH 是终止规则，后续远程源不得让兼容入口的 FINAL 校验失败。
         if let index=rows.firstIndex(where:{$0["kind"] as? String=="FINAL"}) {rows=Array(rows.prefix(index+1))}
-        if !rows.contains(where:{$0["kind"] as? String=="FINAL"}) {rows.append(["kind":"FINAL","value":"","policy":policy(state.ruleFinal ?? .selected),"noResolve":false])}
+        if !rows.contains(where:{$0["kind"] as? String=="FINAL"}) {
+            if state.captureMode == .compatible {
+                try DomesticRouting.validate()
+                // 兼容层仅补充明文规则，国内兜底与核心保持同一份固定数据和优先级。
+                let kinds=["domain":"DOMAIN","domain_suffix":"DOMAIN-SUFFIX","domain_regex":"DOMAIN-REGEX"]
+                for key in ["domain","domain_suffix","domain_regex"] {
+                    for value in DomesticRouting.domainCondition[key] as? [String] ?? [] {rows.append(["kind":kinds[key]!,"value":value,"policy":"DIRECT","noResolve":false])}
+                }
+                rows.append(["kind":"GEOIP","value":"QINGZHOU-CN","policy":"DIRECT","noResolve":false])
+                var assets=object["assets"] as? [String:[String]] ?? [:];assets["GEOIP:QINGZHOU-CN"]=DomesticRouting.cidrs;object["assets"]=assets
+            }
+            rows.append(["kind":"FINAL","value":"","policy":policy(state.ruleFinal ?? .selected),"noResolve":false])
+        }
         object["rules"]=rows
         object["policies"]=Array(Set(rows.compactMap{$0["policy"] as? String}.filter{$0 != "REJECT"}).union(["DIRECT","PROXY"]))
         return try JSONSerialization.data(withJSONObject:object)

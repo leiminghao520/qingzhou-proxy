@@ -22,82 +22,53 @@ import QingzhouKit
 @main struct QingzhouApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     @StateObject private var model = AppModel()
-    
+    @AppStorage("interfaceMode") private var interfaceMode = InterfaceMode.simple
+
     var body: some Scene {
         WindowGroup("轻舟代理") {
             ContentView(model: model)
-                .frame(minWidth: 1040, minHeight: 700)
+                .tint(Theme.accentBlue)
+                .frame(minWidth: interfaceMode == .simple ? 820 : 1040, minHeight: interfaceMode == .simple ? 620 : 700)
                 .onAppear { delegate.model = model }
                 .task { await model.startupRecovery() }
         }
-        .defaultSize(width: 1140, height: 760)
-        
+        .defaultSize(width: 900, height: 680)
+        .windowResizability(.contentMinSize)
+
         MenuBarExtra("轻舟代理", systemImage: model.connection == .connected ? "paperplane.fill" : "paperplane") {
             Text("\(model.connectionSummary) · \(model.state.mode.label)")
             Text(model.actualName + " · " + model.state.captureMode.label)
             if model.connection == .connected {
                 Text("↑ \(formatRate(model.uploadRate))  ↓ \(formatRate(model.downloadRate))")
             }
-            Button(model.connection == .connected ? "断开" : "连接") {
+            Button(model.connection == .connected ? "断开" : model.connection == .connecting ? "取消连接" : "连接") {
                 Task {
-                    if model.connection == .connected { await model.disconnect() }
+                    if model.connection == .connected || model.connection == .connecting { await model.disconnect() }
                     else { await model.connect() }
                 }
             }
-            .disabled(model.stopDisabled || (model.state.activePolicy == nil && model.state.mode != .direct && model.connection != .connected))
-            
-            Menu("配置") {
-                ForEach(model.profiles) { profile in
-                    Button((model.currentProfileID == profile.id ? "✓ " : "") + profile.name) {
-                        Task { await model.changeProfile(profile.id) }
+            .disabled(model.stopDisabled || (model.state.activePolicy == nil && model.state.mode != .direct && model.connection != .connected) || (model.recoveryPending && model.connection != .connected))
+
+            if interfaceMode == .simple {
+                Menu("线路") {
+                    Button("自动选择") { Task { await model.selectPolicy(.automatic) } }
+                    ForEach(model.state.groups) { group in
+                        Button(group.name) { Task { await model.selectPolicy(.group(group.id)) } }
+                    }
+                    ForEach(model.state.nodes) { node in
+                        Button((model.state.activePolicy == .node(node.id) ? "✓ " : "") + node.name) {
+                            Task { await model.select(node.id) }
+                        }
                     }
                 }
+                .disabled(model.locked || model.state.nodes.isEmpty)
+                Button("恢复网络") { Task { await model.recover() } }
+                    .disabled(model.loadingFailed || model.recovering)
+                Menu("更多") { advancedMenuActions }
+            } else {
+                advancedMenuActions
             }
-            .disabled(model.locked)
-            
-            Button("暂停代理") { Task { await model.disconnect() } }
-                .disabled(!model.canStop || model.connection != .connected)
-            
-            Button("一键诊断") { Task { await model.diagnose() } }
-                .disabled(model.locked)
-            
-            Menu("代理模式") {
-                ForEach(ProxyMode.allCases, id: \.self) { mode in
-                    Button((mode == model.state.mode ? "✓ " : "") + mode.label) {
-                        Task { await model.setMode(mode) }
-                    }
-                }
-            }
-            .disabled(model.locked)
-            
-            Menu("节点与策略") {
-                Button("自动选择") { Task { await model.selectPolicy(.automatic) } }
-                    .disabled(model.state.nodes.isEmpty)
-                ForEach(model.state.groups) { group in
-                    Button(group.name) { Task { await model.selectPolicy(.group(group.id)) } }
-                }
-                Divider()
-                ForEach(model.state.nodes.prefix(30)) { node in
-                    Button((model.state.favorites.contains(node.id) ? "★ " : "") + node.name) {
-                        Task { await model.select(node.id) }
-                    }
-                }
-            }
-            .disabled(model.locked)
-            
-            Button(model.measuring ? "取消测速" : "检测全部节点 HTTPS 延迟") {
-                if model.measuring { model.cancelMeasurement() }
-                else { model.measure() }
-            }
-            .disabled(model.busy || model.state.nodes.isEmpty)
-            
-            Button("更新订阅和规则") { Task { await model.refreshAll() } }
-                .disabled(model.locked)
-            
-            Button("复制终端代理命令") { model.copyTerminalProxy() }
-            Button("恢复原代理") { Task { await model.recover() } }
-                .disabled(model.loadingFailed || model.recovering)
-            
+
             Divider()
             Button("显示主窗口") {
                 NSApplication.shared.activate(ignoringOtherApps: true)
@@ -105,6 +76,59 @@ import QingzhouKit
             }
             Button("退出轻舟代理") { NSApplication.shared.terminate(nil) }
         }
+    }
+    @ViewBuilder private var advancedMenuActions: some View {
+        Menu("配置") {
+            ForEach(model.profiles) { profile in
+                Button((model.currentProfileID == profile.id ? "✓ " : "") + profile.name) {
+                    Task { await model.changeProfile(profile.id) }
+                }
+            }
+        }
+        .disabled(model.locked)
+
+        Button("暂停代理") { Task { await model.disconnect() } }
+            .disabled(!model.canStop || model.connection != .connected)
+
+        Button("一键诊断") { Task { await model.diagnose() } }
+            .disabled(model.locked)
+
+        Menu("代理模式") {
+            ForEach(ProxyMode.allCases, id: \.self) { mode in
+                Button((mode == model.state.mode ? "✓ " : "") + mode.label) {
+                    Task { await model.setMode(mode) }
+                }
+            }
+        }
+        .disabled(model.locked)
+
+        Menu("节点与策略") {
+            Button("自动选择") { Task { await model.selectPolicy(.automatic) } }
+                .disabled(model.state.nodes.isEmpty)
+            ForEach(model.state.groups) { group in
+                Button(group.name) { Task { await model.selectPolicy(.group(group.id)) } }
+            }
+            Divider()
+            ForEach(model.state.nodes.prefix(30)) { node in
+                Button((model.state.favorites.contains(node.id) ? "★ " : "") + node.name) {
+                    Task { await model.select(node.id) }
+                }
+            }
+        }
+        .disabled(model.locked)
+
+        Button(model.measuring ? "取消测速" : "检测全部节点 HTTPS 延迟") {
+            if model.measuring { model.cancelMeasurement() }
+            else { model.measure() }
+        }
+        .disabled(model.busy || model.state.nodes.isEmpty)
+
+        Button("更新订阅和规则") { Task { await model.refreshAll() } }
+            .disabled(model.locked)
+
+        Button("复制终端代理命令") { model.copyTerminalProxy() }
+        Button("恢复原代理") { Task { await model.recover() } }
+            .disabled(model.loadingFailed || model.recovering)
     }
 }
 
@@ -137,37 +161,27 @@ func formatRate(_ value: Int64) -> String {
 // MARK: - Main Content View
 struct ContentView: View {
     @ObservedObject var model: AppModel
-    @State private var page = "概览"
+    @AppStorage("interfaceMode") private var interfaceMode = InterfaceMode.simple
+    @State private var page = AppPage.home
+    @State private var utility: UtilityPage?
     @State private var importing = false
     @State private var editing: EditorRequest?
-    
-    // Grouped Navigation Items
-    private let navSections: [(title: String, items: [(name: String, icon: String)])] = [
-        ("核心控制", [
-            ("概览", "chart.line.uptrend.xyaxis"),
-            ("节点", "network"),
-            ("策略组", "square.stack.3d.up")
-        ]),
-        ("规则与配置", [
-            ("订阅", "arrow.triangle.2.circlepath"),
-            ("分流规则", "arrow.triangle.branch"),
-            ("配置", "slider.horizontal.3")
-        ]),
-        ("监控与工具", [
-            ("连接", "point.3.connected.trianglepath.dotted"),
-            ("规则解释", "magnifyingglass.circle"),
-            ("诊断", "stethoscope"),
-            ("运行日志", "terminal")
-        ]),
-        ("系统偏好", [
-            ("设置", "gearshape")
-        ])
-    ]
-    
+
+    private var navSections: [(title: String, items: [AppPage])] {
+        if interfaceMode == .simple {
+            return [("日常使用", [.home, .lines, .subscriptions, .settings])]
+        }
+        return [
+            ("核心控制", [.overview, .nodes, .groups]),
+            ("规则与配置", [.subscriptions, .rules, .profiles]),
+            ("监控与工具", [.connections, .explanation, .diagnostics, .logs]),
+            ("系统偏好", [.settings])
+        ]
+    }
+
     var body: some View {
         NavigationSplitView {
             VStack(alignment: .leading, spacing: 0) {
-                // Brand Header
                 HStack(spacing: 12) {
                     if let appIcon = NSImage(named: NSImage.applicationIconName) {
                         Image(nsImage: appIcon)
@@ -190,7 +204,7 @@ struct ContentView: View {
                                 .foregroundStyle(.white)
                         }
                     }
-                    
+
                     VStack(alignment: .leading, spacing: 2) {
                         Text("轻舟代理")
                             .font(.headline.weight(.bold))
@@ -202,10 +216,9 @@ struct ContentView: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 20)
                 .padding(.bottom, 16)
-                
+
                 Divider().opacity(0.6)
-                
-                // Grouped Sidebar Items
+
                 ScrollView(showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 14) {
                         ForEach(navSections, id: \.title) { section in
@@ -215,26 +228,26 @@ struct ContentView: View {
                                     .foregroundStyle(.secondary)
                                     .padding(.horizontal, 10)
                                     .padding(.top, 4)
-                                ForEach(section.items, id: \.name) { item in
-                                    let isSelected = page == item.name
+                                ForEach(section.items) { item in
+                                    let isSelected = page == item
                                     let badgeText: String? = {
-                                        if item.name == "节点" {
+                                        if (item == .nodes || item == .lines) {
                                             return "\(model.state.nodes.count)"
-                                        } else if item.name == "连接" && !model.connections.isEmpty {
+                                        } else if item == .connections && !model.connections.isEmpty {
                                             return "\(model.connections.count)"
                                         }
                                         return nil
                                     }()
-                                    let badgeColor: Color? = (item.name == "连接") ? Theme.connectedGreen : nil
-                                    
+                                    let badgeColor: Color? = (item == .connections) ? Theme.connectedGreen : nil
+
                                     SidebarNavItemRow(
-                                        name: item.name,
+                                        name: item.title,
                                         icon: item.icon,
                                         isSelected: isSelected,
                                         badgeText: badgeText,
                                         badgeColor: badgeColor
                                     ) {
-                                        page = item.name
+                                        page = item
                                     }
                                 }
                             }
@@ -243,103 +256,108 @@ struct ContentView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 12)
                 }
-                
+
                 Divider().opacity(0.6)
-                
-                // Sidebar Footer Quick Control Card (Clash Verge style)
-                VStack(spacing: 8) {
-                    // Row 1: Status & Master Switch Toggle
-                    HStack(spacing: 8) {
-                        Circle()
-                            .fill(model.connection == .connected ? Theme.connectedGreen : Theme.disconnectedGray)
-                            .frame(width: 8, height: 8)
-                        
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(model.recovering ? "正在恢复网络":model.stopRequested ? "等待安全断开":model.networkRechecking ? "网络变化 · 检查中":model.connection.rawValue)
-                                .font(.system(size: 11, weight: .bold))
-                                .lineLimit(1)
-                            Text(model.connection == .connected ? model.actualName : "尚未连接")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .help(model.actualName)
-                        }
-                        
-                        Spacer()
-                        
-                        Button {
-                            Task {
-                                if model.connection == .connected { await model.disconnect() }
-                                else { await model.connect() }
-                            }
-                        } label: {
-                            if model.busy && model.connection != .connected {
-                                ProgressView().controlSize(.small)
-                            } else {
-                                Text(model.connection == .connected ? "断开" : "开启")
+
+                if interfaceMode == .professional {
+                    VStack(spacing: 8) {
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(model.connection == .connected ? Theme.connectedGreen : Theme.disconnectedGray)
+                                .frame(width: 8, height: 8)
+
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(model.recovering ? "正在恢复网络":model.stopRequested ? "等待安全断开":model.networkRechecking ? "网络变化 · 检查中":model.connection.rawValue)
                                     .font(.system(size: 11, weight: .bold))
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 4)
-                                    .background(model.connection == .connected ? Theme.dangerRed.opacity(0.15) : Theme.connectedGreen.opacity(0.18))
-                                    .foregroundStyle(model.connection == .connected ? Theme.dangerRed : Theme.connectedGreen)
-                                    .clipShape(Capsule())
-                                    .contentShape(Capsule())
+                                    .lineLimit(1)
+                                Text(model.connection == .connected ? model.actualName : "尚未连接")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .help(model.actualName)
                             }
-                        }
-                        .buttonStyle(.plain)
-                        .contentShape(Capsule())
-                        .disabled(model.stopDisabled || (model.state.activePolicy == nil && model.state.mode != .direct && model.connection != .connected))
-                    }
-                    
-                    // Row 2: Mode Selector Pills (Rule / Global / Direct)
-                    HStack(spacing: 4) {
-                        ForEach(ProxyMode.allCases, id: \.self) { mode in
-                            let isCurrent = model.state.mode == mode
+
+                            Spacer()
+
                             Button {
-                                Task { await model.setMode(mode) }
+                                Task {
+                                    if model.connection == .connected { await model.disconnect() }
+                                    else { await model.connect() }
+                                }
                             } label: {
-                                Text(mode.label)
-                                    .font(.system(size: 11, weight: isCurrent ? .bold : .regular))
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 5)
-                                    .background(isCurrent ? Theme.accentBlue.opacity(0.2) : Color.secondary.opacity(0.08))
-                                    .foregroundStyle(isCurrent ? Theme.accentBlue : Color.secondary)
-                                    .clipShape(RoundedRectangle(cornerRadius: 5))
-                                    .contentShape(RoundedRectangle(cornerRadius: 5))
+                                if model.busy && model.connection != .connected {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    Text(model.connection == .connected ? "断开" : "开启")
+                                        .font(.system(size: 11, weight: .bold))
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 4)
+                                        .background(model.connection == .connected ? Theme.dangerRed.opacity(0.15) : Theme.connectedGreen.opacity(0.18))
+                                        .foregroundStyle(model.connection == .connected ? Theme.dangerRed : Theme.connectedGreen)
+                                        .clipShape(Capsule())
+                                        .contentShape(Capsule())
+                                }
                             }
                             .buttonStyle(.plain)
-                            .contentShape(RoundedRectangle(cornerRadius: 5))
-                            .disabled(model.locked)
+                            .contentShape(Capsule())
+                            .disabled(model.stopDisabled || (model.state.activePolicy == nil && model.state.mode != .direct && model.connection != .connected) || (model.recoveryPending && model.connection != .connected))
                         }
-                    }
-                    
-                    // 接管方式与速率分行，窄侧栏优先保留可操作的连接状态。
-                    HStack {
-                        Text(model.state.captureMode.label).font(.system(size:10)).fixedSize()
-                        Spacer(minLength:4)
-                        if model.healthChecking {Text("检测中").font(.system(size:10)).foregroundStyle(.secondary)}
-                    }
-                    if model.connection == .connected {
-                        Text("↑ \(formatRate(model.uploadRate))  ↓ \(formatRate(model.downloadRate))")
-                            .font(.system(size:9,design:.monospaced)).monospacedDigit()
-                            .frame(maxWidth:.infinity,alignment:.leading).lineLimit(1).minimumScaleFactor(0.8)
-                    }
 
+                        HStack(spacing: 4) {
+                            ForEach(ProxyMode.allCases, id: \.self) { mode in
+                                let isCurrent = model.state.mode == mode
+                                Button {
+                                    Task { await model.setMode(mode) }
+                                } label: {
+                                    Text(mode.label)
+                                        .font(.system(size: 11, weight: isCurrent ? .bold : .regular))
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 5)
+                                        .background(isCurrent ? Theme.accentBlue.opacity(0.2) : Color.secondary.opacity(0.08))
+                                        .foregroundStyle(isCurrent ? Theme.accentBlue : Color.secondary)
+                                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                                        .contentShape(RoundedRectangle(cornerRadius: 5))
+                                }
+                                .buttonStyle(.plain)
+                                .contentShape(RoundedRectangle(cornerRadius: 5))
+                                .disabled(model.locked)
+                            }
+                        }
+
+                        // 接管方式与速率分行，窄侧栏优先保留可操作的连接状态。
+                        HStack {
+                            Text(model.state.captureMode.label).font(.system(size:10)).fixedSize()
+                            Spacer(minLength:4)
+                            if model.healthChecking {Text("检测中").font(.system(size:10)).foregroundStyle(.secondary)}
+                        }
+                        if model.connection == .connected {
+                            Text("↑ \(formatRate(model.uploadRate))  ↓ \(formatRate(model.downloadRate))")
+                                .font(.system(size:9,design:.monospaced)).monospacedDigit()
+                                .frame(maxWidth:.infinity,alignment:.leading).lineLimit(1).minimumScaleFactor(0.8)
+                        }
+
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, minHeight: 126, maxHeight: 126)
+                    .background(Color.secondary.opacity(0.06))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(model.connection == .connected ? Theme.connectedGreen.opacity(0.3) : Theme.subtleBorder, lineWidth: 1)
+                    )
+                    .padding(10)
                 }
-                .padding(10)
-                .frame(maxWidth: .infinity, minHeight: 126, maxHeight: 126)
-                .background(Color.secondary.opacity(0.06))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(model.connection == .connected ? Theme.connectedGreen.opacity(0.3) : Theme.subtleBorder, lineWidth: 1)
-                )
-                .padding(10)
+                Picker("界面模式", selection: $interfaceMode) {
+                    Text("简洁").tag(InterfaceMode.simple)
+                    Text("专业").tag(InterfaceMode.professional)
+                }
+                .pickerStyle(.segmented)
+                .accessibilityIdentifier("interfaceModePicker")
+                .padding(12)
             }
             .navigationSplitViewColumnWidth(min: 210, ideal: 225, max: 250)
         } detail: {
             VStack(alignment: .leading, spacing: 0) {
-                // Page Detail Content
                 if model.loadingFailed {
                     ContentUnavailableView(
                         "配置加载失败",
@@ -355,6 +373,31 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(Color(nsColor: .windowBackgroundColor))
         }
+        .onAppear {
+            page = interfaceMode == .simple ? .home : .overview
+        }
+        .onChange(of: interfaceMode) { _, mode in
+            page = mode == .simple ? .home : .overview
+        }
+        .sheet(item: $utility) { destination in
+            VStack(spacing: 0) {
+                HStack {
+                    Text(destination.title).font(.headline)
+                    Spacer()
+                    Button("完成") { utility = nil }.keyboardShortcut(.cancelAction)
+                }.padding(20)
+                Divider()
+                if destination == .settings { SettingsView(model: model) }
+                else { DiagnosticsView(model: model).padding(24) }
+            }
+            .frame(minWidth: 1000, minHeight: 680)
+        }
+        .confirmationDialog("应用运行模式并重新连接一次？",isPresented:Binding(get:{model.pendingMode != nil},set:{if !$0 {model.pendingMode=nil}})) {
+            if let mode=model.pendingMode {
+                Button("应用："+mode.label) {model.pendingMode=nil;Task{await model.setMode(mode,confirmed:true)}}
+            }
+            Button("取消",role:.cancel) {model.pendingMode=nil}
+        } message: {Text("企业网络与本机保护保持优先。规则模式按国内外分流；全局代理会让普通国内公网流量也经过代理。")}
         .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
             guard let provider = providers.first else { return false }
             provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
@@ -375,20 +418,30 @@ struct ContentView: View {
             Text(model.errorMessage ?? "")
         }
     }
-    
+
     @ViewBuilder private var content: some View {
         switch page {
-        case "概览": OverviewView(model: model)
-        case "配置": ProfilesView(model: model)
-        case "规则解释": RuleExplanationView(model: model)
-        case "诊断": DiagnosticsView(model: model)
-        case "节点": NodesView(model: model, onEdit: { editing = EditorRequest(node: $0) }, onAdd: { editing = EditorRequest(node: nil) }, onImport: { importing = true })
-        case "策略组": GroupsView(model: model)
-        case "订阅": SubscriptionsView(model: model)
-        case "分流规则": RuleView(model: model)
-        case "连接": ConnectionsView(model: model)
-        case "运行日志": RuntimeLogView(buffer: model.logBuffer)
-        default: SettingsView(model: model)
+        case .home:
+            SimpleConnectionView(model: model, onImport: { importing = true }, onLines: { page = .lines }, onSubscriptions: { page = .subscriptions }, onDiagnose: { utility = .diagnostics })
+        case .lines:
+            SimpleLinesView(model: model, onImport: { importing = true }, onEdit: { editing = EditorRequest(node: $0) }, onProfessional: { interfaceMode = .professional })
+        case .overview: OverviewView(model: model)
+        case .profiles: ProfilesView(model: model)
+        case .explanation: RuleExplanationView(model: model)
+        case .diagnostics: DiagnosticsView(model: model)
+        case .nodes: NodesView(model: model, onEdit: { editing = EditorRequest(node: $0) }, onAdd: { editing = EditorRequest(node: nil) }, onImport: { importing = true })
+        case .groups: GroupsView(model: model)
+        case .subscriptions:
+            if interfaceMode == .simple {
+                SimpleSubscriptionsView(model: model, onImport: { importing = true })
+            } else { SubscriptionsView(model: model) }
+        case .rules: RuleView(model: model)
+        case .connections: ConnectionsView(model: model)
+        case .logs: RuntimeLogView(buffer: model.logBuffer)
+        case .settings:
+            if interfaceMode == .simple {
+                SimpleSettingsView(model: model, onAdvanced: { utility = .settings }, onDiagnose: { utility = .diagnostics })
+            } else { SettingsView(model: model) }
         }
     }
 }
@@ -1349,38 +1402,84 @@ struct SettingsView: View {
     @State private var port = "7890"
     @State private var exclusions = ""
     @State private var protectedDomains = ""
+    @State private var draftCapture = CaptureMode.systemProxy
+    @State private var draftDNS = DNSPreference.httpsProxy
+    @State private var draftFamily = AddressFamilyPolicy.ipv4Only
+    @State private var draftHTTP = false
     @State private var shortcutKey: UInt32 = 35
     @State private var shortcutModifiers: UInt32 = 2304
     
+    private var domainDraft:String {
+        model.state.protectedDomains.joined(separator:",")
+    }
+    private var draftDomainItems:[String] {
+        protectedDomains.components(separatedBy:CharacterSet(charactersIn:",\n")).filter{!$0.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty}
+    }
+    private var missingDraftDomains:[String] {
+        (try? ProtectedDomainPolicy.missingTongdunDomains(in:draftDomainItems)) ?? []
+    }
+    private func completeDomainDraft() {
+        do {protectedDomains=try ProtectedDomainPolicy.completingTongdunDomains(draftDomainItems).joined(separator:",")}
+        catch {model.errorMessage=error.localizedDescription}
+    }
     var body: some View {
         Form {
             Section {
-                Picker("接管方式", selection: Binding(get: { model.state.captureMode }, set: { value in Task { await model.setCaptureMode(value) } })) {
+                Picker("接管方式", selection: $draftCapture) {
                     Text("系统代理（默认）").tag(CaptureMode.systemProxy)
                     Text("TUN 虚拟网卡（管理员辅助服务）").tag(CaptureMode.tun)
-                    Text("兼容接管（系统代理 + TUN，保护企业内网）").tag(CaptureMode.compatible)
+                    Text("完整接管（TUN＋系统代理，需管理员权限）").tag(CaptureMode.compatible)
                 }
                 .disabled(model.locked)
                 
-                Picker("目的地址协议",selection:Binding(get:{model.state.effectiveAddressFamilyPolicy},set:{value in Task{await model.setAddressFamily(value)}})) {
+                Picker("目的地址协议",selection:$draftFamily) {
                     ForEach(AddressFamilyPolicy.allCases,id:\.self){policy in Text(policy.label).tag(policy)}
                 }.disabled(model.locked)
                 if model.state.addressFamilyPolicy == nil {Text("旧配置已使用仅 IPv4，避免节点 IPv6 不可达；可在此调整。").font(.caption).foregroundStyle(.secondary)}
-                Toggle("HTTP 兼容模式（User-Agent / URL 重写）",isOn:Binding(get:{model.state.httpCompatibilityEnabled},set:{value in Task{await model.setHTTPCompatibility(value)}})).disabled(model.locked || model.state.shadowrocket == nil)
+                Toggle("HTTP 兼容模式（User-Agent / URL 重写）",isOn:$draftHTTP).disabled(model.locked || model.state.shadowrocket == nil)
                 if model.state.shadowrocket != nil && !model.state.httpCompatibilityEnabled {Text("当前由核心直接代理；User-Agent 和 URL 重写已保留但未启用。兼容模式仅处理明文 HTTP，不能读取 HTTPS/SOCKS 的加密内容。").font(.caption).foregroundStyle(.orange)}
                 Text("TUN 与兼容接管仍需独立验收；开启 HTTP 兼容模式后才使用兼容入口。").font(.caption).foregroundStyle(.secondary)
-                Picker("DNS 解析策略", selection: Binding(get: { model.state.dnsPreference }, set: { value in Task { await model.setDNS(value) } })) {
+                Picker("DNS 解析策略", selection: $draftDNS) {
                     Text("经代理的 HTTPS DNS").tag(DNSPreference.httpsProxy)
                     Text("原系统原生解析").tag(DNSPreference.system)
                 }
                 .disabled(model.locked)
                 
                 TextField("额外直连网段（用逗号分隔）", text: $exclusions)
-                Button("保存 TUN 排除网段") { Task { await model.saveTunExclusions(exclusions) } }
-                    .disabled(model.locked)
+                Text("排除网段与下方网络设置一起保存并应用。").font(.caption).foregroundStyle(.secondary)
                 
-                TextField("补充内网域名（用逗号分隔，需要企业 DNS）",text:$protectedDomains)
-                Button("保存内网域名") {Task{await model.saveProtectedDomains(protectedDomains)}}.disabled(model.locked)
+                TextField("企业网络保护域名（域名及其子域，用逗号分隔）",text:$protectedDomains)
+                Text("已保存的企业保护域名："+(model.state.protectedDomains.isEmpty ? "无":model.state.protectedDomains.joined(separator:"、")))
+                    .font(.caption).foregroundStyle(.secondary)
+                if protectedDomains != domainDraft {
+                    Text("企业保护域名草稿尚未应用，当前连接仍使用原设置。")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+                if !missingDraftDomains.isEmpty {
+                    Text("同盾企业保护草稿缺少："+missingDraftDomains.joined(separator:"、")+"；登录跳转可能经过这些域名。")
+                        .font(.caption).foregroundStyle(.orange)
+                    Button("补齐到草稿") {completeDomainDraft()}.disabled(model.locked)
+                }
+                Text("上述接管、DNS、地址族、HTTP 兼容和企业域名只编辑草稿，点击应用才生效。")
+                    .font(.caption).foregroundStyle(.secondary)
+                if draftCapture == .compatible {
+                    Text("规则模式：本机 → 企业 VPN → 显式规则 → 国内域名/IP 直连 → 未知公网代理。保存时默认未命中策略改为当前代理选择。固定国内规则："+DomesticRouting.version).font(.caption)
+                    Text("完整接管尚需管理员恢复和实网验收，不会自动启用。节点、原用户规则顺序不变。")
+                        .font(.caption).foregroundStyle(.orange)
+                    DisclosureGroup("国内目标被显式规则覆盖（需人工确认）") {
+                        ForEach(DomesticRouting.conflictingRules(model.state)) {rule in Text(rule.value+" → "+model.state.label(rule.target ?? .selected)).font(.caption)}
+                    }
+                }
+                Button(model.connection == .connected ? "应用网络设置（重新连接一次）":"保存网络设置") {
+                    Task { _ = await model.applyCaptureSettings(mode:draftCapture,dns:draftDNS,family:draftFamily,httpCompatibility:draftHTTP,domains:protectedDomains,exclusions:exclusions) }
+                }.disabled(model.locked)
+                Text("系统代理模式下，保护域名绕过轻舟，交给系统网络及企业 VPN；所有运行模式均优先保护。核心 DIRECT 仍经过本地核心，与系统代理绕过不同。显式指定 HTTP/SOCKS 代理的命令不一定遵循此清单；TUN 仍使用原有内网保护逻辑。")
+                    .font(.caption).foregroundStyle(.secondary)
+                if (try? ProtectedDomainPolicy.normalize(draftDomainItems))?.contains(where:{ProtectedDomainPolicy.tongdunDomains.contains($0)}) == false {
+                    Button("填入同盾企业域名草稿") {completeDomainDraft()}.disabled(model.locked)
+                    Text("建议草稿：tongdun.me、tongdun.cn、tongdun.net；点击保存才会生效。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 if !model.protectionSummary.isEmpty {DisclosureGroup("生效的内网绕过项") {ForEach(model.protectionSummary,id:\.self){Text($0).font(.caption)}}}
                 HStack {
                     Text("辅助服务状态：")
@@ -1448,15 +1547,17 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .onAppear {
+            draftCapture=model.state.captureMode;draftDNS=model.state.dnsPreference;draftFamily=model.state.effectiveAddressFamilyPolicy;draftHTTP=model.state.httpCompatibilityEnabled
             port = String(model.state.listenPort)
             exclusions = model.state.tunExcludedCIDRs.joined(separator: ",")
-            protectedDomains = model.state.protectedDomains.joined(separator: ",")
+            protectedDomains = domainDraft
             shortcutKey = model.state.shortcutKey
             shortcutModifiers = model.state.shortcutModifiers
         }
         .onChange(of:model.currentProfileID) {_,_ in
+            draftCapture=model.state.captureMode;draftDNS=model.state.dnsPreference;draftFamily=model.state.effectiveAddressFamilyPolicy;draftHTTP=model.state.httpCompatibilityEnabled
             port=String(model.state.listenPort);exclusions=model.state.tunExcludedCIDRs.joined(separator:",")
-            protectedDomains=model.state.protectedDomains.joined(separator:",");shortcutKey=model.state.shortcutKey;shortcutModifiers=model.state.shortcutModifiers
+            protectedDomains=domainDraft;shortcutKey=model.state.shortcutKey;shortcutModifiers=model.state.shortcutModifiers
         }
     }
     

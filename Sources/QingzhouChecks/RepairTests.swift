@@ -1,7 +1,104 @@
 import Foundation
+import CFNetwork
 import QingzhouKit
 
 final class RepairTests:CheckCase {
+    func testTongdunProtectionDraft() throws {
+        var state=AppState();state.protectedDomains=["tongdun.me","custom.example"]
+        expectEqual(try ProtectedDomainPolicy.missingTongdunDomains(in:state.protectedDomains),["tongdun.cn","tongdun.net"])
+        let draft=try ProtectedDomainPolicy.completingTongdunDomains(state.protectedDomains)
+        expectEqual(draft,["tongdun.me","custom.example","tongdun.cn","tongdun.net"])
+        expectEqual(state.protectedDomains,["tongdun.me","custom.example"])
+        expectEqual(try ProtectedDomainPolicy.missingTongdunDomains(in:draft),[])
+        expectEqual(try ProtectedDomainPolicy.completingTongdunDomains(draft),draft)
+        expectEqual(try ProtectedDomainPolicy.missingTongdunDomains(in:[" TONGDUN.CN. ","tongdun.cn"]),["tongdun.me","tongdun.net"])
+        expectEqual(try ProtectedDomainPolicy.missingTongdunDomains(in:[]),[])
+        expectEqual(try ProtectedDomainPolicy.missingTongdunDomains(in:["custom.example","tongdun.me.attacker.test","login-inner.tongdun.cn"]),[])
+        expectEqual(try ProtectedDomainPolicy.completingTongdunDomains(["CUSTOM.EXAMPLE.","custom.example","TONGDUN.CN"]),["custom.example","tongdun.cn","tongdun.me","tongdun.net"])
+        expectThrows(try ProtectedDomainPolicy.completingTongdunDomains(["https://tongdun.cn"]))
+        expectThrows(try ProtectedDomainPolicy.missingTongdunDomains(in:["*.tongdun.cn"]))
+
+        let directory=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true)
+        defer {try? FileManager.default.removeItem(at:directory)}
+        let file=directory.appendingPathComponent("state.json"),credentials=MemoryCredentials()
+        let store=try NodeStore(file:file,credentials:credentials)
+        try store.commit(state)
+        let saved=try Data(contentsOf:file)
+        var next=store.state;next.protectedDomains=draft
+        let pending=store.prepareChange(next)
+        expectEqual(try Data(contentsOf:file),saved)
+        expectEqual(store.state.protectedDomains,state.protectedDomains)
+        store.abort(pending)
+        expectEqual(try NodeStore(file:file,credentials:credentials).state.protectedDomains,state.protectedDomains)
+        try store.commit(store.prepareChange(next))
+        expectEqual(try NodeStore(file:file,credentials:credentials).state.protectedDomains,draft)
+
+        let applied=try ProxyRecovery.applied(to:["ExceptionsList":["localhost"]],port:27890,protectedDomains:draft)
+        let plan=try CapturePlan.make(snapshot:CapturePlanTests().fixture(),extraCIDRs:[],extraDomains:draft)
+        for root in ProtectedDomainPolicy.tongdunDomains {
+            for host in [root,"login-inner."+root,"a.b."+root] {
+                let proxies=CFNetworkCopyProxiesForURL(URL(string:"https://"+host)! as CFURL,applied as CFDictionary).takeRetainedValue() as! [[String:Any]]
+                expectEqual(proxies.first?[kCFProxyTypeKey as String] as? String,kCFProxyTypeNone as String)
+                expectTrue(plan.protects(host))
+                expectTrue(plan.resolvers(for:host).allSatisfy{CapturePlan.isVPN($0.interface)})
+            }
+            for host in ["evil"+root,root+".attacker.test"] {
+                let proxies=CFNetworkCopyProxiesForURL(URL(string:"https://"+host)! as CFURL,applied as CFDictionary).takeRetainedValue() as! [[String:Any]]
+                expectEqual(proxies.first?[kCFProxyTypeKey as String] as? String,kCFProxyTypeHTTPS as String)
+                expectFalse(plan.protects(host))
+            }
+        }
+    }
+
+    func testCorporateProxyBypass() throws {
+        expectEqual(try ProtectedDomainPolicy.normalize([" Corp.Example. ","corp.example","dev.corp.example"]),["corp.example","dev.corp.example"])
+        for value in ["https://corp.example","corp.example:443","corp.example/path","*.corp.example","a..example","-a.example","127.0.0.1",""] {expectThrows(try ProtectedDomainPolicy.normalize([value]))}
+        let original:[String:Any]=["ExceptionsList":["localhost","corp.example"],"ExcludeSimpleHostnames":0]
+        let applied=try ProxyRecovery.applied(to:original,port:27890,protectedDomains:["CORP.EXAMPLE."])
+        expectEqual(applied["ExceptionsList"] as? [String],["localhost","corp.example","*.corp.example"])
+        expectEqual(applied["ExcludeSimpleHostnames"] as? Int,0)
+        for host in ["corp.example","a.corp.example","a.b.corp.example"] {
+            let proxies=CFNetworkCopyProxiesForURL(URL(string:"https://"+host)! as CFURL,applied as CFDictionary).takeRetainedValue() as! [[String:Any]]
+            expectEqual(proxies.first?[kCFProxyTypeKey as String] as? String,kCFProxyTypeNone as String)
+        }
+        for host in ["evilcorp.example","corp.example.attacker.test","public.example"] {
+            let proxies=CFNetworkCopyProxiesForURL(URL(string:"https://"+host)! as CFURL,applied as CFDictionary).takeRetainedValue() as! [[String:Any]]
+            expectEqual(proxies.first?[kCFProxyTypeKey as String] as? String,kCFProxyTypeHTTPS as String)
+        }
+        expectThrows(try ProxyRecovery.applied(to:["ExceptionsList":42],port:27890,protectedDomains:["corp.example"]))
+        expectTrue(NSDictionary(dictionary:ProxyRecovery.restored(original:original,applied:applied,current:applied)!).isEqual(to:original))
+        var partial=applied
+        for key in ["HTTPEnable","HTTPProxy","HTTPPort","HTTPSEnable","HTTPSProxy","HTTPSPort","SOCKSEnable","SOCKSProxy","SOCKSPort"] {
+            partial[key]=original[key]
+        }
+        partial["UnrelatedSetting"]="external-preserved"
+        var fullyRestored=original;fullyRestored["UnrelatedSetting"]="external-preserved"
+        expectTrue(NSDictionary(dictionary:ProxyRecovery.restored(original:original,applied:applied,current:partial)!).isEqual(to:fullyRestored))
+        expectTrue(NSDictionary(dictionary:ProxyRecovery.restored(original:original,applied:applied,current:fullyRestored)!).isEqual(to:fullyRestored))
+        var foreignPort=partial;foreignPort["HTTPSPort"]=1082
+        expectNil(ProxyRecovery.restored(original:original,applied:applied,current:foreignPort))
+        expectTrue(ProxyRecovery.pointsToOwnedEndpoint(current:applied,applied:applied))
+        expectFalse(ProxyRecovery.pointsToOwnedEndpoint(current:original,applied:applied))
+        expectFalse(ProxyRecovery.pointsToOwnedEndpoint(current:partial,applied:applied))
+        expectFalse(ProxyRecovery.pointsToOwnedEndpoint(current:["HTTPEnable":1,"HTTPProxy":"127.0.0.1","HTTPPort":1082],applied:applied))
+        expectFalse(ProxyRecovery.pointsToOwnedEndpoint(current:["HTTPEnable":1,"HTTPProxy":"127.0.0.1"],applied:[:]))
+        var external=applied;external["ExceptionsList"]=["other.example"]
+        expectNil(ProxyRecovery.restored(original:original,applied:applied,current:external))
+        expectEqual(ProxyRecovery.changedOwnedKeys(expected:applied,current:external,protectsExceptions:true),["ExceptionsList"])
+        let legacy=ProxyRecovery.applied(to:original,port:27890)
+        var changed=legacy;changed["ExceptionsList"]=["external.example"]
+        expectEqual(ProxyRecovery.changedOwnedKeys(expected:legacy,current:changed),[])
+        expectEqual(ProxyRecovery.restored(original:original,applied:legacy,current:changed)?["ExceptionsList"] as? [String],["external.example"])
+        for mode in ProxyMode.allCases {
+            var state=AppState();state.mode=mode;state.protectedDomains=["corp.example"]
+            expectEqual(try ProxyRecovery.applied(to:[:],port:27890,protectedDomains:state.protectedDomains)["ExceptionsList"] as? [String],["corp.example","*.corp.example"])
+        }
+        let shadow=try JSONDecoder().decode(ShadowrocketConfiguration.self,from:Data(contentsOf:URL(fileURLWithPath:"Resources/shadowrocket-default.json")))
+        var state=AppState();state.protectedDomains=["corp.example"]
+        expectEqual(try shadow.applying(to:state).protectedDomains,state.protectedDomains)
+    }
+
     func testCompatibilityMigrationAndImport() throws {
         let old=try JSONDecoder().decode(AppState.self,from:Data("{}".utf8));expectFalse(old.httpCompatibilityEnabled)
         let file=URL(fileURLWithPath:FileManager.default.currentDirectoryPath+"/Resources/shadowrocket-default.json")

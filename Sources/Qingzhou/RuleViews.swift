@@ -25,6 +25,23 @@ struct RuleView: View {
     @State private var value = ""
     @State private var target = PolicyReference.selected
     @State private var addingRemote = false
+    @State private var draftRules:[RoutingRule]?
+    @State private var draftFinal:PolicyReference?
+    @State private var draftRevision:Data?
+
+    private var displayedRules:[RoutingRule] {draftRules ?? model.state.rules}
+    private func beginDraft() {
+        if draftRules==nil {draftRules=model.state.rules;draftFinal=model.state.ruleFinal ?? .selected;draftRevision=try? model.ruleRevision()}
+    }
+    private func resetDraft() {draftRules=nil;draftFinal=nil;draftRevision=nil}
+    private func previewMove(from source:IndexSet,to destination:Int) {
+        guard source.allSatisfy({displayedRules.indices.contains($0)}),(0...displayedRules.count).contains(destination) else {return}
+        beginDraft();draftRules!.move(fromOffsets:source,toOffset:destination)
+    }
+    private func previewStep(_ id:UUID,by offset:Int) {
+        guard let index=displayedRules.firstIndex(where:{$0.id==id}),displayedRules.indices.contains(index+offset) else {return}
+        previewMove(from:IndexSet(integer:index),to:index+offset+(offset>0 ? 1:0))
+    }
     
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -58,12 +75,9 @@ struct RuleView: View {
                             action: target == .direct ? .direct : target == .reject ? .reject : .proxy,
                             target: target
                         )
-                        Task {
-                            await model.addRule(rule)
-                            if model.errorMessage == nil { value = "" }
-                        }
+                        beginDraft();draftRules!.append(rule);value=""
                     } label: {
-                        Label("添加规则", systemImage: "plus")
+                        Label("加入草稿", systemImage: "plus")
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(model.locked || value.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -80,8 +94,8 @@ struct RuleView: View {
                     RuleTargetPicker(
                         state: model.state,
                         target: Binding(
-                            get: { model.state.ruleFinal ?? .selected },
-                            set: { ref in Task { await model.setRuleFinal(ref) } }
+                            get: { draftFinal ?? model.state.ruleFinal ?? .selected },
+                            set: { ref in beginDraft();draftFinal=ref }
                         )
                     )
                     .frame(width: 220)
@@ -89,16 +103,29 @@ struct RuleView: View {
                 }
                 .padding(.horizontal, 4)
                 
-                // Custom Rules Table
-                if model.state.rules.isEmpty {
-                    ContentUnavailableView(
-                        "暂无自定义规则",
-                        systemImage: "arrow.triangle.branch",
-                        description: Text("在上方输入规则内容、类型和目标动作即可添加。")
-                    )
+                // 所有自定义规则修改先留在草稿中，点击应用时统一重连一次。
+                HStack {
+                    Text(draftRules == nil ? "拖动、添加和删除仅修改草稿，不影响当前连接；越靠上越先匹配。":"规则草稿尚未应用，当前代理继续使用原配置。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    if let draftRules,let draftRevision {
+                        Button("撤销草稿") {resetDraft()}.disabled(model.locked)
+                        Button(model.connection == .connected ? "应用规则（重新连接一次）":"保存规则") {
+                            let final=draftFinal ?? .selected
+                            Task {if await model.applyRuleDraft(draftRules,final:final,revision:draftRevision) {resetDraft()}}
+                        }.buttonStyle(.borderedProminent).disabled(model.locked)
+                    }
+                }
+                if displayedRules.isEmpty {
+                    ContentUnavailableView("暂无自定义规则",systemImage:"arrow.triangle.branch",description:Text("在上方添加规则草稿后点击保存。"))
                 } else {
-                    List(model.state.rules) { rule in
+                    List {
+                        ForEach(displayedRules) { rule in
                         HStack(spacing: 12) {
+                            Image(systemName: "line.3.horizontal")
+                                .foregroundStyle(.tertiary)
+                                .help("拖动此行调整规则顺序")
+                                .accessibilityLabel("拖动调整规则顺序")
                             ruleKindBadge(rule.kind)
                             
                             Text(rule.value)
@@ -111,7 +138,7 @@ struct RuleView: View {
                             
                             HStack(spacing: 4) {
                                 Button {
-                                    Task { await model.moveRule(rule.id, by: -1) }
+                                    previewStep(rule.id,by:-1)
                                 } label: {
                                     Image(systemName: "arrow.up")
                                 }
@@ -119,7 +146,7 @@ struct RuleView: View {
                                 .controlSize(.small)
                                 
                                 Button {
-                                    Task { await model.moveRule(rule.id, by: 1) }
+                                    previewStep(rule.id,by:1)
                                 } label: {
                                     Image(systemName: "arrow.down")
                                 }
@@ -127,7 +154,7 @@ struct RuleView: View {
                                 .controlSize(.small)
                                 
                                 Button(role: .destructive) {
-                                    Task { await model.removeRule(rule.id) }
+                                    beginDraft();draftRules!.removeAll{$0.id==rule.id}
                                 } label: {
                                     Image(systemName: "trash")
                                 }
@@ -137,6 +164,11 @@ struct RuleView: View {
                         }
                         .padding(.vertical, 4)
                         .disabled(model.locked)
+                        }
+                        .onMove { source, destination in
+                            previewMove(from:source,to:destination)
+                        }
+                        .moveDisabled(model.locked)
                     }
                     .clipShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
                 }
@@ -174,6 +206,7 @@ struct RuleView: View {
                 }
             }
         }
+        .onChange(of:model.currentProfileID) {_,_ in resetDraft()}
         .sheet(isPresented: $addingRemote) { RemoteEditor(model: model) }
     }
     

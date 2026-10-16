@@ -52,6 +52,7 @@ extension ConfigBuilder {
         }
         for rule in state.rules where rule.kind != .userAgent {try append(rule)}
         for source in state.remoteRules {for rule in source.rules where rule.kind != .userAgent {try append(rule,override:source.target)}}
+        try DomesticRouting.appendRules(to:&rules,state:state)
         var final=state.ruleFinal?.tag ?? "proxy"
         if state.ruleFinal == .reject {rules.append(["action":"reject"]);final="proxy"}
         if state.ruleFinal != .direct && state.ruleFinal != .reject {rules.append(["action":"resolve","strategy":state.effectiveAddressFamilyPolicy.strategy])}

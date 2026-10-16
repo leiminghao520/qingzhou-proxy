@@ -118,3 +118,25 @@ func TestIdleDoesNotBlockHTTP(t *testing.T) {
 		t.Fatal(response.StatusCode)
 	}
 }
+
+func TestDomesticFallbackPreservesExplicitPriority(t *testing.T) {
+	c := fixture()
+	c.Rules = []rule{{Kind: "DOMAIN", Value: "qq.com", Policy: "PROXY"}, {Kind: "DOMAIN-SUFFIX", Value: "baidu.com", Policy: "DIRECT"}, {Kind: "DOMAIN-REGEX", Value: `^cn[0-9]+\.example$`, Policy: "DIRECT"}, {Kind: "GEOIP", Value: "CN", Policy: "DIRECT"}, {Kind: "FINAL", Policy: "PROXY"}}
+	g, e := prepare(c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	g.resolve = func(context.Context, string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("203.0.113.2")}, nil
+	}
+	for _, item := range []struct{ host, want string }{{"qq.com", "PROXY"}, {"www.baidu.com", "DIRECT"}, {"cn12.example", "DIRECT"}, {"baidu.com.attacker.test", "PROXY"}, {"foreign.test", "PROXY"}} {
+		got, e := g.pick(context.Background(), item.host, "", "rule")
+		if e != nil || got != item.want {
+			t.Fatalf("%s: %s %v", item.host, got, e)
+		}
+	}
+	c.Rules[2].Value = "["
+	if _, e := prepare(c); e == nil {
+		t.Fatal("接受了损坏的国内正则")
+	}
+}

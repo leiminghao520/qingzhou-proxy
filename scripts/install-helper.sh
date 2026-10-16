@@ -59,6 +59,8 @@ if [ -f "$plist" ]; then
 fi
 # 退出旧服务时可能生成恢复记录，出现记录后继续保留旧服务。
 if [ -f "$root/recovery.json" ]; then echo '旧服务退出后仍有恢复记录，已取消更新。'; exit 1; fi
+# 旧服务退出后可能遗留套接字文件，不能把该文件当作新服务已经就绪。
+if [ -S "$root/control.sock" ]; then /bin/rm -f "$root/control.sock"; fi
 /usr/bin/install -d -o root -g wheel -m 755 "$root"
 installed=1
 for file in QingzhouHelper sing-box; do /usr/bin/install -o root -g wheel -m 755 "$stage/$file" "$root/$file"; done

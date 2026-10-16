@@ -11,18 +11,22 @@ extension Service {
     func verifyProtection()->Bool {
         guard let plan=capturePlan else{return false}
         guard let table=try? NetworkInspection.command("/usr/sbin/netstat",["-rn"]) else{return false}
-        let routes=NetworkSnapshot.parseRoutes(table)
+        let routes=NetworkSnapshot.parseRoutes(table,includeTransient:true)
         return plan.protectedRoutes.allSatisfy {expected in
             routes.contains{actual in NetworkInspection.samePrefix(actual.destination,expected.destination) && actual.interface==expected.interface && actual.scope==nil}
         }
     }
     func verifyOwnedNetwork()->Bool {(try? inspectOwnedNetwork()) == true}
-    func inspectOwnedNetwork() throws -> Bool {
-        guard let record=journal,let expected=try PropertyListSerialization.propertyList(from:record.expectedDNS,format:nil) as? NSDictionary else{return false}
+    func inspectOwnedNetwork() throws -> Bool {try ownedNetworkIssues().isEmpty}
+    func ownedNetworkIssues() throws -> [String] {
+        guard let record=journal,let expected=try PropertyListSerialization.propertyList(from:record.expectedDNS,format:nil) as? NSDictionary else{return ["恢复快照缺失或 DNS 快照不可读取"]}
         let table=try NetworkInspection.command("/usr/sbin/netstat",["-rn"])
-        let routes=NetworkSnapshot.parseRoutes(table)
-        guard (SCDynamicStoreCopyValue(dynamic,record.dnsKey as CFString) as? NSDictionary)==expected else{return false}
-        return record.routes.allSatisfy{owned in routes.contains{current in NetworkInspection.samePrefix(current.destination,owned.destination) && current.interface==owned.interface && current.scope==owned.scope && current.gateway==owned.gateway}}
+        let routes=NetworkSnapshot.parseRoutes(table,includeTransient:true)
+        var issues:[String]=[]
+        if (SCDynamicStoreCopyValue(dynamic,record.dnsKey as CFString) as? NSDictionary) != expected {issues.append("本次补充 DNS 服务与应用值不一致")}
+        let expectedRoutes=record.routes.map{ProtectedRoute(destination:$0.destination,gateway:$0.gateway,interface:$0.interface,scope:$0.scope)}
+        issues += CaptureOwnership.protectionIssues(owned:expectedRoutes,preserved:record.preservedRoutes ?? [],actual:routes)
+        return issues
     }
     func currentSnapshot() throws -> NetworkSnapshot {
         guard let record=journal,let global=SCDynamicStoreCopyValue(dynamic,"State:/Network/Global/IPv4" as CFString) as? [String:Any],let primary=global["PrimaryInterface"] as? String else{throw ProxyError("网络快照无法更新")}
@@ -53,8 +57,10 @@ extension Service {
         guard ["active","networkRetry"].contains(phase),let previous=capturePlan,let request=activeRequest,let fd=owner else{return}
         // 每次通知和重试等待期间都先核对所有权，不能用退避掩盖外部改写。
         do {
-            guard try inspectOwnedNetwork(),request.systemProxyPort == nil || verifyProxy() else {
-                failNetworkChange("网络所有权冲突：接管设置被外部修改");return
+            var issues=try ownedNetworkIssues()
+            if request.systemProxyPort != nil {issues += proxyOwnershipIssues()}
+            if !issues.isEmpty {
+                failNetworkChange("网络保护核验未通过："+issues.prefix(8).joined(separator:"；"));return
             }
         } catch {retrySnapshot(error);return}
         guard snapshotRetry.ready(now:ProcessInfo.processInfo.systemUptime) else{return}

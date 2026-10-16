@@ -1,0 +1,11 @@
+{
+  "version": "2026-10-15",
+  "domainSource": "https://github.com/SagerNet/sing-geosite",
+  "commit": "df6851d87aeaeb9d6a9464288b317e7ff2288d78",
+  "artifact": "geosite-cn.srs",
+  "artifactSHA256": "7e5edaa3156918ebb732629f7b4ab3f03040b9940456438f976c2046033fc15c",
+  "geoIPSource": "Existing bundled shadowrocket-default.json GEOIP:CN",
+  "geoIPSHA256": "0afe2d36f8fcf2dc602fe25f5e508ad5788f67439096da03317563d7918e2008",
+  "payloadSHA256": "0476ef1945f877d2832cd815ba052feb9057d77dacca338b9e006ff65cf8a3c9",
+  "licenseSource": "https://github.com/v2fly/domain-list-community/blob/master/LICENSE"
+}

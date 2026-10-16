@@ -3,7 +3,7 @@ import Darwin
 import SystemConfiguration
 
 public struct TunRequest:Codable,Sendable {
-    public var protocolVersion:Int? = 3
+    public var protocolVersion:Int? = 4
     public var systemProxyPort:Int?
     public var httpCompatibilityPort:Int?
     public var operation:String
@@ -13,7 +13,7 @@ public struct TunRequest:Codable,Sendable {
     public var control:CoreControlContext?
     public init(operation:String,state:AppState?=nil,credentials:[String:String]?=nil,control:CoreControlContext?=nil,verifyNetwork:Bool=false,httpCompatibilityPort:Int?=nil,systemProxyPort:Int?=nil){self.systemProxyPort=systemProxyPort;self.httpCompatibilityPort=httpCompatibilityPort;self.verifyNetwork=verifyNetwork;self.operation=operation;self.state=state;self.credentials=credentials;self.control=control}
 }
-public struct TunReply:Codable,Sendable {public var proxyVerified:Bool?;public var protectionVerified:Bool?;public var protectionSummary:[String]?;public var phase:String?;public var dnsServer:String?;public var protocolVersion:Int? = 3;public var ok:Bool;public var message:String;public var running:Bool;public var routesVerified:Bool?;public var dnsVerified:Bool?;public init(ok:Bool,message:String,running:Bool=false,routesVerified:Bool?=nil,dnsVerified:Bool?=nil,dnsServer:String?=nil,proxyVerified:Bool?=nil,protectionVerified:Bool?=nil,protectionSummary:[String]?=nil,phase:String?=nil){self.proxyVerified=proxyVerified;self.protectionVerified=protectionVerified;self.protectionSummary=protectionSummary;self.phase=phase;self.dnsServer=dnsServer;self.routesVerified=routesVerified;self.dnsVerified=dnsVerified;self.ok=ok;self.message=message;self.running=running}}
+public struct TunReply:Codable,Sendable {public var coreDiagnostics:[String]?;public var proxyVerified:Bool?;public var protectionVerified:Bool?;public var protectionSummary:[String]?;public var phase:String?;public var dnsServer:String?;public var protocolVersion:Int? = 4;public var ok:Bool;public var message:String;public var running:Bool;public var routesVerified:Bool?;public var dnsVerified:Bool?;public init(ok:Bool,message:String,coreDiagnostics:[String]?=nil,running:Bool=false,routesVerified:Bool?=nil,dnsVerified:Bool?=nil,dnsServer:String?=nil,proxyVerified:Bool?=nil,protectionVerified:Bool?=nil,protectionSummary:[String]?=nil,phase:String?=nil){self.coreDiagnostics=coreDiagnostics;self.proxyVerified=proxyVerified;self.protectionVerified=protectionVerified;self.protectionSummary=protectionSummary;self.phase=phase;self.dnsServer=dnsServer;self.routesVerified=routesVerified;self.dnsVerified=dnsVerified;self.ok=ok;self.message=message;self.running=running}}
 public enum HelperPaths {
     public static let directory="/Library/PrivilegedHelperTools/cn.qingzhou.proxy"
     public static let socket=directory+"/control.sock"
@@ -28,18 +28,51 @@ public enum UnixChannel {
     }
     public static func address(_ path:String) throws -> sockaddr_un {var address=sockaddr_un();address.sun_family=sa_family_t(AF_UNIX);address.sun_len=UInt8(MemoryLayout<sockaddr_un>.size);let bytes=Array(path.utf8)+[0];guard bytes.count<=MemoryLayout.size(ofValue:address.sun_path) else{throw ProxyError("控制通道路径过长")};withUnsafeMutableBytes(of:&address.sun_path){$0.copyBytes(from:bytes)};return address}
 }
+public struct HelperConnectionError:Error,LocalizedError,Sendable {
+    public let code:Int32
+    public init(code:Int32){self.code=code}
+    public var retryable:Bool {[ENOENT,ECONNREFUSED,EACCES].contains(code)}
+    public var errorDescription:String? {"辅助服务控制通道连接失败（"+String(code)+"："+String(cString:strerror(code))+"），请检查安装状态和套接字权限"}
+}
+public enum HelperReadiness {
+    // 只重试启动窗口内的连接错误；协议、身份校验和恢复冲突必须立即报告。
+    public static func wait(timeout:TimeInterval=5,interval:TimeInterval=0.2,query:() async throws -> TunReply) async throws -> TunReply {
+        let deadline=Date().addingTimeInterval(max(0,timeout))
+        while true {
+            do {return try await query()}
+            catch let error as HelperConnectionError where error.retryable {
+                let remaining=deadline.timeIntervalSinceNow
+                guard remaining>0 else {throw error}
+                try await Task.sleep(nanoseconds:UInt64(min(remaining,max(0.001,interval))*1_000_000_000))
+            }
+        }
+    }
+}
 public actor PrivilegedServiceClient {
     private var fd:Int32 = -1
     public init(){}
     public func request(_ request:TunRequest) async throws -> TunReply {
-        if fd<0 {let descriptor=socket(AF_UNIX,SOCK_STREAM,0);guard descriptor>=0 else{throw ProxyError("无法创建辅助服务控制通道")};var option:Int32=1;_ = setsockopt(descriptor,SOL_SOCKET,SO_NOSIGPIPE,&option,socklen_t(MemoryLayout<Int32>.size));var timeout=timeval(tv_sec:60,tv_usec:0);_ = setsockopt(descriptor,SOL_SOCKET,SO_RCVTIMEO,&timeout,socklen_t(MemoryLayout<timeval>.size));var address=try UnixChannel.address(HelperPaths.socket);let connected=withUnsafePointer(to:&address){$0.withMemoryRebound(to:sockaddr.self,capacity:1){Darwin.connect(descriptor,$0,socklen_t(MemoryLayout<sockaddr_un>.size))==0}};guard connected else{close(descriptor);throw ProxyError("管理员辅助服务未安装或不可用，请先安装/修复")};fd=descriptor}
-        do {try UnixChannel.send(JSONEncoder().encode(request),fd:fd);let reply=try JSONDecoder().decode(TunReply.self,from:UnixChannel.receive(fd:fd));if ["prepare","activate"].contains(request.operation),reply.protocolVersion != 3 {throw ProxyError("辅助服务协议过旧，请更新后再开启组合接管")}
-        guard reply.ok else{throw ProxyError(reply.message)};return reply}catch{close(fd);fd = -1;throw error}
+        if fd<0 {let descriptor=socket(AF_UNIX,SOCK_STREAM,0);guard descriptor>=0 else{throw ProxyError("无法创建辅助服务控制通道")};var option:Int32=1;_ = setsockopt(descriptor,SOL_SOCKET,SO_NOSIGPIPE,&option,socklen_t(MemoryLayout<Int32>.size));var timeout=timeval(tv_sec:60,tv_usec:0);_ = setsockopt(descriptor,SOL_SOCKET,SO_RCVTIMEO,&timeout,socklen_t(MemoryLayout<timeval>.size));var address=try UnixChannel.address(HelperPaths.socket);let connected=withUnsafePointer(to:&address){$0.withMemoryRebound(to:sockaddr.self,capacity:1){Darwin.connect(descriptor,$0,socklen_t(MemoryLayout<sockaddr_un>.size))==0}};guard connected else{let code=errno;close(descriptor);throw HelperConnectionError(code:code)};fd=descriptor}
+        do {try UnixChannel.send(JSONEncoder().encode(request),fd:fd);let reply=try JSONDecoder().decode(TunReply.self,from:UnixChannel.receive(fd:fd));if ["prepare","activate"].contains(request.operation),reply.protocolVersion != 4 {throw ProxyError("辅助服务协议过旧，请更新后再开启组合接管")}
+        guard reply.ok else{throw ProxyError(reply.message+(reply.coreDiagnostics?.suffix(5).map{"\n核心："+$0}.joined() ?? ""))};return reply}catch{close(fd);fd = -1;throw error}
     }
     public func closeChannel(){if fd>=0{close(fd);fd = -1}}
 }
 public enum NetworkInspection {
-    public static func command(_ path:String,_ arguments:[String]) throws -> String {let process=Process();let output=Pipe();process.executableURL=URL(fileURLWithPath:path);process.arguments=arguments;process.standardOutput=output;process.standardError=FileHandle.nullDevice;try process.run();let data=output.fileHandleForReading.readDataToEndOfFile();process.waitUntilExit();guard process.terminationStatus==0,let text=String(data:data,encoding:.utf8) else{throw ProxyError("网络状态无法可靠读取")};return text}
+    public static func command(_ path:String,_ arguments:[String],deadline:Date?=nil) throws -> String {
+        let limit=deadline ?? Date().addingTimeInterval(10)
+        guard limit>Date() else {throw ProxyError("网络操作超过总截止时间")}
+        let process=Process(),output=Pipe();process.executableURL=URL(fileURLWithPath:path);process.arguments=arguments;process.standardOutput=output;process.standardError=output
+        try process.run()
+        // 读取管道期间仍由独立计时器终止超时进程，DNS 保护共用上层截止时间。
+        let timeout=DispatchWorkItem {if process.isRunning {kill(process.processIdentifier,SIGKILL)}}
+        DispatchQueue.global().asyncAfter(deadline:.now()+max(0,limit.timeIntervalSinceNow),execute:timeout)
+        defer{timeout.cancel()}
+        let data=output.fileHandleForReading.readDataToEndOfFile();process.waitUntilExit()
+        guard Date()<limit else {throw ProxyError("网络操作超过总截止时间")}
+        let text=String(decoding:data,as:UTF8.self)
+        guard process.terminationStatus==0 else {throw ProxyError("网络命令 "+URL(fileURLWithPath:path).lastPathComponent+" 失败（退出码 "+String(process.terminationStatus)+"）："+Redactor.redact(String(text.prefix(512))))};return text
+    }
     public static func conflicts(vpn:String,routes:String,proxies:[String:Any])->String? {
         let activeVPN=vpn.components(separatedBy:.newlines).contains(where:{$0.contains("(Connected)") || $0.contains("(Connecting)")})
         let rows=routes.components(separatedBy:.newlines).map{$0.split(whereSeparator:{$0.isWhitespace}).map(String.init)}
@@ -67,11 +100,20 @@ public enum NetworkInspection {
         }
         for key in ["HTTPEnable","HTTPSEnable","SOCKSEnable","ProxyAutoConfigEnable","ProxyAutoDiscoveryEnable"] where (proxies[key] as? NSNumber)?.boolValue==true{return "检测到其他软件或已有系统代理，请先恢复后启用 TUN"};return nil
     }
+    public static func routeField(_ label:String,_ text:String)->String? {
+        text.components(separatedBy:.newlines).first{$0.trimmingCharacters(in:.whitespaces).hasPrefix(label+":")}.map{$0.components(separatedBy:":").dropFirst().joined(separator:":").trimmingCharacters(in:.whitespaces)}
+    }
+    // 接口直连路由没有 IP 网关；统一用链路索引表达，写入和恢复均绑定原接口。
+    public static func routeGateway(_ text:String,index:(String)->UInt32={if_nametoindex($0)})->String? {
+        guard let interface=routeField("interface",text),interface.range(of:"^[a-z][a-z0-9]{0,15}$",options:.regularExpression) != nil,let flags=routeField("flags",text),flags.contains("UP") else {return nil}
+        if flags.contains("GATEWAY") {return routeField("gateway",text).flatMap{$0.isEmpty ? nil:$0}}
+        let number=index(interface);guard number>0 else{return nil};return "link#"+String(number)
+    }
     public static func routePrefix(destination:String?,mask:String?,host:Bool=false)->String? {
         guard let rawDestination=destination else{return nil};
         // 零起点分流路由也可能显示为 default，必须结合掩码区分 /1 和 /0。
         guard rawDestination != "default" || !host else{return nil}
-        let destination=rawDestination == "default" ? (mask?.contains(":")==true ? "::":"0.0.0.0"):rawDestination
+        let destination=rawDestination == "default" ? (mask?.contains(":")==true ? "::":"0.0.0.0"):rawDestination.components(separatedBy:"%")[0]
         var bytes=[UInt8](repeating:0,count:16);let family=destination.withCString{inet_pton(AF_INET,$0,&bytes)==1 ? AF_INET:inet_pton(AF_INET6,$0,&bytes)==1 ? AF_INET6:0};guard family != 0 else{return nil}
         if host{return destination+"/"+(family==AF_INET ? "32":"128")}
         guard let mask,mask.withCString({inet_pton(family,$0,&bytes)})==1 else{return nil};let count=family==AF_INET ? 4:16;var bits=0,zero=false
@@ -85,12 +127,16 @@ public enum NetworkInspection {
     }
     public enum RouteOperation:String {case get,add,delete}
     // 限定网卡的查询、添加和恢复必须使用相同作用域，避免误处理全局接管路由。
-    public static func routeArguments(_ operation:RouteOperation,destination:String,gateway:String?=nil,ipv6:Bool=false,scope:String?=nil)->[String] {
+    public static func routeArguments(_ operation:RouteOperation,destination:String,gateway:String?=nil,ipv6:Bool=false,scope:String?=nil,interface:String?=nil)->[String] {
         var args=["-n",operation.rawValue]+(ipv6 ? ["-inet6"]:[])
         if let scope {args += ["-ifscope",scope]}
         if operation != .get {args.append("-net")}
+        // 裸 IP 按目标主机查询；网络起始地址的隐式分类会漏掉可用的默认出口。
+        if operation == .get,destination != "default",!destination.contains("/") {args.append("-host")}
         args.append(destination)
-        if let gateway {args.append(gateway)}
+        if let gateway {
+            if gateway.hasPrefix("link#"),let interface {args += ["-interface",interface]} else {args.append(gateway)}
+        }
         return args
     }
     // 使用独立的补充 DNS 服务，避免修改 DHCP 持有的物理服务状态后被系统刷新覆盖。

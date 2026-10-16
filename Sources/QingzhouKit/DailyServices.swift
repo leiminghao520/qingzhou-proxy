@@ -56,11 +56,19 @@ public enum RuleEvaluator {
         let host=input.trimmingCharacters(in:.whitespacesAndNewlines).lowercased();guard !host.isEmpty,!host.contains("/"),!host.contains("://") else{throw ProxyError("请输入域名或 IP，不含协议和路径")}
         var bytes=[UInt8](repeating:0,count:16);let ip=host.withCString{inet_pton(AF_INET,$0,&bytes)==1 || inet_pton(AF_INET6,$0,&bytes)==1} ? host:nil
         var steps=["模拟分析：不读取真实连接，也不发起 DNS 查询"]
+        if host=="localhost" || host=="::1" || host.hasPrefix("127.") {return RuleExplanation(steps:steps+["本机回环保护，不进入隧道"],target:.direct)}
+        if state.protectedDomains.contains(where:{host==$0 || host.hasSuffix("."+$0)}) {return RuleExplanation(steps:steps+["企业网络保护：系统代理绕过；完整接管需同时核验原 VPN 路由", "显式指定 HTTP/SOCKS 代理的请求可能不遵循系统例外"],target:.direct,uncertainty:"此处是配置模拟，实际接口请核对诊断中的保护计划")}
         if state.mode == .direct{return RuleExplanation(steps:steps+["全部直连模式"],target:.direct)}
         if state.mode == .global{return RuleExplanation(steps:steps+["全部代理模式"],target:state.activePolicy)}
         if host=="localhost" || ["127.0.0.0/8","10.0.0.0/8","172.16.0.0/12","192.168.0.0/16","169.254.0.0/16","::1/128","fc00::/7","fe80::/10"].contains(where:{matches(RoutingRule(kind:.cidr,value:$0,action:.direct),host:host,ip:ip)==true}){return RuleExplanation(steps:steps+["本机/私网优先直连"],target:.direct)}
         let rows=state.rules.map{("用户规则",$0,nil as PolicyReference?)}+state.remoteRules.flatMap{source in source.rules.map{("规则源："+source.name,$0,source.target as PolicyReference?)}}
         for (source,rule,override) in rows {try ConfigBuilder.validate(rule);let match=rule.noResolve==true && ip==nil && [.cidr,.geoip,.asn].contains(rule.kind) ? false:matches(rule,host:host,ip:ip);if match==nil{return RuleExplanation(steps:steps+[source+"需要解析 IP"],target:nil,uncertainty:"前置 IP 规则或私网解析可能改变结果，请结合真实连接核对")};steps.append(source+" · \(rule.kind.rawValue) \(rule.value)："+(match! ? "命中":"未命中"));if match! {let ref=override ?? rule.target ?? (rule.action == .direct ? .direct:rule.action == .reject ? .reject:.selected);return RuleExplanation(steps:steps,target:ref == .selected ? state.activePolicy:ref,uncertainty:ip==nil ? "未解析域名，实际私网解析可能优先直连":nil)}}
+        if state.captureMode == .compatible {
+            try DomesticRouting.validate()
+            if DomesticRouting.isDomestic(host) {return RuleExplanation(steps:steps+["固定国内域名规则 → 原系统公网 DNS → 直连公网出口"],target:.direct)}
+            if let ip,DomesticRouting.cidrs.contains(where:{matches(RoutingRule(kind:.cidr,value:$0,action:.direct),host:host,ip:ip)==true}) {return RuleExplanation(steps:steps+["固定国内 IP 规则 → 直连公网出口"],target:.direct)}
+            if ip==nil {return RuleExplanation(steps:steps+["未命中国内域名；解析后还需核对国内 IP 规则"],target:nil,uncertainty:"不主动查询 DNS，不能据此断言最终出口")}
+        }
         return RuleExplanation(steps:steps+["默认策略"],target:state.ruleFinal ?? state.activePolicy,uncertainty:ip==nil ? "未解析域名，实际私网解析可能优先直连":nil)
     }
 }
