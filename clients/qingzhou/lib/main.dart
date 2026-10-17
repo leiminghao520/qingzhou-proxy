@@ -216,18 +216,22 @@ class _HomeState extends State<Home> {
         }[state] ??
         '$state';
     final policy = m.catalog.state['selectedPolicy'];
-    final selectedPolicy = policy == null ? null : runtimeReference(policy);
-    final selectedID = selectedPolicy?['kind'] == 'node'
-        ? selectedPolicy?['id']
+    final selectedPolicy = policy == null
+        ? const <String, dynamic>{}
+        : runtimeReference(policy);
+    final selectedID = selectedPolicy['kind'] == 'node'
+        ? selectedPolicy['id']
         : m.catalog.state['selectedID'];
     final selected = m.catalog.nodes.where((n) => n['id'] == selectedID).firstOrNull;
     final group = (m.catalog.state['groups'] as List? ?? [])
-        .where((g) => g['id'] == selectedPolicy?['id']).firstOrNull;
-    final nodeName = selectedPolicy?['kind'] == 'group'
-        ? group?['name'] as String? ?? '策略组'
-        : selectedPolicy?['kind'] == 'direct' || m.catalog.state['mode'] == 'direct'
-            ? '直接连接'
-            : selected?['name'] as String? ?? (m.catalog.nodes.isEmpty ? '尚未添加线路' : '自动选择线路');
+        .where((g) => g['id'] == selectedPolicy['id']).firstOrNull;
+    String nodeName = selected?['name']?.toString() ??
+        (m.catalog.nodes.isEmpty ? '尚未添加线路' : '自动选择线路');
+    if (selectedPolicy['kind'] == 'direct' || m.catalog.state['mode'] == 'direct') {
+      nodeName = '直接连接';
+    } else if (selectedPolicy['kind'] == 'group') {
+      nodeName = group?['name']?.toString() ?? '策略组';
+    }
     return ConnectionDashboard(
       connected: m.connected,
       stateLabel: label,
