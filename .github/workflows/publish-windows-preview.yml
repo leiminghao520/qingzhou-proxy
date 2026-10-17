@@ -18,21 +18,21 @@ jobs:
       - name: Fetch successful Windows build
         run: |
           set -euo pipefail
-          gh run view 39006202528 --json conclusion,headSha > build-result.json
+          gh run view 39008883603 --json conclusion,headSha > build-result.json
           python3 - <<'PY'
           import json
           result = json.load(open('build-result.json'))
           assert result['conclusion'] == 'success', 'Windows 构建和安装检查未通过'
-          assert result['headSha'] == '4153de6d5902a9685b870c8d0ae65ea4428a9a00', '构建源码不匹配'
+          assert result['headSha'] == '7f766bd382e7a1d171d9007c3ea7ece439c8f5ce', '构建源码不匹配'
           PY
-          gh run download 39006202528 --name windows-client-results --dir artifacts
+          gh run download 39008883603 --name windows-client-results --dir artifacts
       - name: Verify and publish complete installer
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import hashlib, json, pathlib, shutil, zipfile
           root = pathlib.Path('artifacts')
-          installer = root / 'qingzhou-0.8.10-windows-x64-setup.exe'
+          installer = root / 'qingzhou-0.8.11-windows-x64-setup.exe'
           assert installer.read_bytes()[:2] == b'MZ', '安装包格式错误'
           records = list(root.glob('crossplatform-windows-*/artifact-manifest.json'))
           record = next(json.loads(p.read_text(encoding='utf-8')) for p in records if json.loads(p.read_text(encoding='utf-8'))['artifact'] == installer.name)
@@ -40,15 +40,28 @@ jobs:
           assert digest == record['sha256'] and installer.stat().st_size == record['size'], '安装包摘要不匹配'
           smoke = json.loads((root / 'windows-evidence/smoke.json').read_text(encoding='utf-8-sig'))
           assert smoke['service'] == 'Running' and smoke['state'] == 'disconnected' and smoke['survivedSeconds'] >= 20, '启动验证记录不完整'
-          record['buildRun'] = 'https://github.com/leiminghao520/qingzhou-proxy/actions/runs/39006202528'
+          record['buildRun'] = 'https://github.com/leiminghao520/qingzhou-proxy/actions/runs/39008883603'
           record['smoke'] = smoke
           (root / 'windows-installer-manifest.json').write_text(json.dumps(record, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
           with zipfile.ZipFile(root / 'windows-install-evidence.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
               for p in (root / 'windows-evidence').rglob('*'):
                   if p.is_file(): archive.write(p, p.relative_to(root))
-          shutil.copyfile('docs/verification-crossplatform.md', root / 'WINDOWS-INSTALL-VERIFICATION.md')
+          shutil.copyfile('docs/windows-interface-refresh.md', root / 'WINDOWS-INSTALL-VERIFICATION.md')
           names = [installer.name, 'windows-installer-manifest.json', 'windows-install-evidence.zip', 'WINDOWS-INSTALL-VERIFICATION.md']
           (root / 'WINDOWS-SHA256SUMS').write_text(''.join(hashlib.sha256((root / name).read_bytes()).hexdigest() + '  ' + name + '\n' for name in names))
           print('INSTALLER_HASH_AND_SMOKE_RECORD_PASS', digest)
           PY
-          gh release upload v0.8.10-crossplatform-preview.1 artifacts/qingzhou-0.8.10-windows-x64-setup.exe artifacts/windows-installer-manifest.json artifacts/windows-install-evidence.zip artifacts/WINDOWS-INSTALL-VERIFICATION.md artifacts/WINDOWS-SHA256SUMS
+          gh release create v0.8.11-windows-preview.1 --draft --prerelease --latest=false --target 7f766bd382e7a1d171d9007c3ea7ece439c8f5ce --title '轻舟代理 0.8.11 Windows 界面预览版' --notes-file docs/windows-interface-refresh.md
+          gh release upload v0.8.11-windows-preview.1 artifacts/qingzhou-0.8.11-windows-x64-setup.exe artifacts/windows-installer-manifest.json artifacts/windows-install-evidence.zip artifacts/WINDOWS-INSTALL-VERIFICATION.md artifacts/WINDOWS-SHA256SUMS
+          gh release view v0.8.11-windows-preview.1 --json assets > remote-assets.json
+          python3 - <<'PY'
+          import hashlib, json, pathlib
+          root = pathlib.Path('artifacts')
+          for asset in json.load(open('remote-assets.json'))['assets']:
+              local = root / asset['name']
+              assert local.is_file(), '发布页存在意外文件'
+              assert asset['size'] == local.stat().st_size, '远端文件大小不匹配'
+              assert asset['digest'] == 'sha256:' + hashlib.sha256(local.read_bytes()).hexdigest(), '远端摘要不匹配'
+          print('REMOTE_RELEASE_HASHES_PASS')
+          PY
+          gh release edit v0.8.11-windows-preview.1 --draft=false
