@@ -120,3 +120,9 @@ python3 scripts/runtime-optimization-mutations.py
 ```
 
 这些检查不安装管理员服务或接管当前系统网络。源码与独立检查通过不代表已安装应用已更新，也不能替代真实 TUN/VPN、耗电及两小时稳定性验收。结果与质量门禁限制见 [首批运行优化验收记录](docs/verification-runtime-optimization.md)。
+
+## iOS、Android 与 Windows 开发
+
+新增客户端位于 [clients/qingzhou](clients/qingzhou/README.md)，保留现有 macOS SwiftUI 应用。三端共享 Flutter 业务和界面，原生服务负责网络接管；当前尚未完成三端安装与实网验收。构建方法、功能差距和交付边界见客户端说明及 [跨平台验证记录](docs/verification-crossplatform.md)。
+
+当前暂停 iOS 开发，继续推进 Android 和 Windows。Windows 本机操作见 [构建与安装说明](docs/windows-build.md)。
