@@ -71,6 +71,7 @@ struct SimpleConnectionView: View {
     private var status: String {
         if model.recovering { return "正在恢复网络" }
         if model.stopRequested { return "等待安全断开" }
+        if model.networkReconnecting { return "网络恢复中，正在自动重连" }
         if model.networkRechecking { return "网络变化，正在重新检查" }
         return model.connection == .connected ? "代理已连接" : model.connection.rawValue
     }

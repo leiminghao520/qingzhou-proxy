@@ -15,8 +15,9 @@ import QingzhouKit
     @Published var reachability="尚未检测"
     @Published var connectivityResults:[ConnectivityResult]=[]
     var connectivityHealth:ConnectivityHealth {ConnectivityHealth.evaluate(connectivityResults)}
-    var networkRechecking:Bool {connection == .connected && state.captureMode.usesTunnel && helperStatus == "网络变化，正在重新检查"}
-    var connectionSummary:String {networkRechecking ? "已连接 · 网络变化，正在重新检查":connection.rawValue+" · 连通性"+connectivityHealth.rawValue}
+    @Published var networkReconnecting = false
+    var networkRechecking:Bool {networkReconnecting || (connection == .connected && state.captureMode.usesTunnel && helperStatus == "网络变化，正在重新检查")}
+    var connectionSummary:String {networkReconnecting ? "网络恢复中 · 正在自动重连":networkRechecking ? "已连接 · 网络变化，正在重新检查":connection.rawValue+" · 连通性"+connectivityHealth.rawValue}
     @Published var busy=false {didSet{if busy{cancelHealthRefresh();healthRefreshPending=true}else{drainPendingDisconnect()}}}
     @Published var healthChecking=false
     @Published var recovering=false
@@ -76,12 +77,13 @@ import QingzhouKit
     private var epoch=UUID()
     private var networkChanged=false
     private var coreFailed=false
+    private var helperFailureReason:String?
     private var sessionLockFD:Int32 = -1
     private var pendingSubscription:Subscription?
     private var started=false
     private var wakeObserver:NSObjectProtocol?
     private var healthRefreshPending=false
-    var locked:Bool {busy || measuring || loadingFailed || recovering || stopRequested}
+    var locked:Bool {busy || measuring || loadingFailed || recovering || stopRequested || networkReconnecting}
     var selected:Node? {if case .node(let id)=state.activePolicy {return state.nodes.first{$0.id==id}};return nil}
     var selectedName:String {state.label(state.activePolicy)}
     var actualName:String {if state.mode == .direct{return "直连"};guard let tag=CoreAPIClient.actualTag(proxyInfo) else {return "尚未检测"};return label(tag)}
@@ -124,8 +126,9 @@ import QingzhouKit
             if healthRefreshPending {healthRefreshPending=false;scheduleHealthRefresh()}
             return
         }
-        let failed=coreFailed;log(failed ? "自动断开原因：核心或兼容层退出":"自动断开原因：网络所有权变化");coreFailed=false;networkChanged=false;busy=true
-        Task {defer{busy=false};do{try await disconnectInternal();if failed{connection = .error};errorMessage=failed ? "核心异常退出，已恢复系统代理" : "网络服务发生变化，已断开，请重新连接"}catch{report(error)}}
+        let failureReason=helperFailureReason;helperFailureReason=nil
+        let failed=coreFailed;log(failed ? (failureReason == nil ? "自动断开原因：核心或兼容层退出":"自动断开原因：辅助服务网络恢复失败"):"自动断开原因：网络所有权变化");coreFailed=false;networkChanged=false;busy=true
+        Task {defer{busy=false};do{try await disconnectInternal();if failed{connection = .error};errorMessage=failed ? (failureReason.map{"辅助服务停止连接："+$0} ?? "核心异常退出，已恢复系统代理") : "网络服务发生变化，已断开，请重新连接"}catch{report(error)}}
     }
     func label(_ tag:String) -> String {
         if tag=="auto"{return "自动选择"};if tag=="direct"{return "直连"};if tag=="proxy"{return "当前选择"}
@@ -138,10 +141,27 @@ import QingzhouKit
     private func persist(_ next:AppState) throws {guard let store else {throw ProxyError("配置未加载")};try store.commit(next);state=store.state}
     private func secrets(_ next:AppState,_ control:CoreControlContext) -> [String] {[control.secret]+next.nodes.flatMap{[(try? credentials.get($0.credentialRef)) ?? "",(try? credentials.get($0.credentialRef+".obfs")) ?? ""]}}
     private func startService(_ next:AppState) async throws {
+        defer {networkReconnecting=false}
+        try await NetworkPreparationRetry.run(operation:{
+            self.networkReconnecting=false
+            try await self.startServiceAttempt(next)
+        },shouldContinue:{!self.stopRequested && !self.pendingRecovery},wait:{delay in
+            self.networkReconnecting=true
+            self.connectivityResults=ConnectivityResult.pending
+            self.reachability="网络变化，正在重新准备连接"
+            self.log("准备期间原路径变化，已回滚；等待 \(Int(delay)) 秒后重新采样")
+            // 分段等待使用户断开或恢复请求及时生效，不依赖健康检查计时器。
+            for _ in 0..<Int(delay*4) {
+                guard !self.stopRequested,!self.pendingRecovery else {throw CancellationError()}
+                try await Task.sleep(nanoseconds:250_000_000)
+            }
+        })
+    }
+    private func startServiceAttempt(_ next:AppState) async throws {
         if next.captureMode == .systemProxy {try NetworkSafety.check()}
         NSApplication.shared.activate(ignoringOtherApps:true)
         let control=try CoreControlContext.make();_=try ConfigBuilder.build(state:next,credentials:credentials,control:control)
-        core.secrets=secrets(next,control);networkChanged=false;coreFailed=false
+        core.secrets=secrets(next,control);networkChanged=false;coreFailed=false;helperFailureReason=nil
         try await capture.start(next,credentials:credentials,control:control)
         let client=CoreAPIClient(context:control)
         do {
@@ -345,11 +365,24 @@ import QingzhouKit
             while !Task.isCancelled {
                 guard let self,self.epoch==token else{return}
                 let hidden=NSApplication.shared.isHidden || NSApplication.shared.windows.filter{$0.canBecomeMain}.allSatisfy{!$0.isVisible || $0.isMiniaturized}
-                if !self.monitorPaused {
-                    do {if self.capture.activeMode?.usesTunnel == true {let status=try await self.capture.helperStatus();guard self.epoch==token,!Task.isCancelled else{return};self.helperStatus=status.message;self.protectionSummary=status.protectionSummary ?? [];if !status.running {self.log(status.message);self.coreFailed=true;self.drainPendingDisconnect();return}}
-                    let snapshot=try await client.connections();let info=try await client.proxies();guard self.epoch==token,!Task.isCancelled else{return};self.aggregate(snapshot.connections);self.connections=snapshot.connections;self.uploadTotal=snapshot.uploadTotal;self.downloadTotal=snapshot.downloadTotal;let changed=CoreAPIClient.actualTag(self.proxyInfo) != CoreAPIClient.actualTag(info);self.proxyInfo=info;self.monitor.connections = .available;if changed,self.connectivityResults != ConnectivityResult.pending {Task{await self.checkConnectivity()}}}
-                    catch {if self.epoch==token,!Task.isCancelled{self.monitor.connections = .unavailable}}
-                }
+                do {
+                    // 生命周期检查不受“暂停监控”影响，待重连不是核心崩溃。
+                    if self.capture.activeMode?.usesTunnel == true {
+                        let status=try await self.capture.helperStatus()
+                        guard self.epoch==token,!Task.isCancelled else{return}
+                        self.updateHelperNetworkStatus(status)
+                        if self.networkReconnecting {try? await Task.sleep(nanoseconds:1_000_000_000);continue}
+                        if !status.running || status.phase == "networkProtectionFailed" {self.log(status.message);self.helperFailureReason=status.message;self.coreFailed=true;self.drainPendingDisconnect();return}
+                    }
+                    if !self.monitorPaused {
+                        let snapshot=try await client.connections();let info=try await client.proxies()
+                        guard self.epoch==token,!Task.isCancelled else{return}
+                        self.aggregate(snapshot.connections);self.connections=snapshot.connections;self.uploadTotal=snapshot.uploadTotal;self.downloadTotal=snapshot.downloadTotal
+                        let changed=CoreAPIClient.actualTag(self.proxyInfo) != CoreAPIClient.actualTag(info)
+                        self.proxyInfo=info;self.monitor.connections = .available
+                        if changed,self.connectivityResults != ConnectivityResult.pending {Task{await self.checkConnectivity()}}
+                    }
+                } catch {if self.epoch==token,!Task.isCancelled{self.monitor.connections = .unavailable}}
                 try? await Task.sleep(nanoseconds:hidden ? 5_000_000_000 : 1_000_000_000)
             }
         }
@@ -371,7 +404,18 @@ import QingzhouKit
             })
         }
     }
-    private func stopTelemetry() {cancelHealthRefresh();epoch=UUID();connectivityEpoch=UUID();healthRefreshPending=false;healthTask?.cancel();healthTask=nil;telemetryTask?.cancel();trafficTask?.cancel();telemetryTask=nil;trafficTask=nil;if let old=api{Task{await old.shutdown()}};api=nil;connections=[];proxyInfo=[:];uploadRate=0;downloadRate=0;uploadTotal=0;downloadTotal=0;monitor=RuntimeMonitorState()}
+    func updateHelperNetworkStatus(_ status:TunReply) {
+        helperStatus=status.message;protectionSummary=status.protectionSummary ?? []
+        if status.networkReconnecting {
+            if !networkReconnecting {cancelHealthRefresh();connectivityResults=ConnectivityResult.pending;reachability="网络恢复中，正在自动重连";connections=[];log("网络暂未就绪，保留连接意图并等待辅助服务自动重连")}
+            networkReconnecting=true;monitor.connections = .unavailable;monitor.traffic = .unavailable;uploadRate=0;downloadRate=0
+        } else if networkReconnecting {
+            networkReconnecting=false;failedHealthCycles=0;healthFailures=HealthFailureCounter()
+            if status.running {log("网络自动重连完成，正在复查连通性");scheduleHealthRefresh(delay:0)}
+        }
+    }
+
+    private func stopTelemetry() {networkReconnecting=false;cancelHealthRefresh();epoch=UUID();connectivityEpoch=UUID();healthRefreshPending=false;healthTask?.cancel();healthTask=nil;telemetryTask?.cancel();trafficTask?.cancel();telemetryTask=nil;trafficTask=nil;if let old=api{Task{await old.shutdown()}};api=nil;connections=[];proxyInfo=[:];uploadRate=0;downloadRate=0;uploadTotal=0;downloadTotal=0;monitor=RuntimeMonitorState()}
 
     func closeConnection(_ id:String?) async {guard !locked,let api else{return};do{if let id{try await api.closeConnection(id)}else{try await api.closeAllConnections()}}catch{report(error)}}
     func measure(_ ids:[UUID]?=nil) {

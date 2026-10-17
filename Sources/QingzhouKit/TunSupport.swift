@@ -13,7 +13,11 @@ public struct TunRequest:Codable,Sendable {
     public var control:CoreControlContext?
     public init(operation:String,state:AppState?=nil,credentials:[String:String]?=nil,control:CoreControlContext?=nil,verifyNetwork:Bool=false,httpCompatibilityPort:Int?=nil,systemProxyPort:Int?=nil){self.systemProxyPort=systemProxyPort;self.httpCompatibilityPort=httpCompatibilityPort;self.verifyNetwork=verifyNetwork;self.operation=operation;self.state=state;self.credentials=credentials;self.control=control}
 }
-public struct TunReply:Codable,Sendable {public var coreDiagnostics:[String]?;public var proxyVerified:Bool?;public var protectionVerified:Bool?;public var protectionSummary:[String]?;public var phase:String?;public var dnsServer:String?;public var protocolVersion:Int? = 4;public var ok:Bool;public var message:String;public var running:Bool;public var routesVerified:Bool?;public var dnsVerified:Bool?;public init(ok:Bool,message:String,coreDiagnostics:[String]?=nil,running:Bool=false,routesVerified:Bool?=nil,dnsVerified:Bool?=nil,dnsServer:String?=nil,proxyVerified:Bool?=nil,protectionVerified:Bool?=nil,protectionSummary:[String]?=nil,phase:String?=nil){self.coreDiagnostics=coreDiagnostics;self.proxyVerified=proxyVerified;self.protectionVerified=protectionVerified;self.protectionSummary=protectionSummary;self.phase=phase;self.dnsServer=dnsServer;self.routesVerified=routesVerified;self.dnsVerified=dnsVerified;self.ok=ok;self.message=message;self.running=running}}
+public struct TunReply:Codable,Sendable {public var networkNotReady:Bool?;public var coreDiagnostics:[String]?;public var proxyVerified:Bool?;public var protectionVerified:Bool?;public var protectionSummary:[String]?;public var phase:String?;public var dnsServer:String?;public var protocolVersion:Int? = 4;public var ok:Bool;public var message:String;public var running:Bool;public var routesVerified:Bool?;public var dnsVerified:Bool?;public init(ok:Bool,message:String,coreDiagnostics:[String]?=nil,running:Bool=false,routesVerified:Bool?=nil,dnsVerified:Bool?=nil,dnsServer:String?=nil,proxyVerified:Bool?=nil,protectionVerified:Bool?=nil,protectionSummary:[String]?=nil,phase:String?=nil,networkNotReady:Bool?=nil){self.networkNotReady=networkNotReady;self.coreDiagnostics=coreDiagnostics;self.proxyVerified=proxyVerified;self.protectionVerified=protectionVerified;self.protectionSummary=protectionSummary;self.phase=phase;self.dnsServer=dnsServer;self.routesVerified=routesVerified;self.dnsVerified=dnsVerified;self.ok=ok;self.message=message;self.running=running}}
+extension TunReply {
+    public var networkReconnecting: Bool { phase == "networkReconnecting" || phase == "networkReplan" }
+}
+
 public enum HelperPaths {
     public static let directory="/Library/PrivilegedHelperTools/cn.qingzhou.proxy"
     public static let socket=directory+"/control.sock"
@@ -54,7 +58,7 @@ public actor PrivilegedServiceClient {
     public func request(_ request:TunRequest) async throws -> TunReply {
         if fd<0 {let descriptor=socket(AF_UNIX,SOCK_STREAM,0);guard descriptor>=0 else{throw ProxyError("无法创建辅助服务控制通道")};var option:Int32=1;_ = setsockopt(descriptor,SOL_SOCKET,SO_NOSIGPIPE,&option,socklen_t(MemoryLayout<Int32>.size));var timeout=timeval(tv_sec:60,tv_usec:0);_ = setsockopt(descriptor,SOL_SOCKET,SO_RCVTIMEO,&timeout,socklen_t(MemoryLayout<timeval>.size));var address=try UnixChannel.address(HelperPaths.socket);let connected=withUnsafePointer(to:&address){$0.withMemoryRebound(to:sockaddr.self,capacity:1){Darwin.connect(descriptor,$0,socklen_t(MemoryLayout<sockaddr_un>.size))==0}};guard connected else{let code=errno;close(descriptor);throw HelperConnectionError(code:code)};fd=descriptor}
         do {try UnixChannel.send(JSONEncoder().encode(request),fd:fd);let reply=try JSONDecoder().decode(TunReply.self,from:UnixChannel.receive(fd:fd));if ["prepare","activate"].contains(request.operation),reply.protocolVersion != 4 {throw ProxyError("辅助服务协议过旧，请更新后再开启组合接管")}
-        guard reply.ok else{throw ProxyError(reply.message+(reply.coreDiagnostics?.suffix(5).map{"\n核心："+$0}.joined() ?? ""))};return reply}catch{close(fd);fd = -1;throw error}
+        try reply.validateSuccess();return reply}catch{close(fd);fd = -1;throw error}
     }
     public func closeChannel(){if fd>=0{close(fd);fd = -1}}
 }
@@ -184,4 +188,13 @@ private final class AddressResolutionResult:@unchecked Sendable {
     private var value:Result<[String],Error>?
     func set(_ value:Result<[String],Error>){lock.lock();self.value=value;lock.unlock()}
     func get()->Result<[String],Error>{lock.lock();defer{lock.unlock()};return value ?? .failure(ProxyError("DNS 解析结果缺失"))}
+}
+
+extension TunReply {
+    public func validateSuccess() throws {
+        guard !ok else {return}
+        let detail=message+(coreDiagnostics?.suffix(5).map{"\n核心："+$0}.joined() ?? "")
+        if networkNotReady == true {throw NetworkEnvironmentNotReady(detail)}
+        throw ProxyError(detail)
+    }
 }

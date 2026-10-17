@@ -31,12 +31,12 @@ extension Service {
         return issues
     }
     func currentSnapshot(sample: NetworkRouteSample? = nil) throws -> NetworkSnapshot {
-        guard let record=journal else{throw ProxyError("网络快照无法更新")}
+        guard let record=journal else{throw NetworkEnvironmentNotReady("网络快照无法更新")}
         let sample=try sample ?? routeSample()
         var snapshot: NetworkSnapshot
         if let networkSnapshotRead { snapshot=try networkSnapshotRead(sample) }
         else {
-            guard let global=SCDynamicStoreCopyValue(dynamic,"State:/Network/Global/IPv4" as CFString) as? [String:Any],let primary=global["PrimaryInterface"] as? String else{throw ProxyError("网络快照无法更新")}
+            guard let global=SCDynamicStoreCopyValue(dynamic,"State:/Network/Global/IPv4" as CFString) as? [String:Any],let primary=global["PrimaryInterface"] as? String else{throw NetworkEnvironmentNotReady("网络快照无法更新")}
             snapshot=try NetworkSnapshot.read(store:dynamic,primary:primary,routes:sample.table,ownedDNSKey:record.dnsKey,ownedTunnel:record.interface)
         }
         snapshot.routes.removeAll {route in record.routes.contains{owned in NetworkInspection.samePrefix(route.destination,owned.destination) && route.interface==owned.interface && route.scope==owned.scope}}
@@ -87,18 +87,17 @@ extension Service {
         if !changed {pendingNetworkChange=nil;return}
         guard let pending=pendingNetworkChange else{pendingNetworkChange=networkClock();return}
         guard networkClock().timeIntervalSince(pending)>=1 else{return}
-        do {
-            phase="networkReplan";try stop();try start(request,fd:fd)
-            guard let activate=activatePrepared else{throw ProxyError("网络重规划未完成")}
-            try activate();activatePrepared=nil;phase="active";lastFailure=nil
-        } catch {failNetworkChange("网络重新激活失败："+error.localizedDescription)}
+        beginNetworkResume(request,fd:fd)
     }
     private func retrySnapshot(_ error:Error) {
         let now=networkUptime()
         // 事件风暴不能提前耗尽下一次重试预算。
         guard snapshotRetry.ready(now:now) else{return}
         if snapshotRetry.failed(now:now) {phase="networkRetry"}
-        else {failNetworkChange("网络快照重试耗尽："+error.localizedDescription)}
+        else if let request=activeRequest,let fd=owner {
+            // 快照仍未就绪时先安全恢复旧接管，再使用同一连接的有限重建流程。
+            beginNetworkResume(request,fd:fd)
+        } else {failNetworkChange("网络快照重试耗尽："+error.localizedDescription)}
     }
     private func failNetworkChange(_ reason:String) {
         do{try stop();lastFailure=reason+"；原网络已恢复"}catch{lastFailure=reason+"；恢复冲突："+error.localizedDescription}

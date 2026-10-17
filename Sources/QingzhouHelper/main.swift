@@ -29,6 +29,10 @@ final class Service {
     var routeEvents:DispatchSourceRead?
     var pendingNetworkChange:Date?
     var snapshotRetry=NetworkSnapshotRetry()
+    var networkResumeSession: NetworkResumeSession?
+    var networkResumeWork: DispatchWorkItem?
+    var performingNetworkResume = false
+    var networkResumeSchedule: ((TimeInterval, @escaping () -> Void) -> Void)?
     var networkStatus:String {phase=="networkRetry" ? "网络变化，正在重新检查":lastFailure ?? HelperPaths.version}
     var networkSummary:[String] {domainRouteSummary+(capturePlan?.summary ?? [])+(dnsForwarder.map{[$0.diagnostics]} ?? [])}
     var lastFailure:String?
@@ -56,12 +60,14 @@ final class Service {
         var staticCode:SecStaticCode?;guard SecCodeCopyStaticCode(guest,SecCSFlags(),&staticCode)==errSecSuccess,let staticCode else{throw ProxyError("客户端代码身份无法读取")};var information:CFDictionary?;guard SecCodeCopySigningInformation(staticCode,SecCSFlags(rawValue:kSecCSSigningInformation),&information)==errSecSuccess,let info=information as? [String:Any],let cdhash=info[kSecCodeInfoUnique as String] as? Data,cdhash.map({String(format:"%02x",$0)}).joined()==manifest.clientHash else{throw ProxyError("客户端代码身份已变化，请重新批准更新")}
     }
     func save() throws {guard let journal else{return};try SecureFile.write(JSONEncoder().encode(journal),to:root.appendingPathComponent("recovery.json"))}
+    func writeRoute(_ arguments:[String],deadline:Date?) throws -> String {try NetworkInspection.command("/sbin/route",arguments,deadline:deadline)}
     func routeInfo(_ destination:String,ipv6:Bool,scope:String?=nil,deadline:Date?=nil) throws -> String {try NetworkInspection.command("/sbin/route",NetworkInspection.routeArguments(.get,destination:destination,ipv6:ipv6,scope:scope),deadline:deadline)}
     func field(_ label:String,_ text:String)->String? {
         label=="gateway" ? NetworkInspection.routeGateway(text):NetworkInspection.routeField(label,text)
     }
     func prefix(_ info:String)->String? {NetworkInspection.routePrefix(destination:field("destination",info),mask:field("mask",info),host:info.contains("HOST"))}
     func stop(preserveExternal:Bool=false) throws {
+        if !performingNetworkResume {cancelNetworkResume()}
         coreOutput?.fileHandleForReading.readabilityHandler=nil;coreOutput=nil
         captureGeneration=UUID();domainRouteSummary=[];activatePrepared=nil;activeRequest=nil;networkChecks?.cancel();networkChecks=nil;networkTimer?.cancel();networkTimer=nil;if let networkStore {SCDynamicStoreSetDispatchQueue(networkStore,nil)};networkStore=nil;routeEvents?.cancel();routeEvents=nil;pendingNetworkChange=nil;snapshotRetry.reset();dnsForwarder?.stop();dnsForwarder=nil;capturePlan=nil
         guard let record=journal else{        if let process,process.isRunning {process.terminate();for _ in 0..<40 {if !process.isRunning{break};usleep(50000)};if process.isRunning{kill(process.processIdentifier,SIGKILL)};process.waitUntilExit()};process=nil;owner=nil;try? FileManager.default.removeItem(at:root.appendingPathComponent("runtime.json"))
@@ -120,19 +126,8 @@ return};var issues:[String]=[]
         try FileManager.default.removeItem(at:root.appendingPathComponent("recovery.json"));journal=nil
     }
     func recoverStartup(preserveExternal:Bool=false) throws {let file=root.appendingPathComponent("recovery.json");if FileManager.default.fileExists(atPath:file.path){try Self.protected(file);journal=try JSONDecoder().decode(Journal.self,from:Data(contentsOf:file));if let pid=journal?.pid {var buffer=[CChar](repeating:0,count:4096);if proc_pidpath(pid,&buffer,UInt32(buffer.count))>0,String(cString:buffer)==root.appendingPathComponent("sing-box").path{kill(pid,SIGTERM);usleep(200000)}};try stop(preserveExternal:preserveExternal)}}
-    func addRoute(_ destination:String,_ gateway:String,_ interface:String,ipv6:Bool,scope:String?=nil,deadline:Date?=nil) throws {
-        if let info=try? routeInfo(destination,ipv6:ipv6,scope:scope,deadline:deadline),let current=prefix(info),NetworkInspection.samePrefix(current,destination),NetworkInspection.routeScopeMatches(scope,flags:field("flags",info),interface:field("interface",info)){
-            guard interface==field("interface",info) else{throw ProxyError("路由前缀 \(destination) 已被 \(field("interface",info) ?? "未知接口") 占用，未替换现有路由")};return
-        }
-        let args=NetworkInspection.routeArguments(.add,destination:destination,gateway:gateway,ipv6:ipv6,scope:scope,interface:interface)
-        let route=OwnedRoute(destination:destination,gateway:gateway,interface:interface,ipv6:ipv6,scope:scope)
-        // 先记录意图再写路由；崩溃恢复仍通过当前网关和接口确认所有权。
-        journal!.routes.append(route);try save()
-        // 命令超时也可能已经写入路由，保留意图以便按所有权恢复。
-        _=try NetworkInspection.command("/sbin/route",args,deadline:deadline)
-        if let current=try? routeInfo(destination,ipv6:ipv6,scope:scope,deadline:deadline),let actual=field("gateway",current) {journal!.routes[journal!.routes.count-1].gateway=actual};try save()
-    }
     func start(_ request:TunRequest,fd:Int32) throws {
+        guard networkResumeSession == nil || performingNetworkResume else{throw ProxyError("正在恢复当前连接，请先断开或恢复网络")}
         guard process==nil,journal==nil,let state=request.state,let values=request.credentials,let control=request.control,state.captureMode.usesTunnel,values.count<=6000 else{throw ProxyError("重复启动或 TUN 模型无效，请先恢复")}
         guard control.secret.count==64,control.secret.allSatisfy({$0.isHexDigit}),(1024...65535).contains(control.port),control.port != state.listenPort else{throw ProxyError("控制通道模型无效")}
         guard request.protocolVersion==4 else{throw ProxyError("辅助服务协议不匹配，请更新应用及辅助服务")}
@@ -142,20 +137,22 @@ return};var issues:[String]=[]
         phase="preflight"
         try NetworkInspection.checkConflicts();try PolicyValidator.validate(state)
         let memory=MemoryCredentials();for (key,value) in values{guard key.count<=200,value.utf8.count<=16384 else{throw ProxyError("凭据模型超过限制")};try memory.set(value,for:key)}
-        guard let global=SCDynamicStoreCopyValue(dynamic,"State:/Network/Global/IPv4" as CFString) as? [String:Any],let service=global["PrimaryService"] as? String,let primary=global["PrimaryInterface"] as? String,primary.range(of:"^[a-z][a-z0-9]{0,15}$",options:.regularExpression) != nil else{throw ProxyError("原网络服务无法可靠识别")}
+        guard let global=SCDynamicStoreCopyValue(dynamic,"State:/Network/Global/IPv4" as CFString) as? [String:Any],let service=global["PrimaryService"] as? String,let primary=global["PrimaryInterface"] as? String,primary.range(of:"^[a-z][a-z0-9]{0,15}$",options:.regularExpression) != nil else{throw NetworkEnvironmentNotReady("原网络服务无法可靠识别")}
         let dnsKey=NetworkInspection.tunDNSKey(UUID())
         let originalRoutes=try NetworkInspection.command("/usr/sbin/netstat",["-rn"])
         let snapshot=try NetworkSnapshot.read(store:dynamic,primary:primary,routes:originalRoutes)
         let plan=try CapturePlan.make(snapshot:snapshot,extraCIDRs:state.tunExcludedCIDRs,extraDomains:state.protectedDomains)
         let dns=snapshot.resolvers.flatMap(\.servers).map{$0.components(separatedBy:"%")[0]}
         capturePlan=plan
-        let v4=try routeInfo("default",ipv6:false)
-        guard let gw4=field("gateway",v4),field("interface",v4)==primary else{throw ProxyError("IPv4 原路由不可用，未启用 TUN")}
+        let v4:String
+        do {v4=try routeInfo("default",ipv6:false)}
+        catch {throw NetworkEnvironmentNotReady("IPv4 默认路由暂不可读取："+error.localizedDescription)}
+        guard let gw4=field("gateway",v4),field("interface",v4)==primary else{throw NetworkEnvironmentNotReady("IPv4 原路由不可用，未启用 TUN")}
         let candidate6=try? routeInfo("default",ipv6:true)
         let v6:String?
         if let candidate6,field("interface",candidate6)==primary {v6=candidate6}
         else if candidate6?.contains("IFSCOPE")==true {v6=nil}
-        else if candidate6 != nil {throw ProxyError("IPv6 默认路由属于其他接口，未启用 TUN")}
+        else if candidate6 != nil {throw NetworkEnvironmentNotReady("IPv6 默认路由属于其他接口，未启用 TUN")}
         else {v6=nil}
         let gw6=v6.flatMap{field("gateway",$0)}
         phase="bootstrapDNS"
@@ -163,14 +160,17 @@ return};var issues:[String]=[]
         var bypass=Set(dns+["1.1.1.1"]);var nodeAddresses:[String:[String]]=[:]
         for host in Set(state.nodes.map(\.server)) {
             let remaining=min(3,deadline.timeIntervalSinceNow)
-            guard remaining>0 else{throw ProxyError("节点引导解析超过启动预算，未接管网络")}
-            let values=try NetworkInspection.boundedAddresses(host,timeout:remaining);nodeAddresses[host]=values;for address in values {bypass.insert(address)}
+            guard remaining>0 else{throw NetworkEnvironmentNotReady("节点引导解析超过启动预算，未接管网络")}
+            let values:[String]
+            do {values=try NetworkInspection.boundedAddresses(host,timeout:remaining)}
+            catch {throw NetworkEnvironmentNotReady("节点引导解析尚未就绪："+error.localizedDescription)}
+            nodeAddresses[host]=values;for address in values {bypass.insert(address)}
         }
         let routesBefore=try NetworkInspection.command("/usr/sbin/netstat",["-rn"])
         phase="networkRecheck"
         let currentDefault=try routeInfo("default",ipv6:false)
         let vpn=try NetworkInspection.command("/usr/sbin/scutil",["--nc","list"])
-        guard let currentGlobal=SCDynamicStoreCopyValue(dynamic,"State:/Network/Global/IPv4" as CFString) as? [String:Any],currentGlobal["PrimaryService"] as? String==service,let currentProxies=SCDynamicStoreCopyProxies(nil) as? [String:Any] else{throw ProxyError("准备期间网络服务已变化，未接管网络")}
+        guard let currentGlobal=SCDynamicStoreCopyValue(dynamic,"State:/Network/Global/IPv4" as CFString) as? [String:Any],currentGlobal["PrimaryService"] as? String==service,let currentProxies=SCDynamicStoreCopyProxies(nil) as? [String:Any] else{throw NetworkEnvironmentNotReady("准备期间网络服务已变化，未接管网络")}
         try NetworkInspection.validatePreparation(interface:primary,gateway:gw4,currentInterface:field("interface",currentDefault),currentGateway:field("gateway",currentDefault),vpn:vpn,routes:routesBefore,proxies:currentProxies)
         phase="bypassSnapshot"
         let bypassPlan=try BypassRoutePlan.capture(destinations:plan.exclusions+bypass.map{$0+($0.contains(":") ? "/128":"/32")},existingPrefixes:TunAddressPlan.routePrefixes(routesBefore),hasIPv6:gw6 != nil,existingRoutes:NetworkSnapshot.parseRoutes(routesBefore,includeTransient:true),lookup:{try self.routeInfo($0,ipv6:$1)})
@@ -208,7 +208,7 @@ return};var issues:[String]=[]
         });dnsForwarder=forwarder;forwarder.start()
         phase="dnsBaseline"
         let baseline=plan.snapshot.resolvers.filter{forwarder.probe($0)}
-        guard baseline.contains(where:{$0.interface==primary}) else {throw ProxyError("原公网 DNS 不可用，未接管网络")}
+        guard baseline.contains(where:{$0.interface==primary}) else {throw NetworkEnvironmentNotReady("原公网 DNS 不可用，未接管网络")}
         for domain in plan.domains {
             guard let resolver=plan.resolvers(for:domain).first,baseline.contains(where:{$0.service==resolver.service}) else {throw ProxyError("企业 DNS 无法确认可用，未接管网络")}
         }
@@ -231,16 +231,16 @@ return};var issues:[String]=[]
             guard CoreController.listening(state.listenPort),request.httpCompatibilityPort.map({CoreController.listening($0)}) ?? true else{throw ProxyError("TUN 核心监听尚未就绪")}
             activatePrepared={ [unowned self] in
             try NetworkInspection.checkConflicts(ownedTunnel:tunnel)
-            guard field("interface",try routeInfo("default",ipv6:false))==primary else{throw ProxyError("准备期间物理网络已变化")}
-            if let v6 {guard let current=try? routeInfo("default",ipv6:true),field("gateway",current)==field("gateway",v6),field("interface",current)==primary else{throw ProxyError("准备期间 IPv6 默认路由已变化")}}
+            guard field("interface",try routeInfo("default",ipv6:false))==primary else{throw NetworkEnvironmentNotReady("准备期间物理网络已变化")}
+            if let v6 {guard let current=try? routeInfo("default",ipv6:true),field("gateway",current)==field("gateway",v6),field("interface",current)==primary else{throw NetworkEnvironmentNotReady("准备期间 IPv6 默认路由已变化")}}
             phase="protection"
             let currentRoutes=NetworkSnapshot.parseRoutes(try NetworkInspection.command("/usr/sbin/netstat",["-rn"]))
-            guard plan.protectedRoutes.allSatisfy({expected in currentRoutes.contains{actual in NetworkInspection.samePrefix(actual.destination,expected.destination) && actual.interface==expected.interface && actual.gateway==expected.gateway && actual.scope==expected.scope}}) else{throw ProxyError("企业路由在准备期间变化")}
+            guard plan.protectedRoutes.allSatisfy({expected in currentRoutes.contains{actual in NetworkInspection.samePrefix(actual.destination,expected.destination) && actual.interface==expected.interface && actual.gateway==expected.gateway && actual.scope==expected.scope}}) else{throw NetworkEnvironmentNotReady("企业路由在准备期间变化")}
             // 在任何保护路由写入前核对所有快照，之后只应用冻结计划。
             try bypassPlan.validatePreservedRoutes(NetworkSnapshot.parseRoutes(try NetworkInspection.command("/usr/sbin/netstat",["-rn"]),includeTransient:true))
             try bypassPlan.validate(lookup:{try self.routeInfo($0,ipv6:$1)})
             for route in plan.protectedRoutes {try protect(route)}
-            for route in bypassPlan.routes {try addRoute(route.destination,route.gateway,route.interface,ipv6:route.ipv6)}
+            for route in bypassPlan.routes {try addRoute(route.destination,route.gateway,route.interface,ipv6:route.ipv6,preparationBypass:true)}
             // 出站绑定物理网卡后需要限定路由；否则全局 /1 接管使 macOS 返回网络不可达。
             for destination in ["0.0.0.0/1","128.0.0.0/1"] {try addRoute(destination,gw4,primary,ipv6:false,scope:primary)}
             if let gw6 {for destination in ["::/1","8000::/1"] {try addRoute(destination,gw6,primary,ipv6:true,scope:primary)}}
@@ -287,7 +287,7 @@ return};var issues:[String]=[]
             phase="activation"
             do{try activate();activatePrepared=nil;phase="active";return TunReply(ok:true,message:"TUN 路由及 DNS 已接管；应用连接另行检测",running:true)}catch{let original=error;try stop();throw original}
         case "stop","recover":try stop();phase="restored";return TunReply(ok:true,message:"原网络已恢复")
-        default:throw ProxyError("只允许状态、启动、停止、恢复操作")}}catch{return TunReply(ok:false,message:"TUN 阶段 "+phase+"："+Redactor.redact(error.localizedDescription),coreDiagnostics:["prepare","activate"].contains(request.operation) ? coreDiagnostics.recent:nil,running:process?.isRunning==true,phase:phase)}
+        default:throw ProxyError("只允许状态、启动、停止、恢复操作")}}catch{return TunReply(ok:false,message:"TUN 阶段 "+phase+"："+Redactor.redact(error.localizedDescription),coreDiagnostics:["prepare","activate"].contains(request.operation) ? coreDiagnostics.recent:nil,running:process?.isRunning==true,phase:phase,networkNotReady:error is NetworkEnvironmentNotReady)}
     }
 }
 func run() throws {

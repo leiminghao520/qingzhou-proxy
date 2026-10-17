@@ -78,7 +78,7 @@ public struct NetworkSnapshot:Codable,Equatable,Sendable {
             for domain in domains+search {try ConfigBuilder.validate(RoutingRule(kind:.suffix,value:domain,action:.direct))}
             resolvers.append(DNSResolverScope(service:service,interface:interface,servers:servers,domains:domains,searchDomains:search,order:(dns["SearchOrder"] as? Int) ?? 200000,defaultResolver:(dns["SupplementalMatchDomains"] as? [String])?.contains("")==true || interface==primary))
         }
-        guard resolvers.contains(where:{$0.interface==primary}) else{throw ProxyError("原系统 DNS 无法完整读取，未接管网络")}
+        guard resolvers.contains(where:{$0.interface==primary}) else{throw NetworkEnvironmentNotReady("原系统 DNS 无法完整读取，未接管网络")}
         let proxies=SCDynamicStoreCopyProxies(nil) as? [String:Any] ?? [:]
         return NetworkSnapshot(primaryInterface:primary,routes:parseRoutes(routes).filter{$0.interface != ownedTunnel},resolvers:resolvers.sorted{$0.order == $1.order ? $0.service<$1.service:$0.order<$1.order},proxies:try PropertyListSerialization.data(fromPropertyList:proxies,format:.binary,options:0))
     }

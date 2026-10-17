@@ -41,7 +41,7 @@ public struct BypassRoutePlan:Sendable {
         for route in routes {
             let target=String(route.destination.split(separator:"/")[0])
             let info=try lookup(target,route.ipv6)
-            guard NetworkInspection.routeGateway(info)==route.gateway,NetworkInspection.routeField("interface",info)==route.interface else {throw ProxyError("绕过项 "+route.destination+" 准备期间原路径变化：期望 "+route.interface+"/"+route.gateway+"；实际 "+Self.summary(info))}
+            guard NetworkInspection.routeGateway(info)==route.gateway,NetworkInspection.routeField("interface",info)==route.interface else {throw NetworkEnvironmentNotReady("绕过项 "+route.destination+" 准备期间原路径变化：期望 "+route.interface+"/"+route.gateway+"；实际 "+Self.summary(info))}
         }
     }
     public func validatePreservedRoutes(_ actual:[ProtectedRoute]) throws {

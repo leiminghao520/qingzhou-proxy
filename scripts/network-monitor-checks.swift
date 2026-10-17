@@ -3,7 +3,7 @@ import SystemConfiguration
 import QingzhouKit
 
 // 此夹具链接正式 NetworkMonitor.swift，只替换管理员服务的外部输入和写操作。
-struct OwnedRoute { var destination: String; var gateway: String; var interface: String; var scope: String? = nil }
+struct OwnedRoute { var destination: String; var gateway: String; var interface: String; var ipv6: Bool = false; var scope: String? = nil }
 struct Journal { var expectedDNS: Data; var dnsKey = "fixture"; var routes: [OwnedRoute]; var preservedRoutes: [ProtectedRoute]? = []; var interface: String? = "utun42" }
 final class Service {
     let queue = DispatchQueue(label: "cn.qingzhou.monitor.fixture")
@@ -24,14 +24,31 @@ final class Service {
     var networkUptime: () -> TimeInterval = { 100 }
     var pendingNetworkChange: Date?
     var snapshotRetry = NetworkSnapshotRetry()
+    var networkResumeSession: NetworkResumeSession?
+    var networkResumeWork: DispatchWorkItem?
+    var performingNetworkResume = false
+    var networkResumeSchedule: ((TimeInterval, @escaping () -> Void) -> Void)?
+    var startHook: (() throws -> Void)?
+    var stopHook: (() throws -> Void)?
+    var activateHook: (() throws -> Void)?
     var activatePrepared: (() throws -> Void)?
     var lastFailure: String?
     var stops = 0, starts = 0, proxyReads = 0
     var proxyIssues: [String] = []
-    func addRoute(_ destination: String, _ gateway: String, _ interface: String, ipv6: Bool) throws { throw ProxyError("夹具禁止写路由") }
+    var routeInfoHook: (() throws -> String)?
+    var routeWrites = 0
+    func routeInfo(_ destination:String,ipv6:Bool,scope:String?=nil,deadline:Date?=nil) throws -> String {
+        guard let routeInfoHook else {throw ProxyError("夹具必须注入路由查询")}
+        return try routeInfoHook()
+    }
+    func field(_ label:String,_ text:String)->String? {label == "gateway" ? NetworkInspection.routeGateway(text):NetworkInspection.routeField(label,text)}
+    func prefix(_ info:String)->String? {NetworkInspection.routePrefix(destination:field("destination",info),mask:field("mask",info),host:info.contains("HOST"))}
+    func save() throws {}
+    func writeRoute(_ arguments:[String],deadline:Date?) throws -> String {routeWrites += 1;throw ProxyError("夹具禁止写系统路由")}
+
     func proxyOwnershipIssues() -> [String] { proxyReads += 1; return proxyIssues }
-    func stop() throws { stops += 1; networkChecks?.cancel(); capturePlan = nil; activeRequest = nil }
-    func start(_ request: TunRequest, fd: Int32) throws { starts += 1; activeRequest = request; activatePrepared = {} }
+    func stop() throws { if !performingNetworkResume {cancelNetworkResume()}; stops += 1; try stopHook?(); networkChecks?.cancel(); capturePlan = nil; activeRequest = nil; owner = nil }
+    func start(_ request: TunRequest, fd: Int32) throws { starts += 1; try startHook?(); activeRequest = request; owner = fd; activatePrepared = {try self.activateHook?()} }
 }
 
 @main struct MonitorChecks {
@@ -91,8 +108,15 @@ final class Service {
         let exhausted = try fixture()
         exhausted.networkUptime = { time }
         exhausted.routeSample = { throw ProxyError("路由暂不可读") }
+        var exhaustedCallbacks: [() -> Void] = []
+        exhausted.networkResumeSchedule = { _, callback in exhaustedCallbacks.append(callback) }
+        exhausted.startHook = {throw NetworkEnvironmentNotReady("原网络仍未就绪")}
         for next in [100.0, 101, 103, 107] { time = next; exhausted.checkNetworkChange() }
-        check(exhausted.stops == 1 && exhausted.phase == "networkProtectionFailed", "采样重试耗尽后恢复")
+        check(exhausted.stops == 2 && exhausted.phase == "networkReconnecting", "采样重试耗尽后安全恢复旧接管，再等待网络就绪")
+        check(exhaustedCallbacks.count == 1 && exhausted.networkResumeSession != nil, "采样失败的重建仍保留受限连接意图")
+        try exhausted.stop()
+        exhaustedCallbacks.removeFirst()()
+        check(exhausted.starts == 1, "快照重建等待也能由用户取消")
 
         let replanned = try fixture()
         var now = Date(timeIntervalSince1970: 100)
@@ -102,6 +126,107 @@ final class Service {
         check(replanned.stops == 0, "变化先稳定一秒")
         now.addTimeInterval(1); replanned.checkNetworkChange()
         check(replanned.stops == 1 && replanned.starts == 1 && replanned.phase == "active", "稳定变化仍按原流程重规划")
+
+        // 模拟后台唤醒：第一次重建时 IPv6 出口未就绪，旧设置恢复后等待下一轮。
+        let resume = try fixture()
+        var waits: [Double] = [], callbacks: [() -> Void] = [], transient = true
+        resume.networkResumeSchedule = { delay, callback in waits.append(delay);callbacks.append(callback) }
+        resume.startHook = { if transient { throw NetworkEnvironmentNotReady("IPv6 默认路由属于其他接口，未启用 TUN") } }
+        let request = resume.activeRequest!
+        resume.beginNetworkResume(request, fd: 7)
+        check(resume.phase == "networkReconnecting" && resume.starts == 1, "网络未就绪进入重连态，不能报告核心崩溃")
+        check(resume.owner == 7 && resume.networkResumeSession != nil && waits == [1], "保留同一控制通道的连接意图，等待一秒")
+        transient = false;callbacks.removeFirst()()
+        check(resume.phase == "active" && resume.starts == 2 && resume.networkResumeSession == nil, "网络恢复后自动完成准备和激活")
+        check(resume.activeRequest?.operation == request.operation && resume.owner == 7, "恢复原连接模型和所有者")
+        check(resume.lastFailure == nil, "自动恢复成功清除暂态错误")
+
+        let darkWake = try fixture()
+        var darkCallbacks: [() -> Void] = [], elapsed = 0.0
+        darkWake.networkResumeSchedule = { delay, callback in
+            darkCallbacks.append {elapsed += delay;callback()}
+        }
+        darkWake.startHook = {if elapsed < 56 {throw NetworkEnvironmentNotReady("后台唤醒 IPv6 尚未恢复")} }
+        darkWake.beginNetworkResume(request, fd: 15)
+        while !darkCallbacks.isEmpty {darkCallbacks.removeFirst()()}
+        check(darkWake.phase == "active" && elapsed == 60, "复现后台唤醒至用户唤醒五十六秒的窗口后自动连接")
+        check(darkWake.starts == 7 && darkWake.networkResumeSession == nil, "后台唤醒不会清空连接意图，成功后释放重试记录")
+
+        let cancelled = try fixture()
+        var staleCallbacks: [() -> Void] = []
+        cancelled.networkResumeSchedule = { _, callback in staleCallbacks.append(callback) }
+        cancelled.startHook = { throw NetworkEnvironmentNotReady("Wi-Fi 尚未就绪") }
+        cancelled.beginNetworkResume(request, fd: 8)
+        let staleSession = cancelled.networkResumeSession!
+        try cancelled.stop()
+        staleCallbacks.removeFirst()()
+        check(cancelled.starts == 1 && cancelled.networkResumeSession == nil, "手动停止和控制通道关闭后，旧回调不能重新接管")
+        check(cancelled.owner == nil && staleSession.owner == 8, "停止时释放待重连所有权")
+
+        let permanent = try fixture()
+        permanent.startHook = { throw ProxyError("另一个隧道正在接管默认路由，未启用 TUN") }
+        permanent.beginNetworkResume(request, fd: 9)
+        check(permanent.phase == "networkProtectionFailed" && permanent.networkResumeSession == nil, "真实 VPN 冲突立即停止，不自动忽略安全条件")
+
+        let restoreConflict = try fixture()
+        restoreConflict.stopHook = { throw ProxyError("恢复记录存在外部修改") }
+        restoreConflict.beginNetworkResume(request, fd: 10)
+        check(restoreConflict.starts == 0 && restoreConflict.networkResumeSession == nil, "旧设置恢复失败时不得启动核心")
+        check(restoreConflict.lastFailure?.contains("恢复冲突") == true, "恢复失败保留真实原因")
+
+        let limit = try fixture()
+        var limitCallbacks: [() -> Void] = [], delays: [Double] = []
+        limit.networkResumeSchedule = { delay, callback in delays.append(delay);limitCallbacks.append(callback) }
+        limit.startHook = { throw NetworkEnvironmentNotReady("IPv6 网络持续不可用") }
+        limit.beginNetworkResume(request, fd: 11)
+        while !limitCallbacks.isEmpty { limitCallbacks.removeFirst()() }
+        check(delays == [1, 2, 4, 8, 15, 30, 30] && limit.starts == 8, "重试有次数和退避上限，事件风暴不能无限重连")
+        check(limit.phase == "networkProtectionFailed" && limit.networkResumeSession == nil, "预算耗尽后恢复并报告停止")
+
+        // 企业 VPN 在绕过计划冻结后补上网段：链接正式写入逻辑，确认不覆盖、不认领。
+        let corporate = try fixture()
+        let corporateInfo="destination: 172.16.0.0\nmask: 255.240.0.0\ngateway: 10.251.1.1\ninterface: utun6\nflags: <UP,GATEWAY,STATIC>"
+        corporate.routeInfoHook = {corporateInfo}
+        let originalRouteCount=corporate.journal!.routes.count
+        var corporateCallbacks:[() -> Void]=[]
+        corporate.networkResumeSchedule = {_, callback in corporateCallbacks.append(callback)}
+        corporate.activateHook = {
+            try corporate.addRoute("172.16.0.0/12","192.168.1.1","en0",ipv6:false,preparationBypass:true)
+        }
+        corporate.beginNetworkResume(request,fd:16)
+        check(corporate.phase == "networkReconnecting", "企业 VPN 后到路由触发回滚重采样，不终止连接意图")
+        check(corporate.routeWrites == 0 && corporate.journal!.routes.count == originalRouteCount, "不得删除、覆盖或认领企业 VPN 已有路由")
+        corporate.activateHook = {
+            let original=ProtectedRoute(destination:"172.16.0.0/12",gateway:"10.251.1.1",interface:"utun6")
+            let snapshot=NetworkSnapshot(primaryInterface:"en0",routes:[original],resolvers:[resolver])
+            let fresh=try CapturePlan.make(snapshot:snapshot,extraCIDRs:[],extraDomains:[])
+            let bypass=try BypassRoutePlan.capture(destinations:fresh.exclusions,existingPrefixes:[original.destination],hasIPv6:false,existingRoutes:[original],lookup:{_,_ in "gateway: 192.168.1.1\ninterface: en0\nflags: <UP,GATEWAY,STATIC>"})
+            check(fresh.protectedRoutes.contains(original), "重新采样保留企业网段出口")
+            check(!bypass.routes.contains{$0.destination == original.destination}, "新绕过计划不再写入已存在的企业网段")
+        }
+        corporateCallbacks.removeFirst()()
+        check(corporate.phase == "active" && corporate.starts == 2, "同一连接重新规划后自动恢复："+(corporate.lastFailure ?? corporate.phase))
+        do {
+            try corporate.addRoute("172.16.0.0/12","192.168.1.1","en0",ipv6:false)
+            check(false,"普通保护冲突必须拒绝")
+        } catch {check(!(error is NetworkEnvironmentNotReady), "非绕过写入的冲突不能误分类为暂态")}
+        corporate.routeInfoHook = {"destination: default\nmask: 128.0.0.0\ngateway: 10.251.1.1\ninterface: utun6\nflags: <UP,GATEWAY,STATIC>"}
+        do {
+            try corporate.addRoute("0.0.0.0/1","192.168.1.1","en0",ipv6:false)
+            check(false,"默认路由接管冲突必须拒绝")
+        } catch {check(!(error is NetworkEnvironmentNotReady), "默认路由冲突仍立即停止")}
+        check(corporate.routeWrites == 0, "所有冲突测试均未调用系统路由写入")
+
+        let activation = try fixture()
+        var activateCallbacks: [() -> Void] = [], notReady = true
+        activation.networkResumeSchedule = { _, callback in activateCallbacks.append(callback) }
+        activation.activateHook = { if notReady {throw NetworkEnvironmentNotReady("准备期间物理网络已变化")} }
+        activation.beginNetworkResume(request, fd: 12)
+        check(activation.phase == "networkReconnecting", "激活期间的暂态变化先回滚再等待")
+        notReady = false;activateCallbacks.removeFirst()()
+        check(activation.phase == "active" && activation.starts == 2, "激活重试仍完成全部安全核验流程")
+        check(TunReply(ok: true, message: "等待", running: false, phase: "networkReconnecting").networkReconnecting, "真实运行态与待重连态分别表达")
+        check(!TunReply(ok: true, message: "失败", running: false, phase: "networkProtectionFailed").networkReconnecting, "终止失败不能伪装为等待")
 
         var queued: [() -> Void] = [], cycles = 0
         let burst = try fixture()

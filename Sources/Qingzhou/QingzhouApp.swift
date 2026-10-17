@@ -273,7 +273,7 @@ struct ContentView: View {
                                 .frame(width: 8, height: 8)
 
                             VStack(alignment: .leading, spacing: 1) {
-                                Text(model.recovering ? "正在恢复网络":model.stopRequested ? "等待安全断开":model.networkRechecking ? "网络变化 · 检查中":model.connection.rawValue)
+                                Text(model.recovering ? "正在恢复网络":model.stopRequested ? "等待安全断开":model.networkReconnecting ? "网络恢复中 · 自动重连":model.networkRechecking ? "网络变化 · 检查中":model.connection.rawValue)
                                     .font(.system(size: 11, weight: .bold))
                                     .lineLimit(1)
                                 Text(model.connection == .connected ? model.actualName : "尚未连接")
