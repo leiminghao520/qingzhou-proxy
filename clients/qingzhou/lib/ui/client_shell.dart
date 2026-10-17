@@ -143,11 +143,7 @@ class ClientShell extends StatelessWidget {
                 Padding(
                   padding: const EdgeInsets.fromLTRB(26, 32, 20, 32),
                   child: Row(children: [
-                    Container(
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(color: colors.primary, borderRadius: BorderRadius.circular(12)),
-                      child: Icon(Icons.near_me_rounded, color: colors.onPrimary, size: 24),
-                    ),
+                    Image.asset('assets/app_badge.png', width: 44, height: 44),
                     const SizedBox(width: 12),
                     Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                       Text('轻舟代理', maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleLarge),

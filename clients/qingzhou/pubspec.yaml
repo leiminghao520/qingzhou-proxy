@@ -27,3 +27,4 @@ flutter:
   uses-material-design: true
   assets:
     - assets/tray.ico
+    - assets/app_badge.png
