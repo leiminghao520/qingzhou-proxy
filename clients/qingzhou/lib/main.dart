@@ -218,7 +218,7 @@ class _HomeState extends State<Home> {
     final policy = m.catalog.state['selectedPolicy'];
     final selectedPolicy = policy == null ? null : runtimeReference(policy);
     final selectedID = selectedPolicy?['kind'] == 'node'
-        ? selectedPolicy!['id']
+        ? selectedPolicy?['id']
         : m.catalog.state['selectedID'];
     final selected = m.catalog.nodes.where((n) => n['id'] == selectedID).firstOrNull;
     final group = (m.catalog.state['groups'] as List? ?? [])
@@ -1000,12 +1000,12 @@ class _HomeState extends State<Home> {
       busy: m.busy,
       connected: m.connected,
       error: m.error,
-      child: body,
       onNavigate: (value) => setState(() => page = value),
       onModeChanged: changeInterfaceMode,
       icon: icon,
       onImport: m.busy ? null : importText,
       onDismissError: () => setState(() => m.error = null),
+      child: body,
     );
   }
 
