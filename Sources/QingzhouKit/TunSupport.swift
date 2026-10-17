@@ -60,16 +60,19 @@ public actor PrivilegedServiceClient {
 }
 public enum NetworkInspection {
     public static func command(_ path:String,_ arguments:[String],deadline:Date?=nil) throws -> String {
-        let limit=deadline ?? Date().addingTimeInterval(10)
-        guard limit>Date() else {throw ProxyError("网络操作超过总截止时间")}
+        func uptime()->TimeInterval {TimeInterval(DispatchTime.now().uptimeNanoseconds)/1_000_000_000}
+        let budget=NetworkCommandBudget(deadline:deadline,uptime:uptime())
+        func remaining()->TimeInterval {budget.remaining(wallTime:Date(),uptime:uptime())}
+        func timeoutError()->ProxyError {ProxyError("网络命令 "+URL(fileURLWithPath:path).lastPathComponent+(deadline == nil ? " 超过唤醒运行时间预算":" 超过总截止时间"))}
+        guard remaining()>0 else {throw timeoutError()}
         let process=Process(),output=Pipe();process.executableURL=URL(fileURLWithPath:path);process.arguments=arguments;process.standardOutput=output;process.standardError=output
         try process.run()
         // 读取管道期间仍由独立计时器终止超时进程，DNS 保护共用上层截止时间。
         let timeout=DispatchWorkItem {if process.isRunning {kill(process.processIdentifier,SIGKILL)}}
-        DispatchQueue.global().asyncAfter(deadline:.now()+max(0,limit.timeIntervalSinceNow),execute:timeout)
+        DispatchQueue.global().asyncAfter(deadline:.now()+remaining(),execute:timeout)
         defer{timeout.cancel()}
         let data=output.fileHandleForReading.readDataToEndOfFile();process.waitUntilExit()
-        guard Date()<limit else {throw ProxyError("网络操作超过总截止时间")}
+        guard remaining()>0 else {throw timeoutError()}
         let text=String(decoding:data,as:UTF8.self)
         guard process.terminationStatus==0 else {throw ProxyError("网络命令 "+URL(fileURLWithPath:path).lastPathComponent+" 失败（退出码 "+String(process.terminationStatus)+"）："+Redactor.redact(String(text.prefix(512))))};return text
     }
