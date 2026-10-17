@@ -137,7 +137,7 @@ class ClientShell extends StatelessWidget {
               width: 220,
               decoration: BoxDecoration(
                 color: colors.surface,
-                border: Border(right: BorderSide(color: theme.dividerColor)),
+                border: Border(right: BorderSide(color: theme.dividerTheme.color ?? colors.outlineVariant)),
               ),
               child: Column(children: [
                 Padding(
@@ -149,14 +149,14 @@ class ClientShell extends StatelessWidget {
                       child: Icon(Icons.near_me_rounded, color: colors.onPrimary, size: 24),
                     ),
                     const SizedBox(width: 12),
-                    Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      Text('轻舟代理', style: theme.textTheme.titleLarge),
+                    Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text('轻舟代理', maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleLarge),
                       const SizedBox(height: 3),
-                      Text('QINGZHOU PROXY', style: TextStyle(fontSize: 9, letterSpacing: 1.3, color: colors.onSurfaceVariant)),
-                    ]),
+                      Text('QINGZHOU PROXY', maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 9, letterSpacing: 1.3, color: colors.onSurfaceVariant)),
+                    ])),
                   ]),
                 ),
-                Expanded(child: navigation()),
+                Expanded(child: Material(color: colors.surface, child: navigation())),
                 Padding(
                   padding: const EdgeInsets.all(22),
                   child: Row(children: [
