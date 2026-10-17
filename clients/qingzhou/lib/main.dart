@@ -17,6 +17,9 @@ import 'package:flutter/foundation.dart';
 import 'platform/repository.dart';
 import 'platform/runtime.dart';
 import 'platform/desktop.dart';
+import 'ui/client_theme.dart';
+import 'ui/client_shell.dart';
+import 'ui/connection_dashboard.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -37,17 +40,8 @@ class QingzhouApp extends StatelessWidget {
     builder: (context, _) => MaterialApp(
       title: '轻舟代理',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff167d8d)),
-        useMaterial3: true,
-      ),
-      darkTheme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xff55becb),
-          brightness: Brightness.dark,
-        ),
-        useMaterial3: true,
-      ),
+      theme: clientTheme(Brightness.light),
+      darkTheme: clientTheme(Brightness.dark),
       themeMode:
           {
             'light': ThemeMode.light,
@@ -77,6 +71,19 @@ class _HomeState extends State<Home> {
       ? ['连接', '线路', '订阅', '策略', '规则', '监控', '配置', '设置']
       : ['连接', '线路', '订阅', '设置'];
   Future<void> run(Future<void> Function() f) => m.action(f);
+  Future<void> changeInterfaceMode(bool value) async {
+    final previousPage = pages[page.clamp(0, pages.length - 1)];
+    await run(() async {
+      await m.setPreference('professional', value);
+      if (!mounted) return;
+      // 依据页面名称恢复位置；简洁模式中不存在的专业页面回到连接页。
+      setState(() {
+        final next = pages.indexOf(previousPage);
+        page = next < 0 ? 0 : next;
+      });
+    });
+  }
+
   Future<String?> textDialog(
     String title, {
     String initial = '',
@@ -210,63 +217,20 @@ class _HomeState extends State<Home> {
     final selected = m.catalog.nodes
         .where((n) => n['id'] == m.catalog.state['selectedID'])
         .firstOrNull;
-    return Column(
-      children: [
-        card('轻舟 · 连接', [
-          Text(label, style: Theme.of(context).textTheme.headlineMedium),
-          const SizedBox(height: 12),
-          Text(selected?['name'] as String? ?? '自动选择线路'),
-          const SizedBox(height: 20),
-          FilledButton.icon(
-            onPressed: m.busy || !m.ready ? null : () => run(m.toggle),
-            icon: Icon(
-              m.connected
-                  ? Icons.stop_circle_outlined
-                  : Icons.power_settings_new,
-            ),
-            label: Text(m.connected ? '断开连接' : '连接'),
-          ),
-          const SizedBox(height: 8),
-          const Text('运行状态与网络可用性分别判断；请在诊断中检查 HTTPS 连通性。'),
-          if (m.status['notificationsEnabled'] == false)
-            const Text('通知未开启，无法通过通知栏断开 VPN；可在本页断开，或在系统设置中允许通知。'),
-        ]),
-        card('快速开始', [
-          Wrap(
-            spacing: 12,
-            runSpacing: 8,
-            children: [
-              OutlinedButton.icon(
-                onPressed: m.busy ? null : importText,
-                icon: const Icon(Icons.add_link),
-                label: const Text('添加订阅或节点'),
-              ),
-              OutlinedButton.icon(
-                onPressed: m.busy ? null : importFile,
-                icon: const Icon(Icons.file_open_outlined),
-                label: const Text('导入文件'),
-              ),
-              TextButton(
-                onPressed: () => run(m.recover),
-                child: const Text('恢复网络'),
-              ),
-            ],
-          ),
-        ]),
-        card('代理模式', [
-          DropdownButtonFormField<String>(
-            initialValue: m.catalog.state['mode'] as String? ?? 'rule',
-            items: const [
-              DropdownMenuItem(value: 'rule', child: Text('规则分流')),
-              DropdownMenuItem(value: 'global', child: Text('全部代理')),
-              DropdownMenuItem(value: 'direct', child: Text('全部直连')),
-            ],
-            onChanged: m.busy
-                ? null
-                : (v) => run(() => m.change((c) => c.state['mode'] = v)),
-          ),
-        ]),
-      ],
+    return ConnectionDashboard(
+      connected: m.connected,
+      stateLabel: label,
+      nodeName: selected?['name'] as String? ?? '自动选择线路',
+      captureLabel: const {'tun': 'VPN / TUN', 'systemProxy': '系统代理', 'compatible': '组合接管'}[m.catalog.state['captureMode']] ?? '未设置',
+      proxyMode: m.catalog.state['mode'] as String? ?? 'rule',
+      coreVersion: m.capabilities['coreVersion'] as String? ?? '未就绪',
+      nodeCount: m.catalog.nodes.length,
+      onToggle: m.busy || !m.ready ? null : () => run(m.toggle),
+      onImport: m.busy ? null : importText,
+      onFile: m.busy ? null : importFile,
+      onRecover: m.busy ? null : () => run(m.recover),
+      onModeChanged: m.busy ? null : (value) => run(() => m.change((c) => c.state['mode'] = value)),
+      notificationsDisabled: m.status['notificationsEnabled'] == false,
     );
   }
 
@@ -877,7 +841,7 @@ class _HomeState extends State<Home> {
           contentPadding: EdgeInsets.zero,
           title: const Text('专业模式'),
           value: professional,
-          onChanged: (v) => run(() => m.setPreference('professional', v)),
+          onChanged: m.busy ? null : changeInterfaceMode,
         ),
         DropdownButtonFormField<String>(
           initialValue: m.preferences['appearance'] as String? ?? 'system',
@@ -1018,106 +982,19 @@ class _HomeState extends State<Home> {
       '配置' => profilesPage(),
       _ => settingsPage(),
     };
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final wide = constraints.maxWidth >= 800;
-        return Scaffold(
-          appBar: AppBar(
-            title: Text('轻舟代理 · $label'),
-            actions: [
-              IconButton(
-                onPressed: m.busy ? null : importText,
-                icon: const Icon(Icons.add),
-              ),
-            ],
-          ),
-          body: Row(
-            children: [
-              if (wide)
-                NavigationRail(
-                  selectedIndex: index,
-                  extended: true,
-                  onDestinationSelected: (i) => setState(() => page = i),
-                  destinations: labels
-                      .map(
-                        (s) => NavigationRailDestination(
-                          icon: Icon(icon(s)),
-                          label: Text(s),
-                        ),
-                      )
-                      .toList(),
-                ),
-              Expanded(
-                child: Column(
-                  children: [
-                    if (m.busy) const LinearProgressIndicator(),
-                    if (m.error != null)
-                      MaterialBanner(
-                        content: Text(m.error!),
-                        actions: [
-                          TextButton(
-                            onPressed: () => setState(() => m.error = null),
-                            child: const Text('关闭'),
-                          ),
-                        ],
-                      ),
-                    Expanded(
-                      child: ListView(
-                        padding: const EdgeInsets.all(20),
-                        children: [
-                          Center(
-                            child: ConstrainedBox(
-                              constraints: const BoxConstraints(maxWidth: 960),
-                              child: body,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          drawer: !wide && professional
-              ? Drawer(
-                  child: SafeArea(
-                    child: ListView(
-                      children: labels
-                          .asMap()
-                          .entries
-                          .map(
-                            (entry) => ListTile(
-                              leading: Icon(icon(entry.value)),
-                              title: Text(entry.value),
-                              selected: entry.key == index,
-                              onTap: () {
-                                setState(() => page = entry.key);
-                                Navigator.pop(context);
-                              },
-                            ),
-                          )
-                          .toList(),
-                    ),
-                  ),
-                )
-              : null,
-          bottomNavigationBar: wide || professional
-              ? null
-              : NavigationBar(
-                  selectedIndex: index,
-                  onDestinationSelected: (i) => setState(() => page = i),
-                  destinations: labels
-                      .map(
-                        (s) => NavigationDestination(
-                          icon: Icon(icon(s)),
-                          label: s,
-                        ),
-                      )
-                      .toList(),
-                ),
-        );
-      },
+    return ClientShell(
+      pages: labels,
+      selected: index,
+      professional: professional,
+      busy: m.busy,
+      connected: m.connected,
+      error: m.error,
+      child: body,
+      onNavigate: (value) => setState(() => page = value),
+      onModeChanged: changeInterfaceMode,
+      icon: icon,
+      onImport: m.busy ? null : importText,
+      onDismissError: () => setState(() => m.error = null),
     );
   }
 

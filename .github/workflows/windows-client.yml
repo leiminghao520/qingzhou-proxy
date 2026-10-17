@@ -34,6 +34,8 @@ jobs:
           "$env:RUNNER_TEMP/flutter/bin" >> $env:GITHUB_PATH
       - name: Build complete Windows client
         run: |
+          Invoke-WebRequest 'https://raw.githubusercontent.com/google/fonts/main/ofl/notosanssc/NotoSansSC%5Bwght%5D.ttf' -OutFile "$env:RUNNER_TEMP/ui-preview-font.ttf"
+          $env:QINGZHOU_PREVIEW_FONT = "$env:RUNNER_TEMP/ui-preview-font.ttf"
           flutter config --enable-windows-desktop --no-analytics
           flutter doctor -v
           & clients/qingzhou/tool/build_windows.ps1
@@ -52,5 +54,12 @@ jobs:
             outputs/*.zip
             outputs/*windows*/
             outputs/windows-evidence/
+          if-no-files-found: warn
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-ui-previews
+          path: outputs/windows-ui-preview/*.png
           if-no-files-found: warn
           retention-days: 14

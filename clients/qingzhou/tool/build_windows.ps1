@@ -11,7 +11,7 @@ flutter pub get --enforce-lockfile
 if ($LASTEXITCODE -ne 0) { throw '依赖校验失败' }
 flutter analyze
 if ($LASTEXITCODE -ne 0) { throw '静态检查失败' }
-flutter test
+flutter test --dart-define=QINGZHOU_PREVIEW=true
 if ($LASTEXITCODE -ne 0) { throw '测试失败' }
 flutter build windows --release
 if ($LASTEXITCODE -ne 0) { throw 'Windows 构建失败' }
