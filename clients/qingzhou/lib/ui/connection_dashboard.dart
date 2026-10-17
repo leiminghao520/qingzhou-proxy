@@ -4,12 +4,14 @@ class ConnectionDashboard extends StatelessWidget {
   final bool connected;
   final String stateLabel, nodeName, captureLabel, proxyMode, coreVersion;
   final int nodeCount;
+  final String? diagnosticSummary;
   final VoidCallback? onToggle, onImport, onFile, onRecover;
   final ValueChanged<String>? onModeChanged;
   final bool notificationsDisabled;
   const ConnectionDashboard({
     super.key,
     required this.connected,
+    this.diagnosticSummary,
     required this.stateLabel,
     required this.nodeName,
     required this.captureLabel,
@@ -82,12 +84,12 @@ class ConnectionDashboard extends StatelessWidget {
               ),
               const SizedBox(height: 24),
               Text(
-                connected ? '连接已建立' : '让连接，轻盈一点',
+                connected ? (diagnosticSummary == null ? '连接已建立' : '代理核心已运行') : '让连接，轻盈一点',
                 style: theme.textTheme.headlineMedium,
               ),
               const SizedBox(height: 10),
               Text(
-                connected ? '线路已就绪，可在设置中检查实际连通性。' : '选择一条线路，开启你的轻舟之旅。',
+                connected ? (diagnosticSummary ?? '线路已就绪，可在设置中检查实际连通性。') : '选择一条线路，开启你的轻舟之旅。',
                 style: TextStyle(color: muted, height: 1.6),
               ),
               const SizedBox(height: 24),

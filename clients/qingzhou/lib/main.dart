@@ -234,7 +234,8 @@ class _HomeState extends State<Home> {
     }
     return ConnectionDashboard(
       connected: m.connected,
-      stateLabel: label,
+      stateLabel: m.supportsDiagnostics && m.connected ? '核心运行中' : label,
+      diagnosticSummary: m.supportsDiagnostics ? m.networkSummary : null,
       nodeName: nodeName,
       captureLabel: const {'tun': 'VPN / TUN', 'systemProxy': '系统代理', 'compatible': '组合接管'}[m.catalog.state['captureMode']] ?? '未设置',
       proxyMode: m.catalog.state['mode'] as String? ?? 'rule',
@@ -946,10 +947,34 @@ class _HomeState extends State<Home> {
       card('诊断', [
         Text('平台运行状态：${m.status['state']}'),
         Text('核心：${m.capabilities['coreVersion'] ?? '未就绪'}'),
+        if (m.supportsDiagnostics) ...[
+          Text(m.networkSummary),
+          for (final stage in const {
+            'core': '代理核心',
+            'listener': '本地代理端口',
+            'registry': '系统代理配置',
+            'systemProxy': 'Windows 代理应用',
+            'proxyNotification': '代理设置刷新',
+            'dns': '目标域名解析',
+            'tls': 'TLS 握手',
+            'https': '本地代理 HTTPS 请求',
+            'tunRouting': 'TUN 路由',
+            'tunDNS': 'TUN DNS',
+            'service': '诊断服务通信',
+          }.entries)
+            if (!const ['service', 'proxyNotification'].contains(stage.key) ||
+                m.diagnosticResults.containsKey(stage.key))
+              Text('${stage.value}：${const {'passed': '通过', 'failed': '失败', 'unverified': '未验证'}[m.diagnosticState(stage.key)] ?? '未验证'}'
+                  '${m.diagnosticResults[stage.key] is Map ? ' · ${redact(m.diagnosticResults[stage.key]['message']?.toString() ?? '', m.credentials.values)}' : ''}'),
+        ],
         TextButton(
           onPressed: m.busy || !m.connected
               ? null
               : () => run(() async {
+                  if (m.supportsDiagnostics) {
+                    await m.runDiagnostics();
+                    return;
+                  }
                   final ms = await m.runtime.delay(
                     m.catalog.state['mode'] == 'direct' ? 'direct' : 'proxy',
                   );
@@ -959,7 +984,7 @@ class _HomeState extends State<Home> {
                     );
                   }
                 }),
-          child: const Text('当前出口 HTTPS 检查'),
+          child: Text(m.supportsDiagnostics ? '运行分阶段网络诊断' : '当前出口 HTTPS 检查'),
         ),
         TextButton(
           onPressed: m.busy
@@ -1004,6 +1029,7 @@ class _HomeState extends State<Home> {
       busy: m.busy,
       connected: m.connected,
       error: m.error,
+      connectionLabel: m.supportsDiagnostics ? '核心运行中' : null,
       onNavigate: (value) => setState(() => page = value),
       onModeChanged: changeInterfaceMode,
       icon: icon,

@@ -16,11 +16,15 @@ type fakeRegistry struct {
 	readErr, writeErr error
 	writes            int
 	partial           bool
+	ignoreWrite       bool
 }
 
 func (s *fakeRegistry) Read() (Values, error) { return s.value, s.readErr }
 func (s *fakeRegistry) Write(v Values) error {
 	s.writes++
+	if s.ignoreWrite {
+		return nil
+	}
 	if s.writeErr != nil {
 		if s.partial {
 			s.value.Enable = v.Enable
@@ -30,6 +34,29 @@ func (s *fakeRegistry) Write(v Values) error {
 	}
 	s.value = v
 	return nil
+}
+
+func TestSilentWriteFailureKeepsRecoveryRecord(t *testing.T) {
+	m, r, j := fixture()
+	r.ignoreWrite = true
+	if err := m.Capture(2080); err == nil || j.data == nil {
+		t.Fatal("未识别接管写入未生效")
+	}
+	r.ignoreWrite = false
+	if err := m.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Capture(2080); err != nil {
+		t.Fatal(err)
+	}
+	r.ignoreWrite = true
+	if err := m.Recover(); err == nil || j.data == nil {
+		t.Fatal("恢复未生效却丢失了恢复记录")
+	}
+	r.ignoreWrite = false
+	if err := m.Recover(); err != nil || j.data != nil {
+		t.Fatal("恢复重试失败", err)
+	}
 }
 
 type fakeJournal struct {

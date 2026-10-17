@@ -4,6 +4,7 @@ import '../app_model.dart';
 
 class DesktopController with TrayListener, WindowListener {
   final AppModel model;
+  bool _quitting = false;
   DesktopController(this.model);
   Future<void> initialize() async {
     await windowManager.ensureInitialized();
@@ -52,13 +53,28 @@ class DesktopController with TrayListener, WindowListener {
           await model.poll();
         });
       case 'quit':
+        if (_quitting) return;
+        _quitting = true;
         try {
-          await model.runtime.stop();
+          var prepared = false;
+          await model.action(() async {
+            await model.prepareToExit();
+            prepared = true;
+          }, allowRecovery: true);
+          if (!prepared) {
+            await windowManager.show();
+            await windowManager.focus();
+            return;
+          }
           await trayManager.destroy();
           await windowManager.destroy();
         } catch (_) {
-          model.error = '网络恢复尚未完成，请打开应用检查';
+          await model.action(() async {
+            throw const FormatException('网络已确认断开，但桌面窗口退出失败，请重试退出');
+          }, allowRecovery: true);
           await windowManager.show();
+        } finally {
+          _quitting = false;
         }
     }
   }

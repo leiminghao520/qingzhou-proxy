@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,8 @@ import (
 	"qingzhou.local/runtime/config"
 	"qingzhou.local/runtime/engine"
 	"qingzhou.local/runtime/systemproxy"
+	"runtime/debug"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -44,6 +47,8 @@ type service struct {
 	last        time.Time
 	listener    net.Listener
 	recoveryErr bool
+	diagnostics map[string]engine.Check
+	checkedAt   string
 }
 
 func main() {
@@ -121,6 +126,8 @@ func (s *service) Execute(_ []string, requests <-chan svc.ChangeRequest, status 
 				if _, err := os.Stat(filepath.Join(s.dir, "recovery.json")); err == nil {
 					s.recoveryErr = s.recover() != nil
 				}
+				// 兼容入口异常退出后也要释放核心，避免下一次连接被残留实例阻挡。
+				s.core.Stop()
 			}
 			if s.core.Running() && time.Since(s.last) > 20*time.Second {
 				s.recoveryErr = s.recover() != nil
@@ -166,17 +173,19 @@ func (s *service) call(m message) (string, error) {
 	s.last = time.Now()
 	switch m.Method {
 	case "capabilities":
-		return `{"captureModes":["systemProxy","tun","compatible"],"coreVersion":"1.14.3","httpCompatibility":true,"fallback":true}`, nil
-	case "status":
-		state := "disconnected"
-		if s.core.Running() {
-			state = "connected"
+		build := map[string]string{}
+		if info, ok := debug.ReadBuildInfo(); ok {
+			build["goVersion"] = info.GoVersion
+			for _, setting := range info.Settings {
+				if setting.Key == "vcs.revision" || setting.Key == "vcs.modified" {
+					build[setting.Key] = setting.Value
+				}
+			}
 		}
-		if s.recoveryErr {
-			state = "recoveryRequired"
-		}
-		b, _ := json.Marshal(map[string]string{"state": state})
+		b, _ := json.Marshal(map[string]any{"captureModes": []string{"systemProxy", "tun", "compatible"}, "coreVersion": "1.14.3", "httpCompatibility": true, "fallback": true, "diagnostics": true, "serviceBuild": build})
 		return string(b), nil
+	case "status":
+		return s.report(false), nil
 	case "validate":
 		e := engine.Validate(m.Arguments)
 		return "", e
@@ -187,6 +196,8 @@ func (s *service) call(m message) (string, error) {
 		if s.recoveryErr {
 			return "", errors.New("网络恢复尚未完成")
 		}
+		s.diagnostics = nil
+		s.checkedAt = ""
 		r, e := config.Decode(m.Arguments)
 		if e != nil {
 			return "", e
@@ -206,6 +217,8 @@ func (s *service) call(m message) (string, error) {
 		e := s.recover()
 		s.recoveryErr = e != nil
 		s.core.Stop()
+		s.diagnostics = nil
+		s.checkedAt = ""
 		return "", e
 	case "probe":
 		ms, err := engine.Probe(m.Arguments)
@@ -222,11 +235,77 @@ func (s *service) call(m message) (string, error) {
 		b, _ := json.Marshal(map[string]int64{"milliseconds": ms})
 		return string(b), nil
 	case "query":
+		if m.Arguments == "/diagnostics" {
+			return s.report(true), nil
+		}
 		return s.core.Query(m.Arguments)
 	case "select":
-		return "", s.core.Select(m.Arguments)
+		err := s.core.Select(m.Arguments)
+		if err == nil {
+			s.diagnostics = nil
+			s.checkedAt = ""
+		}
+		return "", err
 	}
 	return "", errors.New("操作不支持")
+}
+
+// report 不把内核存活当成网络检测成功；普通轮询只读取状态，不发起外网请求。
+func (s *service) report(refresh bool) string {
+	info := s.core.Info()
+	if refresh && info.CoreRunning {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		s.diagnostics = s.core.Diagnose(ctx)
+		cancel()
+		s.checkedAt = time.Now().UTC().Format(time.RFC3339)
+		// 后台回退检测可能在网络检查期间停止核心，响应必须反映最新状态。
+		info = s.core.Info()
+	}
+	checks := map[string]engine.Check{
+		"core":        {State: "unverified", Message: "内核未运行"},
+		"listener":    {State: "unverified", Message: "尚未检查本地代理入口"},
+		"registry":    {State: "unverified", Message: "当前未接管系统代理"},
+		"systemProxy": {State: "unverified", Message: "等待登录用户核验系统实际代理"},
+		"dns":         {State: "unverified", Message: "尚未独立验证 DNS"},
+		"tls":         {State: "unverified", Message: "尚未检查目标 TLS 握手"},
+		"https":       {State: "unverified", Message: "尚未检查实际 HTTPS 转发"},
+		"tunRouting":  {State: "unverified", Message: "尚未独立验证 TUN 路由"},
+		"tunDNS":      {State: "unverified", Message: "尚未独立验证 TUN DNS"},
+	}
+	state := "disconnected"
+	if info.CoreRunning {
+		state = "connected"
+		for key, check := range s.diagnostics {
+			checks[key] = check
+		}
+		checks["core"] = engine.Check{State: "passed", Message: "内核运行中；不代表网络已验证"}
+		if info.CaptureMode != "tun" {
+			key, err := s.key()
+			if err != nil {
+				checks["registry"] = engine.Check{State: "failed", Code: "registry_read_failed", Message: "用户代理设置读取失败"}
+			} else {
+				values, err := (registryStore{key}).Read()
+				key.Close()
+				if err == nil && values.Enable == 1 && values.Server == net.JoinHostPort("127.0.0.1", strconv.Itoa(info.ListenPort)) && values.PAC == "" {
+					checks["registry"] = engine.Check{State: "passed", Message: "注册表代理指向本次监听端口"}
+				} else {
+					checks["registry"] = engine.Check{State: "failed", Code: "proxy_mismatch", Message: "系统代理配置与当前连接不一致"}
+				}
+			}
+		}
+	} else {
+		s.checkedAt = ""
+	}
+	if s.recoveryErr {
+		state = "recoveryRequired"
+	}
+	b, _ := json.Marshal(struct {
+		engine.RuntimeInfo
+		State       string                  `json:"state"`
+		Diagnostics map[string]engine.Check `json:"diagnostics"`
+		CheckedAt   string                  `json:"checkedAt,omitempty"`
+	}{info, state, checks, s.checkedAt})
+	return string(b)
 }
 func (s *service) key() (registry.Key, error) {
 	return registry.OpenKey(registry.USERS, s.sid+`\Software\Microsoft\Windows\CurrentVersion\Internet Settings`, registry.QUERY_VALUE|registry.SET_VALUE)

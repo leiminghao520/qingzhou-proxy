@@ -44,6 +44,61 @@ class AppModel extends ChangeNotifier {
   bool _polling = false;
   bool _disposed = false;
   DateTime? _lastSchedule;
+  int _diagnosticGeneration = 0;
+  bool get supportsDiagnostics => capabilities['diagnostics'] == true;
+  Json get diagnosticResults => status['diagnostics'] is Map
+      ? Map<String, dynamic>.from(status['diagnostics'] as Map)
+      : {};
+  String diagnosticState(String stage) {
+    final result = diagnosticResults[stage];
+    return result is Map ? result['state']?.toString() ?? 'unverified' : 'unverified';
+  }
+
+  String get networkSummary {
+    if (!connected) return '网络尚未检测';
+    final results = diagnosticResults;
+    if (results.values.any((value) => value is Map && value['state'] == 'failed')) {
+      return '网络检测失败，请在设置中查看诊断';
+    }
+    if (diagnosticState('https') != 'passed') return '网络尚未验证，可在设置中运行诊断';
+    final mode = status['captureMode'] ?? catalog.state['captureMode'];
+    if (mode == 'tun' || mode == 'compatible') {
+      return '本地代理 HTTPS 检查通过；TUN 路由与 DNS 尚未验证';
+    }
+    return '本地代理 HTTPS 检查通过；浏览器接管仍需实际验证';
+  }
+
+  Future<void> runDiagnostics() async {
+    if (!supportsDiagnostics || !connected) return;
+    final generation = _diagnosticGeneration;
+    try {
+      final report = await runtime.query('/diagnostics');
+      if (_disposed || generation != _diagnosticGeneration || !connected) return;
+      if (report['diagnostics'] is! Map) {
+        throw const FormatException('诊断响应不完整');
+      }
+      status = {...status, ...report};
+    } catch (_) {
+      if (_disposed || generation != _diagnosticGeneration || !connected) return;
+      // 检测通信失败不代表核心停止，且不能沿用上一次成功结果。
+      status = {
+        ...status,
+        'diagnostics': {
+          'service': {
+            'state': 'failed',
+            'code': 'diagnostics_unavailable',
+            'message': '诊断服务通信失败，请重试',
+          },
+        },
+      };
+    }
+    _notify();
+  }
+
+  void _invalidateDiagnostics() {
+    _diagnosticGeneration++;
+    status = {...status}..remove('diagnostics')..remove('checkedAt');
+  }
   AppModel(this.runtime, this.repository, {Catalog? initial})
     : catalog = initial ?? Catalog.empty(mobile: !Platform.isWindows);
   bool get connected => status['state'] == 'connected';
@@ -98,6 +153,7 @@ class AppModel extends ChangeNotifier {
     secrets = Map.of(secrets)
       ..removeWhere((key, _) => !next.credentialRefs.contains(key));
     final wasConnected = connected;
+    _invalidateDiagnostics();
     final previous = catalog;
     final oldSecrets = credentials;
     if (wasConnected) {
@@ -140,6 +196,7 @@ class AppModel extends ChangeNotifier {
   }
 
   Future<void> toggle() async {
+    _invalidateDiagnostics();
     if (connected) {
       await runtime.stop();
       status = {'state': 'disconnected'};
@@ -150,24 +207,45 @@ class AppModel extends ChangeNotifier {
       await runtime.validate(request);
       await runtime.start(request);
       status = await runtime.status();
+      if (supportsDiagnostics) await runDiagnostics();
     }
   }
 
   Future<void> recover() async {
+    _invalidateDiagnostics();
     await runtime.recover();
     status = await runtime.status();
+  }
+
+  Future<void> prepareToExit() async {
+    _invalidateDiagnostics();
+    try {
+      await runtime.stop();
+    } catch (_) {
+      // 停止可能已完成而响应或通知失败，重试幂等恢复后核验实际状态。
+      await runtime.recover();
+    }
+    status = await runtime.status();
+    if (status['state'] != 'disconnected' || status['coreRunning'] == true) {
+      throw const FormatException('网络恢复尚未完成，服务尚未确认安全断开，请重试恢复网络');
+    }
+    samples.clear();
+    connections = null;
   }
 
   Future<void> poll() async {
     if (_polling || !ready) return;
     _polling = true;
+    final generation = _diagnosticGeneration;
     try {
       final latest = await runtime.status();
       // 操作或确认框打开期间仍发送心跳，避免服务误判界面退出。
-      if (busy) return;
+      if (busy || generation != _diagnosticGeneration) return;
       status = latest;
       if (connected) {
-        connections = await runtime.query('/connections');
+        final latestConnections = await runtime.query('/connections');
+        if (busy || generation != _diagnosticGeneration) return;
+        connections = latestConnections;
         samples.add({
           'at': DateTime.now().millisecondsSinceEpoch,
           'upload': connections?['uploadTotal'],
@@ -181,7 +259,7 @@ class AppModel extends ChangeNotifier {
         samples.clear();
       }
     } catch (_) {
-      if (!busy) {
+      if (!busy && generation == _diagnosticGeneration) {
         connections = null;
         status = {'state': 'unavailable'};
       }

@@ -3,7 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:qingzhou/app_model.dart';
 import 'package:qingzhou/main.dart';
 import 'package:qingzhou/domain/importer.dart';
-import 'app_model_test.dart' show FakeRuntime, MemoryRepository;
+import 'app_model_test.dart' show FakeRuntime, MemoryRepository, DiagnosticRuntime;
 
 class InterfacePreferences extends MemoryRepository {
   Map<String, dynamic> saved = {};
@@ -18,6 +18,34 @@ class InterfacePreferences extends MemoryRepository {
 }
 
 void main() {
+  for (final result in ['failed', 'unverified']) {
+    testWidgets('Windows 诊断 $result 不显示连接成功', (tester) async {
+      tester.view.physicalSize = const Size(1280, 1600);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final runtime = DiagnosticRuntime();
+      runtime.report['diagnostics'] = {
+        'https': {'state': result, 'message': '实网检查结果'},
+      };
+      final m = AppModel(runtime, MemoryRepository());
+      await m.initialize();
+      await m.toggle();
+      await tester.pumpWidget(QingzhouApp(model: m));
+      await tester.pumpAndSettle();
+      expect(find.text('代理核心已运行'), findsOneWidget);
+      expect(find.text('连接已建立'), findsNothing);
+      expect(find.textContaining(result == 'failed' ? '检测失败' : '尚未验证'), findsOneWidget);
+      await tester.tap(find.text('设置').last);
+      await tester.pumpAndSettle();
+      expect(find.text('运行分阶段网络诊断'), findsOneWidget);
+      expect(find.textContaining('本地代理 HTTPS 请求：${result == 'failed' ? '失败' : '未验证'}'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+      m.dispose();
+    });
+  }
+
   for (final width in [390.0, 800.0, 1280.0]) {
     testWidgets('顶部模式切换可发现、保留页面并持久化：$width', (tester) async {
       tester.view.physicalSize = Size(width, 900);

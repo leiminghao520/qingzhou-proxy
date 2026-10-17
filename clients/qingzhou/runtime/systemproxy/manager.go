@@ -68,7 +68,14 @@ func (m Manager) Capture(port int) error {
 	if err = m.Journal.Create(data); err != nil {
 		return err
 	}
-	return m.Registry.Write(after)
+	if err = m.Registry.Write(after); err != nil {
+		return err
+	}
+	actual, err := m.Registry.Read()
+	if err != nil || actual != after {
+		return errors.New("系统代理写入后核验失败，恢复记录已保留")
+	}
+	return nil
 }
 
 func (m Manager) Recover() error {
@@ -107,6 +114,10 @@ func (m Manager) Recover() error {
 	}
 	if err = m.Registry.Write(saved.Before); err != nil {
 		return err
+	}
+	actual, err := m.Registry.Read()
+	if err != nil || actual != saved.Before {
+		return errors.New("系统代理恢复后核验失败，恢复记录已保留")
 	}
 	return m.Journal.Clear()
 }

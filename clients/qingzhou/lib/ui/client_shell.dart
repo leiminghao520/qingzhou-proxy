@@ -5,6 +5,7 @@ class ClientShell extends StatelessWidget {
   final int selected;
   final bool professional, busy, connected;
   final String? error;
+  final String? connectionLabel;
   final Widget child;
   final ValueChanged<int> onNavigate;
   final ValueChanged<bool> onModeChanged;
@@ -19,6 +20,7 @@ class ClientShell extends StatelessWidget {
     required this.busy,
     required this.connected,
     required this.error,
+    this.connectionLabel,
     required this.child,
     required this.onNavigate,
     required this.onModeChanged,
@@ -159,7 +161,7 @@ class ClientShell extends StatelessWidget {
                     Icon(connected ? Icons.check_circle_outline : Icons.radio_button_unchecked,
                         size: 16, color: connected ? const Color(0xff28a579) : colors.onSurfaceVariant),
                     const SizedBox(width: 8),
-                    Text(connected ? '连接已建立' : '等待连接', style: TextStyle(color: colors.onSurfaceVariant, fontSize: 12)),
+                    Text(connected ? (connectionLabel ?? '连接已建立') : '等待连接', style: TextStyle(color: colors.onSurfaceVariant, fontSize: 12)),
                   ]),
                 ),
               ]),

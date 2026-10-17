@@ -5,6 +5,11 @@ python tool/verify_source_bundle.py
 if ($LASTEXITCODE -ne 0) { throw '源码包校验失败' }
 python tool/sync_version.py
 if ($LASTEXITCODE -ne 0) { throw '版本生成失败' }
+Push-Location runtime
+try {
+    go test -tags 'with_gvisor,with_quic,with_utls,with_clash_api' -ldflags=-checklinkname=0 ./systemproxy ./engine ./config ./health ./cmd/qingzhou-service
+    if ($LASTEXITCODE -ne 0) { throw 'Windows 转发、代理恢复与诊断回归失败' }
+} finally { Pop-Location }
 python tool/build_runtime.py windows
 if ($LASTEXITCODE -ne 0) { throw '服务构建失败' }
 flutter pub get --enforce-lockfile

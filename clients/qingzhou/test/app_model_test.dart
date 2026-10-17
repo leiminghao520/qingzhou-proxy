@@ -78,7 +78,109 @@ class FakeRuntime implements Runtime {
   Future<void> select(String target) async {}
 }
 
+class DiagnosticRuntime extends FakeRuntime {
+  bool diagnosticsEnabled = true, failDiagnostics = false;
+  Future<Json>? pendingReport;
+  Json report = {
+    'state': 'connected',
+    'coreRunning': true,
+    'captureMode': 'systemProxy',
+    'diagnostics': {'https': {'state': 'passed', 'message': '检查通过'}},
+  };
+  final diagnosticPaths = <String>[];
+  @override
+  Future<Json> capabilities() async => {'diagnostics': diagnosticsEnabled};
+  @override
+  Future<Json> query(String path) async {
+    diagnosticPaths.add(path);
+    if (failDiagnostics) throw StateError('secret transport error');
+    if (pendingReport != null) return pendingReport!;
+    return report;
+  }
+}
+
 void main() {
+  test('诊断等待时断开不能恢复旧的已连接状态', () async {
+    final runtime = DiagnosticRuntime();
+    final m = AppModel(runtime, MemoryRepository());
+    await m.initialize();
+    await m.toggle();
+    final pending = Completer<Json>();
+    runtime.pendingReport = pending.future;
+    final checking = m.runDiagnostics();
+    await m.toggle();
+    pending.complete(runtime.report);
+    await checking;
+    expect(m.connected, false);
+    expect(m.diagnosticResults, isEmpty);
+    m.dispose();
+  });
+  test('不完整诊断响应不能保留先前成功结果', () async {
+    final runtime = DiagnosticRuntime();
+    final m = AppModel(runtime, MemoryRepository());
+    await m.initialize();
+    await m.toggle();
+    runtime.report = {'state': 'connected'};
+    await m.runDiagnostics();
+    expect(m.connected, true);
+    expect(m.diagnosticState('https'), 'unverified');
+    expect(m.diagnosticState('service'), 'failed');
+    m.dispose();
+  });
+  test('支持诊断时连接自动检测，失败不停止已运行核心', () async {
+    final runtime = DiagnosticRuntime();
+    runtime.report['diagnostics'] = {
+      'https': {'state': 'failed', 'code': 'proxy_connect_failed', 'message': '请求失败'},
+    };
+    final m = AppModel(runtime, MemoryRepository());
+    await m.initialize();
+    await m.toggle();
+    expect(runtime.diagnosticPaths, ['/diagnostics']);
+    expect(m.connected, true);
+    expect(m.networkSummary, contains('检测失败'));
+    expect(runtime.events, ['validate', 'start']);
+    m.dispose();
+  });
+  test('无诊断能力保留原连接行为', () async {
+    final runtime = DiagnosticRuntime()..diagnosticsEnabled = false;
+    final m = AppModel(runtime, MemoryRepository());
+    await m.initialize();
+    await m.toggle();
+    await m.runDiagnostics();
+    expect(m.connected, true);
+    expect(runtime.diagnosticPaths, isEmpty);
+    m.dispose();
+  });
+  test('连接状态不能代表网络通过，TUN 请求通过不代表路由与 DNS 通过', () async {
+    final runtime = DiagnosticRuntime();
+    final m = AppModel(runtime, MemoryRepository());
+    await m.initialize();
+    m.status = {'state': 'connected'};
+    expect(m.networkSummary, contains('尚未验证'));
+    runtime.report['captureMode'] = 'tun';
+    await m.runDiagnostics();
+    expect(m.networkSummary, contains('TUN 路由与 DNS 尚未验证'));
+    runtime.failDiagnostics = true;
+    await m.runDiagnostics();
+    expect(m.connected, true);
+    expect(m.diagnosticState('https'), 'unverified');
+    expect(m.diagnosticState('service'), 'failed');
+    expect(m.networkSummary, contains('检测失败'));
+    expect(m.status.toString(), isNot(contains('secret transport error')));
+    m.dispose();
+  });
+  test('更改配置立即丢弃旧的检测成功结果', () async {
+    final runtime = DiagnosticRuntime();
+    final m = AppModel(runtime, MemoryRepository());
+    await m.initialize();
+    await m.toggle();
+    expect(m.diagnosticState('https'), 'passed');
+    await m.change((c) => c.state['mode'] = 'global');
+    expect(m.diagnosticState('https'), 'unverified');
+    expect(m.networkSummary, contains('尚未验证'));
+    m.dispose();
+  });
+
   test('确认框等待期间继续发送心跳且不污染事务状态', () async {
     final runtime = FakeRuntime();
     final m = AppModel(runtime, MemoryRepository());

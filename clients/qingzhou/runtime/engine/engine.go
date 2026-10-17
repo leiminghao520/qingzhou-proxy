@@ -77,17 +77,17 @@ func (e *Engine) Start(raw string) error {
 	opts, err := sj.UnmarshalExtendedContext[option.Options](ctx, data)
 	if err != nil {
 		cancel()
-		return errors.New("核心配置解析失败")
+		return stageError("核心配置解析", err)
 	}
 	core, err := box.New(box.Options{Context: ctx, Options: opts})
 	if err != nil {
 		cancel()
-		return errors.New("核心配置无效")
+		return stageError("核心创建", err)
 	}
 	if err = core.Start(); err != nil {
 		core.Close()
 		cancel()
-		return errors.New("核心启动失败")
+		return stageError("核心启动", err)
 	}
 	bootstrapCtx, bootstrapCancel := context.WithTimeout(context.Background(), 25*time.Second)
 	next, manager, err := health.Bootstrap(bootstrapCtx, r, health.API{Control: control})
@@ -110,17 +110,17 @@ func (e *Engine) Start(raw string) error {
 		opts, err = sj.UnmarshalExtendedContext[option.Options](ctx, data)
 		if err != nil {
 			cancel()
-			return err
+			return stageError("回退配置解析", err)
 		}
 		core, err = box.New(box.Options{Context: ctx, Options: opts})
 		if err != nil {
 			cancel()
-			return err
+			return stageError("回退核心创建", err)
 		}
 		if err = core.Start(); err != nil {
 			core.Close()
 			cancel()
-			return err
+			return stageError("回退核心启动", err)
 		}
 	}
 	if r.HTTPCompatibility {
@@ -134,7 +134,7 @@ func (e *Engine) Start(raw string) error {
 		if err != nil {
 			core.Close()
 			cancel()
-			return errors.New("HTTP 兼容入口启动失败")
+			return stageError("HTTP 兼容入口启动", err)
 		}
 		e.compat = compat
 	}
@@ -258,11 +258,11 @@ func Validate(raw string) error {
 	ctx = box.Context(ctx, include.InboundRegistry(), include.OutboundRegistry(), include.EndpointRegistry(), include.DNSTransportRegistry(), include.ServiceRegistry(), include.CertificateProviderRegistry())
 	opts, err := sj.UnmarshalExtendedContext[option.Options](ctx, data)
 	if err != nil {
-		return errors.New("核心配置解析失败")
+		return stageError("核心配置校验解析", err)
 	}
 	core, err := box.New(box.Options{Context: ctx, Options: opts})
 	if err != nil {
-		return errors.New("核心配置无效")
+		return stageError("核心配置校验创建", err)
 	}
 	return core.Close()
 }
