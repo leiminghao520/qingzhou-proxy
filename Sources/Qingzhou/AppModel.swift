@@ -81,7 +81,10 @@ import QingzhouKit
     private var sessionLockFD:Int32 = -1
     private var pendingSubscription:Subscription?
     private var started=false
-    private var wakeObserver:NSObjectProtocol?
+    private var powerObservers:[NSObjectProtocol]=[]
+    private(set) var healthPower=HealthPowerState()
+    var healthDisplayAwake:() -> Bool = {CGDisplayIsAsleep(CGMainDisplayID())==0}
+    var healthPowerUptime:() -> TimeInterval = {TimeInterval(DispatchTime.now().uptimeNanoseconds)/1_000_000_000}
     private var healthRefreshPending=false
     var locked:Bool {busy || measuring || loadingFailed || recovering || stopRequested || networkReconnecting}
     var selected:Node? {if case .node(let id)=state.activePolicy {return state.nodes.first{$0.id==id}};return nil}
@@ -110,7 +113,18 @@ import QingzhouKit
         proxy.onNetworkChange={ [weak self] in guard let self,self.connection == .connected || self.connection == .connecting else{return};self.networkChanged=true;self.cancelMeasurement();self.drainPendingDisconnect() }
         proxy.onEnvironmentChange={ [weak self] in self?.latencyInvalidatedAt=Date();self?.scheduleHealthRefresh() }
         proxy.startMonitoring()
-        wakeObserver=NSWorkspace.shared.notificationCenter.addObserver(forName:NSWorkspace.didWakeNotification,object:nil,queue:.main){[weak self] _ in Task{@MainActor in self?.latencyInvalidatedAt=Date();self?.scheduleHealthRefresh()}}
+        for (name,event) in [(NSWorkspace.willSleepNotification,HealthPowerEvent.willSleep),
+                             (NSWorkspace.didWakeNotification,.didWake),
+                             (NSWorkspace.screensDidSleepNotification,.screensSleep),
+                             (NSWorkspace.screensDidWakeNotification,.screensWake)] {
+            powerObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName:name,object:nil,queue:.main){[weak self] _ in
+                Task{@MainActor in
+                    self?.handleHealthPowerEvent(event)
+                    // 补偿屏幕通知缺失或先后顺序不同；后台维护唤醒时实际屏幕仍处于睡眠。
+                    if case .didWake=event,CGDisplayIsAsleep(CGMainDisplayID())==0 {self?.handleHealthPowerEvent(.screensWake)}
+                }
+            })
+        }
         shortcuts.action={ [weak self] in Task{@MainActor in guard let self else{return};if self.connection == .connected{await self.disconnect()}else{await self.connect()}}}
         synchronizeShortcut()
         // 只有持有实例锁的应用才清理自己上次遗留的敏感运行文件。
@@ -319,7 +333,7 @@ import QingzhouKit
     private func disconnectInternal() async throws {stopTelemetry();connection = .disconnecting;do{try await capture.stop()}catch{recoveryPending=true;connection = .error;throw error};recoveryPending=proxy.hasRecovery;connection = .disconnected;connectivityResults=[];reachability="尚未检测";log("本次连接已停止；本地代理恢复完成，辅助服务是否恢复取决于本次接管状态")}
     func disconnect() async {
         guard canStop else{return}
-        stopTelemetry();cancelMeasurement();stopRequested=true
+        log("用户请求断开连接");stopTelemetry();cancelMeasurement();stopRequested=true
         drainPendingDisconnect()
     }
     func recover() async {
@@ -549,10 +563,35 @@ import QingzhouKit
     func setCompact(_ value:Bool){guard !locked else{return};do{var next=state;next.compactNodes=value;try persist(next)}catch{report(error)}}
     func batchFavorite(_ ids:Set<UUID>,value:Bool){guard !locked else{return};do{var next=state;if value{next.favorites.formUnion(ids)}else{next.favorites.subtract(ids)};try persist(next)}catch{report(error)}}
     func batchDelete(_ ids:Set<UUID>) async{guard !locked,let store else{return};busy=true;defer{busy=false};do{try await apply(store.prepareDeleteNodes(ids))}catch{report(error)}}
+    func handleHealthPowerEvent(_ event:HealthPowerEvent) {
+        guard healthPower.receive(event,uptime:healthPowerUptime()) else{return}
+        cancelHealthRefresh()
+        failedHealthCycles=0;healthFailures=HealthFailureCounter();fallbackStates=[:]
+        latencyInvalidatedAt=Date()
+        guard connection == .connected else{return}
+        connectivityResults=ConnectivityResult.pending
+        if healthPower.suspended {
+            monitor.health="睡眠期间暂停节点健康检查"
+            log("电源状态变化：暂停节点健康检查，清除连续失败计数；后台唤醒不判定节点失效")
+        } else {
+            monitor.health="唤醒后等待网络稳定"
+            log("系统与屏幕已唤醒，等待 15 秒运行时间后重新检查节点")
+            scheduleHealthRefresh()
+        }
+    }
+    func healthResultIsCurrent(_ generation:UUID)->Bool {
+        healthPower.generation==generation && healthPower.canProbe(uptime:healthPowerUptime()) && healthDisplayAwake()
+    }
+    func recordNodeHealth(_ statuses:[ProbeStatus],powerGeneration:UUID)->Bool {
+        guard healthResultIsCurrent(powerGeneration) else{return false}
+        return healthFailures.update(statuses)
+    }
     private func cancelHealthRefresh() {healthScheduler.cancel();healthChecking=false;connectivityEpoch=UUID()}
     private func scheduleHealthRefresh(delay:UInt64=1_000_000_000) {
         guard connection == .connected else{return}
+        guard !healthPower.suspended else{healthRefreshPending=true;return}
         guard !locked,let client=api else{healthRefreshPending=true;return}
+        let delay=max(delay,UInt64(healthPower.remaining(uptime:healthPowerUptime())*1_000_000_000))
         healthRefreshPending=false;let token=epoch
         healthScheduler.schedule(delay:delay) { [weak self] in
             guard let self,self.epoch==token,!self.locked else{return}
@@ -592,36 +631,37 @@ import QingzhouKit
         do {guard !enabled || state.shadowrocket != nil else{throw ProxyError("请先导入 HTTP 兼容配置")};var next=state;next.httpCompatibilityEnabled=enabled;try await apply(store.prepareChange(next))}catch{report(error)}
     }
     private func healthCheck(_ client:CoreAPIClient,token:UUID) async {
-        guard !locked,epoch==token,connection == .connected,state.mode != .direct else{return};healthChecking=true;defer{if epoch==token{healthChecking=false}}
+        let powerGeneration=healthPower.generation
+        guard !locked,epoch==token,connection == .connected,state.mode != .direct,healthResultIsCurrent(powerGeneration) else{return};healthChecking=true;defer{if epoch==token,healthPower.generation==powerGeneration{healthChecking=false}}
         let relevant=healthNodeIDs()
         let nodes=state.nodes.filter{relevant.contains($0.id)};var results:[UUID:Bool]=[:];var statuses:[ProbeStatus]=[]
         await withTaskGroup(of:(UUID,ProbeStatus).self){group in var cursor=0;func enqueue(){let id=nodes[cursor].id;cursor+=1;group.addTask{(id,await client.probe(id))}};for _ in 0..<min(4,nodes.count){enqueue()};while let (id,status)=await group.next(){guard !Task.isCancelled else{group.cancelAll();break};statuses.append(status);switch status{case .available:results[id]=true;case .unavailable:results[id]=false;case .unknown:break};if cursor<nodes.count{enqueue()}}}
-        guard epoch==token,!Task.isCancelled,!locked else{return}
+        guard epoch==token,!Task.isCancelled,!locked,healthResultIsCurrent(powerGeneration) else{return}
         // 控制通道和节点健康独立评估，未知节点不阻断其他回退组的判定。
-        do {_ = try await client.proxies();guard epoch==token,!Task.isCancelled,!locked else{return};failedHealthCycles=0}
+        do {_ = try await client.proxies();guard epoch==token,!Task.isCancelled,!locked,healthResultIsCurrent(powerGeneration) else{return};failedHealthCycles=0}
         catch {
-            guard epoch==token,!Task.isCancelled,!locked else{return};monitor.health="节点健康暂无法核对";failedHealthCycles+=1
+            guard epoch==token,!Task.isCancelled,!locked,healthResultIsCurrent(powerGeneration) else{return};monitor.health="节点健康暂无法核对";failedHealthCycles+=1
             log("健康检查：控制接口失败 category="+ConnectivityResult.category(error)+" consecutive=\(failedHealthCycles)")
-            if failedHealthCycles>=2 {busy=true;defer{busy=false};do{try await disconnectInternal();connection = .error;errorMessage="核心控制接口连续不可达，已恢复网络"}catch{report(error)}}
+            if failedHealthCycles>=2 {log("自动断开原因：清醒状态下核心控制接口连续不可达");busy=true;defer{busy=false};do{try await disconnectInternal();connection = .error;errorMessage="核心控制接口连续不可达，已恢复网络"}catch{report(error)}}
             return
         }
         monitor.health = statuses.contains(where:{if case .unknown=$0{return true};return false}) ? "节点健康部分无法确定" : statuses.contains(where:{if case .unavailable=$0{return true};return false}) ? "部分节点检测失败" : nil
-        if healthFailures.update(statuses) {busy=true;defer{busy=false};do{try await disconnectInternal();connection = .error;errorMessage="全部节点不可用，代理已失效，原网络已恢复"}catch{report(error)};return}
+        if recordNodeHealth(statuses,powerGeneration:powerGeneration) {log("自动断开原因：清醒状态下全部相关节点连续两轮不可用");busy=true;defer{busy=false};do{try await disconnectInternal();connection = .error;errorMessage="全部节点不可用，代理已失效，原网络已恢复"}catch{report(error)};return}
         for group in state.groups where group.kind == .fallback && group.members.contains(where:{if case .node(let id)=$0{return relevant.contains(id)};return false}) {
-            guard epoch==token,!Task.isCancelled,!locked else{return}
+            guard epoch==token,!Task.isCancelled,!locked,healthResultIsCurrent(powerGeneration) else{return}
             let priority=group.members.compactMap{ref -> UUID? in if case .node(let id)=ref{return id};return nil};let currentTag=proxyInfo[PolicyReference.group(group.id).tag]?.now
             let current=priority.first{PolicyReference.node($0).tag==currentTag} ?? {if case .node(let id)=group.selected{return id};return nil}()
             var controller=fallbackStates[group.id] ?? FallbackController();let decision=controller.evaluate(priority:priority,current:current,results:results);fallbackStates[group.id]=controller
-            if decision.unavailable {monitor.health="回退组 \(group.name) 全部不可用";if state.activePolicy == .group(group.id){busy=true;defer{busy=false};do{try await disconnectInternal();connection = .error;errorMessage="回退组全部不可用，代理已失效，原网络已恢复"}catch{report(error)}};continue}
-            if let selected=decision.selected,selected != current {do{try await client.select(.node(selected),group:PolicyReference.group(group.id).tag);guard epoch==token,!Task.isCancelled,!locked else{return};log("优先级回退已切换，已有连接保留")}catch{report(error)}}
+            if decision.unavailable {monitor.health="回退组 \(group.name) 全部不可用";if state.activePolicy == .group(group.id){log("自动断开原因：清醒状态下当前回退组全部不可用");busy=true;defer{busy=false};do{try await disconnectInternal();connection = .error;errorMessage="回退组全部不可用，代理已失效，原网络已恢复"}catch{report(error)}};continue}
+            if let selected=decision.selected,selected != current {do{try await client.select(.node(selected),group:PolicyReference.group(group.id).tag);guard epoch==token,!Task.isCancelled,!locked,healthResultIsCurrent(powerGeneration) else{return};log("优先级回退已切换，已有连接保留")}catch{report(error)}}
         }
     }
     private func checkConnectivity() async {
-        guard !locked,!Task.isCancelled,let api else{return};let token=epoch;let probeToken=UUID();connectivityEpoch=probeToken
+        guard !locked,!Task.isCancelled,let api else{return};let powerGeneration=healthPower.generation;guard healthResultIsCurrent(powerGeneration) else{return};let token=epoch;let probeToken=UUID();connectivityEpoch=probeToken
         // 后台复查保留上次完成的结果，避免每轮检测都闪回“检测中”。
         if connectivityResults.isEmpty {connectivityResults=ConnectivityResult.pending}
         let results=await ConnectivityProbe.all(port:state.captureMode.usesTunnel ? nil:state.listenPort,client:api,mode:state.mode)
-        guard epoch==token,connectivityEpoch==probeToken,connection == .connected,!Task.isCancelled,!locked else{return}
+        guard epoch==token,connectivityEpoch==probeToken,connection == .connected,!Task.isCancelled,!locked,healthResultIsCurrent(powerGeneration) else{return}
         connectivityResults=results
         reachability=ConnectivityResult.combinedSummary(results)
         for result in results {log(result.summary+(result.milliseconds.map{" 耗时=\($0)ms"} ?? ""))}

@@ -58,6 +58,48 @@ import QingzhouKit
             try await NetworkPreparationRetry.run(operation:{throw NetworkEnvironmentNotReady("变化")},shouldContinue:{true},wait:{_ in throw CancellationError()})
             check(false,"等待任务取消必须退出")
         } catch {check(error is CancellationError,"任务取消直接退出重试")}
+        model.healthDisplayAwake={true}
+        var powerTime=100.0
+        model.healthPowerUptime={powerTime}
+        let beforeSleep=model.healthPower.generation
+        check(!model.recordNodeHealth([.unavailable],powerGeneration:beforeSleep),"清醒状态第一轮失败不立即断开")
+        model.handleHealthPowerEvent(.willSleep)
+        check(model.healthPower.suspended && !model.healthResultIsCurrent(beforeSleep),"进入睡眠取消旧结果并挂起健康检查")
+        check(model.connection == .connected && model.canStop,"睡眠保护保留连接和手动停止入口")
+        // 回放从傍晚合盖到夜间开盖；多次维护唤醒都不恢复屏幕健康检查。
+        for wake in [101.0,103,148,150,172,218,220,265] {
+            powerTime=wake
+            model.handleHealthPowerEvent(.didWake)
+            check(!model.recordNodeHealth([.unavailable],powerGeneration:model.healthPower.generation),"后台唤醒失败不能累计为节点失效")
+            model.handleHealthPowerEvent(.willSleep)
+        }
+        powerTime=300
+        model.handleHealthPowerEvent(.didWake)
+        check(model.healthPower.suspended,"系统后台唤醒而屏幕仍睡眠时继续挂起")
+        model.handleHealthPowerEvent(.screensWake)
+        let afterWake=model.healthPower.generation
+        check(!model.healthPower.suspended && !model.healthResultIsCurrent(afterWake),"真正开盖后先等待网络稳定")
+        check(!model.recordNodeHealth([.unavailable],powerGeneration:afterWake),"唤醒宽限期的失败不计数")
+        powerTime=314.999
+        check(!model.healthResultIsCurrent(afterWake),"十五秒运行预算未结束时不能探测")
+        powerTime=315
+        check(model.healthResultIsCurrent(afterWake),"运行预算结束后恢复健康检查")
+        check(!model.healthResultIsCurrent(beforeSleep),"跨越睡眠的旧请求即使晚返回也必须丢弃")
+        check(!model.recordNodeHealth([.unavailable],powerGeneration:afterWake),"睡前和维护唤醒失败不能带到新周期")
+        check(model.recordNodeHealth([.unavailable],powerGeneration:afterWake),"清醒状态真实连续失败仍触发原有停止策略")
+        model.healthDisplayAwake={false}
+        check(!model.healthResultIsCurrent(afterWake),"电源通知尚未送达时也按实际屏幕睡眠状态拒绝旧结果")
+        model.healthDisplayAwake={true}
+        let deadline=model.healthPower.readyAt
+        model.handleHealthPowerEvent(.didWake);model.handleHealthPowerEvent(.screensWake)
+        check(model.healthPower.readyAt==deadline && model.healthPower.generation==afterWake,"重复唤醒通知不能无限延长宽限期")
+        model.handleHealthPowerEvent(.screensSleep)
+        check(!model.recordNodeHealth([.unavailable],powerGeneration:model.healthPower.generation),"仅显示器睡眠同样不能误判节点失效")
+        model.handleHealthPowerEvent(.willSleep)
+        model.handleHealthPowerEvent(.screensWake)
+        check(model.healthPower.suspended,"屏幕先醒但系统尚未唤醒时保持挂起")
+        model.handleHealthPowerEvent(.didWake)
+        check(!model.healthPower.suspended && model.healthPower.readyAt==330,"屏幕先于系统通知时也能完成唤醒和宽限期")
         print("RESULT network_resume_model_assertions=\(assertions) failures=0")
     }
 }
