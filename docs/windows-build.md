@@ -1,6 +1,14 @@
-# Windows 本机构建与验证
+# Windows 安装与构建
 
-本轮暂停 iOS，只推进 Android、Windows 并保留 macOS 兼容。Windows 完整客户端需要在 Windows 10/11 x64 上编译。本机 macOS 只完成服务交叉编译，不能代替 Windows 界面构建和安装验收。
+本轮暂停 iOS，只推进 Android、Windows 并保留 macOS 兼容。
+
+## 普通用户安装
+
+在 GitHub Releases 下载名称以 `windows-x64-setup.exe` 结尾的完整客户端安装包，双击安装；不需要 Flutter、Go、Python 或 Visual Studio。安装会创建桌面与开始菜单快捷方式。网络服务安装时弹出 UAC，界面保持普通用户权限。安装不会自动连接 VPN 或修改代理。
+
+不要直接运行 `qingzhou-service-windows-x64.exe`，它是开发用后台服务，不是图形客户端。安装错误日志位于 `%LOCALAPPDATA%\QingzhouProxy\install.log`。卸载使用 Windows“已安装的应用”，先断开并退出托盘程序；恢复网络失败时会保留程序与记录。
+
+下面的工具链仅供开发者自行构建使用。GitHub 的 Windows 构建任务会编译完整界面、打包运行库，并检查安装、服务通信、窗口显示和卸载；CI 检查不替代真实节点和用户电脑验收。
 
 ## 准备环境
 
