@@ -1,0 +1,56 @@
+name: Windows client installer
+on:
+  push:
+    branches: [codex/android-windows-preview]
+    paths:
+      - '.github/workflows/windows-client.yml'
+      - 'clients/qingzhou/**'
+      - 'Sources/QingzhouKit/BuildVersion.swift'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      PYTHONUTF8: '1'
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.5'
+          cache-dependency-path: clients/qingzhou/runtime/go.sum
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pinned Flutter SDK
+        run: |
+          git clone --depth 1 --branch 3.47.7 https://github.com/flutter/flutter.git "$env:RUNNER_TEMP/flutter"
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter SDK 下载失败' }
+          "$env:RUNNER_TEMP/flutter/bin" >> $env:GITHUB_PATH
+      - name: Build complete Windows client
+        run: |
+          flutter config --enable-windows-desktop --no-analytics
+          flutter doctor -v
+          & clients/qingzhou/tool/build_windows.ps1
+      - name: Package installer
+        run: |
+          & clients/qingzhou/tool/package_windows_installer.ps1
+      - name: Verify installed UI and service
+        run: |
+          & clients/qingzhou/tool/smoke_windows.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-client-results
+          path: |
+            outputs/*.exe
+            outputs/*.zip
+            outputs/*windows*/
+            outputs/windows-evidence/
+          if-no-files-found: warn
+          retention-days: 14
