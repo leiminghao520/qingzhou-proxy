@@ -36,6 +36,7 @@ jobs:
         run: |
           Invoke-WebRequest 'https://raw.githubusercontent.com/google/fonts/main/ofl/notosanssc/NotoSansSC%5Bwght%5D.ttf' -OutFile "$env:RUNNER_TEMP/ui-preview-font.ttf"
           $env:QINGZHOU_PREVIEW_FONT = "$env:RUNNER_TEMP/ui-preview-font.ttf"
+          $env:QINGZHOU_PREVIEW_ICON_FONT = "$env:RUNNER_TEMP/flutter/bin/cache/artifacts/material_fonts/MaterialIcons-Regular.otf"
           flutter config --enable-windows-desktop --no-analytics
           flutter doctor -v
           & clients/qingzhou/tool/build_windows.ps1

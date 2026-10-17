@@ -11,11 +11,16 @@ import 'app_model_test.dart' show FakeRuntime, MemoryRepository;
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setUpAll(() async {
-    final path = Platform.environment['QINGZHOU_PREVIEW_FONT'];
-    if (path != null) {
-      final loader = FontLoader('Microsoft YaHei UI');
-      loader.addFont(File(path).readAsBytes().then(ByteData.sublistView));
-      await loader.load();
+    for (final entry in const {
+      'Microsoft YaHei UI': 'QINGZHOU_PREVIEW_FONT',
+      'MaterialIcons': 'QINGZHOU_PREVIEW_ICON_FONT',
+    }.entries) {
+      final path = Platform.environment[entry.value];
+      if (path != null) {
+        final loader = FontLoader(entry.key);
+        loader.addFont(File(path).readAsBytes().then(ByteData.sublistView));
+        await loader.load();
+      }
     }
   });
   testWidgets('桌面明暗主题和两种模式可渲染', (tester) async {
