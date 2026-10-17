@@ -212,15 +212,26 @@ class _HomeState extends State<Home> {
           'disconnected': '未连接',
           'error': '连接异常',
           'unavailable': '运行状态不可用',
+          'recoveryRequired': '需要恢复网络',
         }[state] ??
         '$state';
-    final selected = m.catalog.nodes
-        .where((n) => n['id'] == m.catalog.state['selectedID'])
-        .firstOrNull;
+    final policy = m.catalog.state['selectedPolicy'];
+    final selectedPolicy = policy == null ? null : runtimeReference(policy);
+    final selectedID = selectedPolicy?['kind'] == 'node'
+        ? selectedPolicy!['id']
+        : m.catalog.state['selectedID'];
+    final selected = m.catalog.nodes.where((n) => n['id'] == selectedID).firstOrNull;
+    final group = (m.catalog.state['groups'] as List? ?? [])
+        .where((g) => g['id'] == selectedPolicy?['id']).firstOrNull;
+    final nodeName = selectedPolicy?['kind'] == 'group'
+        ? group?['name'] as String? ?? '策略组'
+        : selectedPolicy?['kind'] == 'direct' || m.catalog.state['mode'] == 'direct'
+            ? '直接连接'
+            : selected?['name'] as String? ?? (m.catalog.nodes.isEmpty ? '尚未添加线路' : '自动选择线路');
     return ConnectionDashboard(
       connected: m.connected,
       stateLabel: label,
-      nodeName: selected?['name'] as String? ?? '自动选择线路',
+      nodeName: nodeName,
       captureLabel: const {'tun': 'VPN / TUN', 'systemProxy': '系统代理', 'compatible': '组合接管'}[m.catalog.state['captureMode']] ?? '未设置',
       proxyMode: m.catalog.state['mode'] as String? ?? 'rule',
       coreVersion: m.capabilities['coreVersion'] as String? ?? '未就绪',

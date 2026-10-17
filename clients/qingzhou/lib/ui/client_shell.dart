@@ -74,20 +74,14 @@ class ClientShell extends StatelessWidget {
             content: Text(error!),
             actions: [TextButton(onPressed: onDismissError, child: const Text('关闭'))],
           ),
-        Expanded(
-          child: ListView(
-            key: const PageStorageKey('client-content'),
-            padding: EdgeInsets.all(wide ? 32 : 16),
-            children: [
-              Align(
-                alignment: Alignment.topCenter,
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 1020),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      if (wide) ...[
-                        Row(children: [
+        if (wide)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(32, 28, 32, 0),
+            child: Align(
+              alignment: Alignment.topCenter,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 1020),
+                child: Row(children: [
                           Expanded(child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
@@ -107,8 +101,21 @@ class ClientShell extends StatelessWidget {
                             icon: const Icon(Icons.add),
                           ),
                         ]),
-                        const SizedBox(height: 28),
-                      ],
+              ),
+            ),
+          ),
+        Expanded(
+          child: ListView(
+            key: const PageStorageKey('client-content'),
+            padding: EdgeInsets.all(wide ? 32 : 16),
+            children: [
+              Align(
+                alignment: Alignment.topCenter,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 1020),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
                       child,
                       const SizedBox(height: 12),
                     ],

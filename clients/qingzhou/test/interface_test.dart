@@ -33,6 +33,8 @@ void main() {
       expect(find.byKey(const ValueKey('interface-mode-switch')), findsOneWidget);
       await tester.tap(find.text('设置').last);
       await tester.pumpAndSettle();
+      await tester.drag(find.byKey(const PageStorageKey('client-content')), const Offset(0, -1000));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('专业'));
       await tester.pumpAndSettle();
       expect(m.preferences['professional'], true);
