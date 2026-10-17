@@ -51,7 +51,9 @@ jobs:
           (root / 'WINDOWS-SHA256SUMS').write_text(''.join(hashlib.sha256((root / name).read_bytes()).hexdigest() + '  ' + name + '\n' for name in names))
           print('INSTALLER_HASH_AND_SMOKE_RECORD_PASS', digest)
           PY
-          gh release create v0.8.11-windows-preview.1 --draft --prerelease --latest=false --target 7f766bd382e7a1d171d9007c3ea7ece439c8f5ce --title '轻舟代理 0.8.11 Windows 界面预览版' --notes-file docs/windows-interface-refresh.md
+          if ! gh release view v0.8.11-windows-preview.1 >/dev/null 2>&1; then
+            gh release create v0.8.11-windows-preview.1 --draft --prerelease --latest=false --target 7f766bd382e7a1d171d9007c3ea7ece439c8f5ce --title '轻舟代理 0.8.11 Windows 界面预览版' --notes-file docs/windows-interface-refresh.md
+          fi
           gh release upload v0.8.11-windows-preview.1 artifacts/qingzhou-0.8.11-windows-x64-setup.exe artifacts/windows-installer-manifest.json artifacts/windows-install-evidence.zip artifacts/WINDOWS-INSTALL-VERIFICATION.md artifacts/WINDOWS-SHA256SUMS
           gh release view v0.8.11-windows-preview.1 --json assets > remote-assets.json
           python3 - <<'PY'
