@@ -11,6 +11,7 @@ struct HelperProxyRecord:Codable {
 }
 extension Service {
     func verifyNoOwnedProxyEndpoint(_ records:[HelperProxyRecord]) throws {
+        guard !records.isEmpty else{return}
         let preferences=try proxyPreferences();defer{SCPreferencesUnlock(preferences)}
         guard let live=SCDynamicStoreCopyProxies(nil) as? [String:Any] else{throw ProxyError("当前生效代理无法读取，不能保留外部网络并释放恢复记录")}
         for record in records {
@@ -52,7 +53,7 @@ extension Service {
         }
         try commitProxy(preferences)
     }
-    func restoreProxy(_ records:[HelperProxyRecord]) throws -> [String] {
+    func restoreProxy(_ records:[HelperProxyRecord],preserveExternal:Bool=false) throws -> [String] {
         guard !records.isEmpty else{return []}
         let preferences=try proxyPreferences();defer{SCPreferencesUnlock(preferences)};var issues:[String]=[]
         for (index,record) in records.enumerated() {
@@ -61,11 +62,15 @@ extension Service {
             let current=SCNetworkProtocolGetConfiguration(proto) as? [String:Any] ?? [:],original=try plist(record.original)
             if NSDictionary(dictionary:current).isEqual(to:original),SCNetworkProtocolGetEnabled(proto)==record.enabled {continue}
             let applied=try plist(record.applied)
-            guard SCNetworkProtocolGetEnabled(proto),let restored=ProxyRecovery.restored(original:original,applied:applied,current:current) else{
+            let strict=SCNetworkProtocolGetEnabled(proto) ? ProxyRecovery.restored(original:original,applied:applied,current:current):nil
+            guard strict != nil || preserveExternal else{
                 let changed=ProxyRecovery.changedOwnedKeys(expected:applied,current:current,protectsExceptions:true)
                 issues.append(label+" 已有外部修改，保留当前值："+(changed.isEmpty ? "协议启用状态":changed.joined(separator:",")));continue
             }
-            guard SCNetworkProtocolSetConfiguration(proto,restored as CFDictionary),SCNetworkProtocolSetEnabled(proto,record.enabled) else{issues.append(label+" 恢复写入失败");continue}
+            let restored=strict ?? ProxyRecovery.restoredPreservingExternal(original:original,applied:applied,current:current)
+            let enabled=strict == nil ? SCNetworkProtocolGetEnabled(proto):record.enabled
+            guard !preserveExternal || !enabled || !ProxyRecovery.pointsToOwnedEndpoint(current:restored,applied:applied) else{issues.append(label+" 仍指向轻舟入口");continue}
+            guard SCNetworkProtocolSetConfiguration(proto,restored as CFDictionary),SCNetworkProtocolSetEnabled(proto,enabled) else{issues.append(label+" 恢复写入失败");continue}
             if !record.hadProtocol,restored.isEmpty,!SCNetworkServiceRemoveProtocolType(service,kSCNetworkProtocolTypeProxies) {issues.append(label+" 临时代理协议移除失败")}
         }
         try commitProxy(preferences);return issues

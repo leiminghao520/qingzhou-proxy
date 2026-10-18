@@ -116,6 +116,41 @@ import QingzhouKit
         check(model.healthPower.suspended,"屏幕先醒但系统尚未唤醒时保持挂起")
         model.handleHealthPowerEvent(.didWake)
         check(!model.healthPower.suspended && model.healthPower.readyAt==330,"屏幕先于系统通知时也能完成唤醒和宽限期")
+        // 使用正式 AppModel 和接管控制器，注入辅助服务响应，禁止真实网络写入。
+        var recoveryFails=false,releaseSafe=true,helperRunning=false,pending=false
+        var requests:[TunRequest]=[]
+        let capture=CaptureController(core:model.core,proxy:model.proxy,helperRequest:{request in
+            requests.append(request)
+            if request.operation=="prepare" {helperRunning=true;pending=true}
+            if request.operation=="recover" {
+                helperRunning=false
+                if recoveryFails {throw ProxyError("合成归档错误")}
+                pending=false
+            }
+            var reply=TunReply(ok:true,message:"合成状态",running:helperRunning)
+            reply.supportsExternalRecovery=true;reply.recoveryPending=pending;reply.safeToQuit=releaseSafe
+            return reply
+        })
+        model.capture=capture
+        var state=AppState();state.captureMode = .tun
+        let control=CoreControlContext(port:19992,secret:String(repeating:"a",count:64))
+        try await capture.start(state,credentials:MemoryCredentials(),control:control)
+        model.connection = .error;model.recoveryPending=true
+        await model.recover()
+        for _ in 0..<200 where model.recovering {try await Task.sleep(nanoseconds:5_000_000)}
+        check(!model.recovering && !model.recoveryPending,"手动恢复完成后解除恢复锁")
+        check(model.connection == .disconnected && model.errorMessage==nil,"恢复成功清除旧错误")
+        check(requests.contains{$0.operation=="recover" && $0.preserveExternal==true},"恢复按钮必须走保留外部网络入口")
+        recoveryFails=true
+        try await capture.start(state,credentials:MemoryCredentials(),control:control)
+        model.recoveryPending=true
+        let quitAllowed=await model.quit()
+        check(quitAllowed && pending,"已确认释放时保留记录也能退出")
+        check(model.errorMessage==nil,"允许退出时不能再次弹出旧的恢复失败提示")
+        releaseSafe=false
+        try await capture.start(state,credentials:MemoryCredentials(),control:control)
+        let blocked=await model.quit()
+        check(!blocked && model.errorMessage != nil,"真实残留接管仍阻止不安全退出")
         print("RESULT network_resume_model_assertions=\(assertions) failures=0")
     }
 }

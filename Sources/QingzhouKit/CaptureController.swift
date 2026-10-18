@@ -8,7 +8,12 @@ import Foundation
     private var ownedTunDNS:String?
     private var httpCompatibility:HTTPCompatibilityController?
     private let proxy:SystemProxyController
-    public init(core:CoreController,proxy:SystemProxyController){self.core=core;self.proxy=proxy}
+    private let helperRequestOverride:((TunRequest) async throws -> TunReply)?
+    public init(core:CoreController,proxy:SystemProxyController,helperRequest:((TunRequest) async throws -> TunReply)?=nil){self.core=core;self.proxy=proxy;self.helperRequestOverride=helperRequest}
+    private func requestHelper(_ request:TunRequest) async throws -> TunReply {
+        if let helperRequestOverride {return try await helperRequestOverride(request)}
+        return try await helper.request(request)
+    }
     public var running:Bool{(helperRunning || core.isRunning) && (httpCompatibility == nil || httpCompatibility!.isRunning)}
     public func start(_ state:AppState,credentials:CredentialStore,control:CoreControlContext) async throws {
         guard activeMode==nil else{throw ProxyError("必须先恢复上一种接管方式")}
@@ -23,9 +28,9 @@ import Foundation
                 runtime.listenPort=try port();compatibilityPort=try port()
             }
             try await CaptureActivationTransaction.run(prepare:{
-                let status=try await self.helper.request(TunRequest(operation:"status"))
+                let status=try await self.requestHelper(TunRequest(operation:"status"))
                 guard status.protocolVersion==4 else{throw ProxyError("辅助服务协议过旧，请更新后再开启组合接管")}
-                let reply=try await self.helper.request(TunRequest(operation:"prepare",state:runtime,credentials:values,control:control,httpCompatibilityPort:compatibilityPort,systemProxyPort:state.captureMode == .compatible ? state.listenPort:nil))
+                let reply=try await self.requestHelper(TunRequest(operation:"prepare",state:runtime,credentials:values,control:control,httpCompatibilityPort:compatibilityPort,systemProxyPort:state.captureMode == .compatible ? state.listenPort:nil))
                 self.ownedTunDNS=reply.dnsServer;self.helperRunning=reply.running;self.activeMode = state.captureMode
             },compatibility:{
                 if let compatibilityPort,let shadow=state.shadowrocket {
@@ -53,34 +58,51 @@ import Foundation
     }
     public func activateTunnel() async throws {
         guard activeMode?.usesTunnel == true else {return}
-        _=try await helper.request(TunRequest(operation:"activate"))
+        _=try await requestHelper(TunRequest(operation:"activate"))
     }
     public func activateSystemProxy(port:Int,protectedDomains:[String]=[]) throws{guard activeMode == .systemProxy || (activeMode == .tun && httpCompatibility != nil) else{return};try proxy.apply(port:port,ownedTunDNS:activeMode == .tun ? ownedTunDNS:nil,protectedDomains:activeMode == .systemProxy ? protectedDomains:[])}
     public func stop() async throws {
         let needsHelper=activeMode?.usesTunnel == true || helperRunning
         try await restoreAll(includeHelper:needsHelper)
     }
-    public func helperStatus() async throws -> TunReply {let status=try await helper.request(TunRequest(operation:"status"));helperRunning=status.running;return status}
+    public func helperStatus() async throws -> TunReply {let status=try await requestHelper(TunRequest(operation:"status"));helperRunning=status.running;return status}
     public func recoverHelper() async throws {try await restoreAll(includeHelper:true)}
-    public func emergencyRecover() async throws {
+    public func emergencyRecover(preserveExternal:Bool=false) async throws {
         // 应急入口不依赖当前选择的模式；安装的辅助服务可能仍保留另一会话的恢复记录。
         let evidence=HelperRecoveryPolicy.inspect()
-        try await restoreAll(includeHelper:HelperRecoveryPolicy.requiresRecovery(activeTunnel:activeMode?.usesTunnel == true,running:helperRunning,journalPresent:evidence.journalPresent,inspectionAvailable:evidence.available))
+        try await restoreAll(includeHelper:HelperRecoveryPolicy.requiresRecovery(activeTunnel:activeMode?.usesTunnel == true,running:helperRunning,journalPresent:evidence.journalPresent,inspectionAvailable:evidence.available),preserveExternal:preserveExternal)
     }
-    private func restoreAll(includeHelper:Bool) async throws {
+    public func verifyReleasedForQuit() async throws {
+        guard !core.isRunning,httpCompatibility?.isRunning != true else{throw ProxyError("轻舟本地核心仍在运行，尚不能退出")}
+        try proxy.verifyReleased()
+        let evidence=HelperRecoveryPolicy.inspect()
+        if HelperRecoveryPolicy.requiresRecovery(activeTunnel:activeMode?.usesTunnel == true,running:helperRunning,journalPresent:evidence.journalPresent,inspectionAvailable:evidence.available) {
+            let status=try await requestHelper(TunRequest(operation:"status",verifyNetwork:true))
+            helperRunning=status.running
+            guard !status.running,status.safeToQuit==true else{throw ProxyError("尚不能确认轻舟的路由、DNS 和代理已释放；恢复记录已保留")}
+        }
+        ownedTunDNS=nil;activeMode=nil
+        await helper.closeChannel()
+    }
+    private func restoreAll(includeHelper:Bool,preserveExternal:Bool=false) async throws {
         var helperRestored = !includeHelper
         do {
-            try await CaptureRecoveryTransaction.run(proxy:{try self.proxy.restore()},helper:{
+            try await CaptureRecoveryTransaction.run(proxy:{try self.proxy.restore(preserveExternal:preserveExternal)},helper:{
                 if includeHelper {
-                    _=try await self.helper.request(TunRequest(operation:"recover"))
+                    if preserveExternal {
+                        let status=try await self.requestHelper(TunRequest(operation:"status"))
+                        guard status.supportsExternalRecovery==true else{throw ProxyError("辅助服务不支持保留外部网络恢复，请更新辅助服务")}
+                    }
+                    _=try await self.requestHelper(TunRequest(operation:"recover",preserveExternal:preserveExternal))
                     helperRestored=true
                 }
             },local:{
                 await self.httpCompatibility?.stop();self.httpCompatibility=nil;await self.core.stop()
             },verify:{
                 if includeHelper {
-                    let status=try await self.helper.request(TunRequest(operation:"status"))
-                    guard !status.running,!status.message.contains("待恢复") else{throw ProxyError("辅助服务仍在运行或保留恢复记录")}
+                    let status=try await self.requestHelper(TunRequest(operation:"status"))
+                    self.helperRunning=status.running
+                    guard !status.running,!(status.recoveryPending ?? status.message.contains("待恢复")) else{throw ProxyError("辅助服务仍在运行或保留恢复记录")}
                 }
                 guard !self.proxy.hasRecovery else{throw ProxyError("系统代理恢复记录仍存在")}
             })

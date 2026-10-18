@@ -83,4 +83,4 @@ bash scripts/build-app.sh "$PWD/outputs"
 
 这些是传输/解析夹具结果，不能换算成真实启动提升百分比。
 
-本地保留产物：`outputs/qingzhou-0.8.17-20261018-121417.JNyGhx/轻舟代理.app`（构建输出未提交到 GitHub）。同目录包含 artifact-manifest.json、artifact-verification.json 和 validation/ 全部结果证据。签名会改变完整文件摘要；另逐段核对主程序、辅助服务和 Runner 的 Mach-O 全部节内容及 UUID 与 Release 编译产物一致。
+历史构建产物（已按清理要求删除，当前版本见恢复退出验收记录）：`outputs/qingzhou-0.8.17-20261018-121417.JNyGhx/轻舟代理.app`（构建输出未提交到 GitHub）。同目录包含 artifact-manifest.json、artifact-verification.json 和 validation/ 全部结果证据。签名会改变完整文件摘要；另逐段核对主程序、辅助服务和 Runner 的 Mach-O 全部节内容及 UUID 与 Release 编译产物一致。

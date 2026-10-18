@@ -4,6 +4,14 @@ import Darwin
 import SystemConfiguration
 
 let args = CommandLine.arguments
+if args.count == 2 && args[1] == "quit-recovery-checks" {
+    Task {
+        do {try await runQuitRecoveryChecks()} catch {CheckHarness.failure("退出恢复检查异常："+error.localizedDescription,file:#filePath,line:#line)}
+        print("RESULT quit_recovery_assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
+        exit(CheckHarness.failures == 0 ? 0 : 1)
+    }
+    dispatchMain()
+}
 if args.count == 3 && args[1] == "startup-benchmark" {
     Task {
         do {try await runStartupBenchmark(output:URL(fileURLWithPath:args[2]));exit(0)}
@@ -328,6 +336,7 @@ do{let t=KeychainUXTests();run("KeychainUX.authorization",t){try t.testAuthoriza
 do{let t=StabilityTests();run("Stability.snapshotRetryAndLatency",t){t.testSnapshotRetryAndLatency()};run("Stability.dnsQueueBoundsBudgetAndStop",t){t.testDNSQueueBoundsBudgetAndStop()};run("Stability.subscriptionClassificationAndRetry",t){t.testSubscriptionClassificationAndRetry()}}
 Task {
     do {try await runStartupOptimizationChecks()} catch {CheckHarness.failure("启动优化检查异常",file:#filePath,line:#line)}
+    do {try await runQuitRecoveryChecks()} catch {CheckHarness.failure("退出恢复检查异常",file:#filePath,line:#line)}
     await runRuntimeOptimizationChecks()
     await runStabilityAsyncChecks()
     await runCaptureActivationChecks()
@@ -341,7 +350,7 @@ Task {
     await runNetworkProbeChecks()
     await runAsyncChecks()
     do{try await runTransactionChecks()}catch{CheckHarness.failure("事务场景异常",file:#filePath,line:#line)}
-    print("RESULT scenarios=\(scenarios + 46) assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
+    print("RESULT scenarios=\(scenarios + 47) assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
     exit(CheckHarness.failures == 0 ? 0 : 1)
 }
 dispatchMain()

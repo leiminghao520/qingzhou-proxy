@@ -78,12 +78,13 @@ struct ProxyJournal: Codable { var records: [ProxyRecord] }
         monitoredSignature=signature()
         try commit(p)
     }
-    public func restore() throws {
+    public func restore(preserveExternal:Bool=false) throws {
         guard hasRecovery else { return }
         let records: [ProxyRecord]
         do { records = try JSONDecoder().decode(ProxyJournal.self,from:Data(contentsOf:journal)).records } catch { throw ProxyError("代理恢复记录损坏，请按使用说明手动恢复") }
         let p = try preferences(); defer {SCPreferencesUnlock(p)}
         var conflicts: [ProxyRecord] = []
+        var externalPreserved=false
         for record in records {
             guard let service = SCNetworkServiceCopy(p,record.serviceID as CFString) else { continue }
             guard let proto = SCNetworkServiceCopyProtocol(service,kSCNetworkProtocolTypeProxies) else { continue }
@@ -92,15 +93,45 @@ struct ProxyJournal: Codable { var records: [ProxyRecord] }
             let safeOriginal=NetworkSafety.restoration(original,listening:NetworkSafety.loopbackListening)
             if !NSDictionary(dictionary:safeOriginal).isEqual(to:original){log?("恢复快照中的回环代理已停止监听，恢复本次拥有的设置时不再启用该失效入口")}
             if NSDictionary(dictionary:current).isEqual(to:original), SCNetworkProtocolGetEnabled(proto) == record.originallyEnabled { continue }
-            guard SCNetworkProtocolGetEnabled(proto), let restored = ProxyRecovery.restored(original:safeOriginal,applied:try dict(record.applied),current:current) else { conflicts.append(record); continue }
-            guard SCNetworkProtocolSetConfiguration(proto,restored as CFDictionary), SCNetworkProtocolSetEnabled(proto,record.originallyEnabled) else { conflicts.append(record); continue }
+            let applied=try dict(record.applied)
+            let strict=SCNetworkProtocolGetEnabled(proto) ? ProxyRecovery.restored(original:safeOriginal,applied:applied,current:current):nil
+            guard strict != nil || preserveExternal else {conflicts.append(record);continue}
+            if strict==nil {externalPreserved=true}
+            let restored=strict ?? ProxyRecovery.restoredPreservingExternal(original:safeOriginal,applied:applied,current:current)
+            let enabled=strict == nil ? SCNetworkProtocolGetEnabled(proto):record.originallyEnabled
+            guard !preserveExternal || !enabled || !ProxyRecovery.pointsToOwnedEndpoint(current:restored,applied:applied) else {conflicts.append(record);continue}
+            guard SCNetworkProtocolSetConfiguration(proto,restored as CFDictionary),SCNetworkProtocolSetEnabled(proto,enabled) else {conflicts.append(record);continue}
             if !record.hadProtocol && restored.isEmpty && !SCNetworkServiceRemoveProtocolType(service,kSCNetworkProtocolTypeProxies) {conflicts.append(record)}
         }
         try commit(p)
         requiredExceptions=[];ownedPort=nil;ownershipMismatchCount=0
         monitoredSignature=signature()
-        if conflicts.isEmpty { try FileManager.default.removeItem(at:journal) }
+        if conflicts.isEmpty {
+            if preserveExternal {
+                try verifyReleased(records:records,preferences:p)
+                if externalPreserved {
+                    let archive=journal.deletingLastPathComponent().appendingPathComponent("proxy-recovery-preserved-"+UUID().uuidString+".json")
+                    try SecureFile.write(Data(contentsOf:journal),to:archive)
+                    log?("外部系统代理已保留，轻舟恢复记录已归档")
+                }
+            }
+            try FileManager.default.removeItem(at:journal)
+        }
         else { log?("代理恢复存在外部修改冲突，保留恢复记录，未覆盖外部设置");try save(conflicts); throw ProxyError("部分网络服务已被外部修改，未覆盖其设置；请检查系统代理后重试恢复") }
+    }
+    public func verifyReleased() throws {
+        guard hasRecovery else{return}
+        let records=try JSONDecoder().decode(ProxyJournal.self,from:Data(contentsOf:journal)).records
+        let p=try preferences();defer{SCPreferencesUnlock(p)}
+        try verifyReleased(records:records,preferences:p)
+    }
+    private func verifyReleased(records:[ProxyRecord],preferences:SCPreferences) throws {
+        guard let live=SCDynamicStoreCopyProxies(nil) as? [String:Any] else{throw ProxyError("无法确认当前代理已离开轻舟入口")}
+        for record in records {
+            let applied=try dict(record.applied)
+            guard !ProxyRecovery.pointsToOwnedEndpoint(current:live,applied:applied) else{throw ProxyError("当前生效代理仍指向轻舟，尚不能退出")}
+            if let service=SCNetworkServiceCopy(preferences,record.serviceID as CFString),let proto=SCNetworkServiceCopyProtocol(service,kSCNetworkProtocolTypeProxies),SCNetworkProtocolGetEnabled(proto),let current=SCNetworkProtocolGetConfiguration(proto) as? [String:Any],ProxyRecovery.pointsToOwnedEndpoint(current:current,applied:applied) {throw ProxyError("网络服务仍指向轻舟入口，尚不能退出")}
+        }
     }
     public func verifyApplied() async throws {
         for _ in 0..<30 {

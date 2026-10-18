@@ -6,13 +6,16 @@ import QingzhouKit
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var model: AppModel?
     private var readyToQuit = false
+    private var quitTask: Task<Void,Never>?
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if readyToQuit { return .terminateNow }
         guard let model else { return .terminateNow }
-        Task {
+        guard quitTask==nil else{return .terminateLater}
+        quitTask=Task {
             let safe = await model.quit()
             readyToQuit = safe
             sender.reply(toApplicationShouldTerminate: safe)
+            quitTask=nil
         }
         return .terminateLater
     }

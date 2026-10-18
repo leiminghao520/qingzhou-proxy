@@ -408,8 +408,8 @@ import QingzhouKit
         epoch=UUID();connectivityEpoch=UUID()
         log("应急恢复开始：核对本地代理及已安装辅助服务，与当前模式无关")
         do {
-            try await capture.emergencyRecover();stopTelemetry();protectionSummary=[];recoveryPending=false;connection = .disconnected
-            connectivityResults=[];helperStatus="轻舟拥有的网络设置已恢复并核对";reachability="尚未检测";log(helperStatus)
+            try await capture.emergencyRecover(preserveExternal:true);stopTelemetry();protectionSummary=[];recoveryPending=false;connection = .disconnected
+            connectivityResults=[];helperStatus="轻舟接管已清理，外部网络已保留并核对";reachability="尚未检测";errorMessage=nil;log(helperStatus)
         }catch {stopTelemetry();recoveryPending=true;connection = .error;helperStatus="恢复未完成，请查看错误及恢复记录";report(error)}
     }
     func startupRecovery() async {
@@ -418,7 +418,7 @@ import QingzhouKit
         if FileManager.default.fileExists(atPath:HelperPaths.socket) {
             do {
                 let status=try await capture.helperStatus();helperStatus=status.message
-                if status.message.contains("待恢复") || status.running || evidence.journalPresent {
+                if (status.recoveryPending ?? status.message.contains("待恢复")) || status.running || evidence.journalPresent {
                     recoveryPending=true;helperStatus="发现恢复记录，请手动恢复并核对结果"
                 }
             }catch {
@@ -750,6 +750,19 @@ import QingzhouKit
         cancelHealthRefresh()
         if measuring {cancelMeasurement();await measurementTask?.value}
         guard !busy else {errorMessage="正在更新配置，请稍后退出";return false}
-        maintenanceTask?.cancel();guard !recovering else{return false};busy=true;defer{busy=false};do{try await disconnectInternal()}catch{report(error)};return !capture.running && !proxy.hasRecovery && !recoveryPending
+        maintenanceTask?.cancel();guard !recovering else{return false};busy=true;defer{busy=false}
+        stopTelemetry();errorMessage=nil
+        do {
+            try await QuitRecoveryTransaction.run(recover:{
+                try await self.capture.emergencyRecover(preserveExternal:true)
+            },verifyReleased:{
+                try await self.capture.verifyReleasedForQuit()
+            },deferredRecovery:{error in
+                self.recoveryPending=true
+                self.log("退出时已确认轻舟不再接管；恢复记录留待下次处理："+Redactor.redact(error.localizedDescription))
+            })
+            connection = .disconnected
+            return true
+        } catch {report(error);return false}
     }
 }

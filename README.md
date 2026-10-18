@@ -133,3 +133,10 @@ python3 scripts/runtime-optimization-mutations.py
 双目标节点检测在任一成功后取消剩余请求；TUN 节点域名去重并以四并发、三秒单项/六秒整批预算解析，底层槽位跨重试共享。接管前后 DNS 基线以四并发检查，所有原有保护和两轮连通性验收保留。连接页显示实际阶段，重试显示次数和等待时间；诊断日志增加脱敏阶段耗时。辅助服务协议仍为 4，新包仍需重新批准更新辅助服务。
 
 隔离检查与基准：`.build/debug/QingzhouChecks startup-checks`、`.build/debug/QingzhouChecks startup-benchmark .build/startup-benchmark.json`、`python3 scripts/startup-optimization-mutations.py`。合成基准不能代替真实 TUN 提速结果。实现、验收与未完成项目见[启动优化验收记录](docs/verification-startup-optimization.md)。
+
+
+## 恢复与退出冲突修复（0.8.18）
+
+恢复按钮会清理仍属于轻舟的设置，保留外部后来接管的路由和代理，并归档冲突记录。退出时独立核对核心、路由、DNS、代理及待重连会话：已释放接管时允许保留记录退出；仍有接管或核验失败时保留错误，不伪造恢复成功。辅助服务协议仍为 4，需更新辅助服务以支持此恢复模式。
+
+新增 `.build/debug/QingzhouChecks quit-recovery-checks` 和 `bash scripts/quit-release-checks.sh`。真实现场恢复、新版安装和正常退出已核验；完整质量门禁及其他未验收场景见[恢复退出验收记录](docs/verification-recovery-quit.md)。

@@ -12,6 +12,8 @@ final class Service {
     let root=URL(fileURLWithPath:HelperPaths.directory)
     let manifest:Manifest
     let queue=DispatchQueue(label:"cn.qingzhou.helper.capture")
+    var quitRoutesRead:(() throws -> [ProtectedRoute])?
+    var quitDNSRead:((String) -> NSDictionary?)?
     var connectionTiming:ConnectionTiming?
     var phase="idle" {didSet {if phase != oldValue {connectionTiming?.begin(phase)}}}
     var captureGeneration=UUID()
@@ -73,9 +75,8 @@ final class Service {
         captureGeneration=UUID();domainRouteSummary=[];activatePrepared=nil;activeRequest=nil;networkChecks?.cancel();networkChecks=nil;networkTimer?.cancel();networkTimer=nil;if let networkStore {SCDynamicStoreSetDispatchQueue(networkStore,nil)};networkStore=nil;routeEvents?.cancel();routeEvents=nil;pendingNetworkChange=nil;snapshotRetry.reset();dnsForwarder?.stop();dnsForwarder=nil;capturePlan=nil
         guard let record=journal else{        if let process,process.isRunning {process.terminate();for _ in 0..<40 {if !process.isRunning{break};usleep(50000)};if process.isRunning{kill(process.processIdentifier,SIGKILL)};process.waitUntilExit()};process=nil;owner=nil;try? FileManager.default.removeItem(at:root.appendingPathComponent("runtime.json"))
 return};var issues:[String]=[]
-        // 仅管理员显式选择保留外部网络时跳过代理写入；先确认所有服务已离开轻舟入口。
-        if preserveExternal {try verifyNoOwnedProxyEndpoint(record.proxies ?? [])}
-        else {do{issues += try restoreProxy(record.proxies ?? [])}catch{issues.append("系统代理读取或提交失败："+error.localizedDescription)}}
+        // 用户显式恢复时也只清理仍属于轻舟的入口，不能覆盖后来接管的代理。
+        do{issues += try restoreProxy(record.proxies ?? [],preserveExternal:preserveExternal)}catch{issues.append("系统代理读取或提交失败："+error.localizedDescription)}
         let current=SCDynamicStoreCopyValue(dynamic,record.dnsKey as CFString)
         let expected=try PropertyListSerialization.propertyList(from:record.expectedDNS,format:nil) as! NSDictionary
         if let current=current as? NSDictionary,current==expected {
@@ -286,15 +287,20 @@ return};var issues:[String]=[]
         defer {connectionTiming=nil}
         do {
             var reply=try handleOperation(request,fd:fd)
+            reply.supportsExternalRecovery=true;reply.recoveryPending=journal != nil
+            if request.operation=="status",request.verifyNetwork==true {reply.safeToQuit=verifyReleasedForQuit()}
             timing.finish()
             reply.stageTimings=timing.samples
             return reply
         } catch {
             timing.finish(succeeded:false)
-            return TunReply(ok:false,message:"TUN 阶段 "+phase+"："+Redactor.redact(error.localizedDescription),coreDiagnostics:["prepare","activate"].contains(request.operation) ? coreDiagnostics.recent:nil,running:process?.isRunning==true,phase:phase,networkNotReady:error is NetworkEnvironmentNotReady,stageTimings:timing.samples)
+            var reply=TunReply(ok:false,message:"TUN 阶段 "+phase+"："+Redactor.redact(error.localizedDescription),coreDiagnostics:["prepare","activate"].contains(request.operation) ? coreDiagnostics.recent:nil,running:process?.isRunning==true,phase:phase,networkNotReady:error is NetworkEnvironmentNotReady,stageTimings:timing.samples)
+            reply.supportsExternalRecovery=true;reply.recoveryPending=journal != nil
+            return reply
         }
     }
     private func handleOperation(_ request:TunRequest,fd:Int32) throws -> TunReply {
+        guard request.preserveExternal != true || request.operation=="recover" else{throw ProxyError("保留外部网络仅用于用户恢复操作")}
         switch request.operation {case "status":
             if request.verifyNetwork==true,let record=journal,process?.isRunning==true {
                 let tunnels=record.routes.filter{$0.interface==record.interface};let verified=tunnels.count==4 && tunnels.allSatisfy{route in guard let info=try? routeInfo(route.destination,ipv6:route.ipv6,scope:route.scope),let current=prefix(info) else{return false};return NetworkInspection.samePrefix(current,route.destination) && field("interface",info)==route.interface && field("gateway",info)==route.gateway}
@@ -307,7 +313,9 @@ return};var issues:[String]=[]
             guard request.protocolVersion==4,owner==fd,process?.isRunning==true,let activate=activatePrepared else{throw ProxyError("TUN 准备状态无效")}
             phase="activation"
             do{try activate();activatePrepared=nil;phase="active";return TunReply(ok:true,message:"TUN 路由及 DNS 已接管；应用连接另行检测",running:true)}catch{let original=error;try rollbackStartup();throw original}
-        case "stop","recover":phase="recovery";try stop();phase="restored";return TunReply(ok:true,message:"原网络已恢复")
+        case "stop","recover":
+            phase="recovery";try stop(preserveExternal:request.preserveExternal==true);phase="restored";lastFailure=nil
+            return TunReply(ok:true,message:request.preserveExternal==true ? "轻舟接管已清理，外部网络已保留":"原网络已恢复")
         default:throw ProxyError("只允许状态、启动、停止、恢复操作")}
     }
 }

@@ -3,6 +3,7 @@ import Darwin
 import SystemConfiguration
 
 public struct TunRequest:Codable,Sendable {
+    public var preserveExternal:Bool?
     public var protocolVersion:Int? = 4
     public var systemProxyPort:Int?
     public var httpCompatibilityPort:Int?
@@ -11,9 +12,12 @@ public struct TunRequest:Codable,Sendable {
     public var state:AppState?
     public var credentials:[String:String]?
     public var control:CoreControlContext?
-    public init(operation:String,state:AppState?=nil,credentials:[String:String]?=nil,control:CoreControlContext?=nil,verifyNetwork:Bool=false,httpCompatibilityPort:Int?=nil,systemProxyPort:Int?=nil){self.systemProxyPort=systemProxyPort;self.httpCompatibilityPort=httpCompatibilityPort;self.verifyNetwork=verifyNetwork;self.operation=operation;self.state=state;self.credentials=credentials;self.control=control}
+    public init(operation:String,state:AppState?=nil,credentials:[String:String]?=nil,control:CoreControlContext?=nil,verifyNetwork:Bool=false,httpCompatibilityPort:Int?=nil,systemProxyPort:Int?=nil,preserveExternal:Bool=false){self.preserveExternal=preserveExternal;self.systemProxyPort=systemProxyPort;self.httpCompatibilityPort=httpCompatibilityPort;self.verifyNetwork=verifyNetwork;self.operation=operation;self.state=state;self.credentials=credentials;self.control=control}
 }
 public struct TunReply: Codable, Sendable {
+    public var supportsExternalRecovery: Bool?
+    public var recoveryPending: Bool?
+    public var safeToQuit: Bool?
     public var networkNotReady: Bool?
     public var coreDiagnostics: [String]?
     public var proxyVerified: Bool?
