@@ -10,6 +10,22 @@ import QingzhouKit
             assertions += 1
             if !condition { fatalError(message) }
         }
+        model.connection = .connecting
+        model.startupStage = "验证实际网络"
+        check(model.connectionSummary == "连接中 · 验证实际网络", "连接中必须显示实际阶段")
+        model.networkReconnecting = true
+        model.startupStage = "第 2 次准备，1 秒后重试"
+        check(model.connectionSummary.contains("第 2 次准备"), "重试阶段不能被通用状态遮盖")
+        model.networkReconnecting = false
+        model.startupStage = nil
+        let startupToken=model.startupGeneration
+        try model.checkStartup(startupToken)
+        model.busy=true
+        await model.disconnect()
+        check(model.startupStage == nil, "手动取消必须清除启动阶段")
+        do {try model.checkStartup(startupToken);check(false,"旧代次不能提交结果")}
+        catch {check(error is CancellationError,"旧代次必须按取消处理")}
+        model.connection = .disconnected;model.stopRequested=false;model.busy=false
         model.connection = .connected
         model.state.captureMode = .tun
         model.monitorPaused = true

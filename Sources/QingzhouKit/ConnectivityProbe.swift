@@ -58,10 +58,6 @@ public enum ConnectivityProbe {
             return ConnectivityResult(title,.passed,"TLS 与 HTTP 已校验",milliseconds:Int(Date().timeIntervalSince(start)*1000))
         }catch{return ConnectivityResult(title,.failed,ConnectivityResult.category(error))}
     }
-    private enum NodeMeasurement:Sendable {case success(Int),failure(String)}
-    private static func measureNode(_ client:CoreAPIClient,_ id:UUID,url:String) async -> NodeMeasurement {
-        do {return .success(try await client.delay(id,url:url))}catch{return .failure(ConnectivityResult.category(error))}
-    }
     public static func node(client:CoreAPIClient,mode:ProxyMode) async -> ConnectivityResult {
         let title="当前节点通道检测"
         if mode == .direct{return ConnectivityResult(title,.notApplicable,"全部直连模式")}
@@ -70,17 +66,18 @@ public enum ConnectivityProbe {
             guard let tag=CoreAPIClient.actualTag(proxies) else{return ConnectivityResult(title,.failed,"控制接口缺少实际节点")}
             if tag=="direct" || tag=="reject"{return ConnectivityResult(title,.notApplicable,"当前策略未选择节点")}
             guard tag.hasPrefix("node-"),let id=UUID(uuidString:String(tag.dropFirst(5))) else{return ConnectivityResult(title,.failed,"控制接口节点格式")}
-            // 启动检测与健康检查保持同样的双目标语义，单个站点失败不能判定整条节点通道失效。
-            async let first=measureNode(client,id,url:ConfigBuilder.testURL)
-            async let second=measureNode(client,id,url:ConfigBuilder.secondaryTestURL)
-            let measurements=await [first,second]
-            for measurement in measurements {if case .success(let delay)=measurement {return ConnectivityResult(title,.passed,"强制当前节点 HTTPS（双目标）",milliseconds:delay)}}
-            let failures=measurements.compactMap{measurement -> String? in if case .failure(let category)=measurement{return category};return nil}
-            if failures.allSatisfy({["节点通道","超时"].contains($0)}) {
-                _=try await client.proxies()
-                return ConnectivityResult(title,.failed,"节点通道")
+            switch await client.measureNode(id) {
+            case .success(let delay):
+                guard !Task.isCancelled else { return ConnectivityResult(title,.failed,"取消") }
+                return ConnectivityResult(title,.passed,"强制当前节点 HTTPS（双目标）",milliseconds:delay)
+            case .failure(let failures):
+                guard !Task.isCancelled else { return ConnectivityResult(title,.failed,"取消") }
+                if failures.count == 2 && failures.allSatisfy({["节点通道","超时"].contains($0)}) {
+                    _=try await client.proxies()
+                    return ConnectivityResult(title,.failed,"节点通道")
+                }
+                return ConnectivityResult(title,.failed,failures.first(where:{!["节点通道","超时"].contains($0)}) ?? "无法确定")
             }
-            return ConnectivityResult(title,.failed,failures.first(where:{!["节点通道","超时"].contains($0)}) ?? "无法确定")
         }catch{return ConnectivityResult(title,.failed,ConnectivityResult.category(error))}
     }
     public static func all(port:Int?,client:CoreAPIClient,mode:ProxyMode,protocolClasses:[AnyClass]?=nil) async -> [ConnectivityResult] {

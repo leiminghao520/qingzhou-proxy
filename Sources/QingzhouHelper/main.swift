@@ -12,7 +12,8 @@ final class Service {
     let root=URL(fileURLWithPath:HelperPaths.directory)
     let manifest:Manifest
     let queue=DispatchQueue(label:"cn.qingzhou.helper.capture")
-    var phase="idle"
+    var connectionTiming:ConnectionTiming?
+    var phase="idle" {didSet {if phase != oldValue {connectionTiming?.begin(phase)}}}
     var captureGeneration=UUID()
     var domainRouteSummary:[String]=[]
     var capturePlan:CapturePlan?
@@ -156,16 +157,11 @@ return};var issues:[String]=[]
         else {v6=nil}
         let gw6=v6.flatMap{field("gateway",$0)}
         phase="bootstrapDNS"
-        let deadline=Date().addingTimeInterval(6)
-        var bypass=Set(dns+["1.1.1.1"]);var nodeAddresses:[String:[String]]=[:]
-        for host in Set(state.nodes.map(\.server)) {
-            let remaining=min(3,deadline.timeIntervalSinceNow)
-            guard remaining>0 else{throw NetworkEnvironmentNotReady("节点引导解析超过启动预算，未接管网络")}
-            let values:[String]
-            do {values=try NetworkInspection.boundedAddresses(host,timeout:remaining)}
-            catch {throw NetworkEnvironmentNotReady("节点引导解析尚未就绪："+error.localizedDescription)}
-            nodeAddresses[host]=values;for address in values {bypass.insert(address)}
-        }
+        var bypass=Set(dns+["1.1.1.1"])
+        let nodeAddresses:[String:[String]]
+        do {nodeAddresses=try NetworkPreparationPool.shared.addresses(state.nodes.map(\.server))}
+        catch {throw NetworkEnvironmentNotReady("节点引导解析尚未就绪："+error.localizedDescription)}
+        for values in nodeAddresses.values {bypass.formUnion(values)}
         let routesBefore=try NetworkInspection.command("/usr/sbin/netstat",["-rn"])
         phase="networkRecheck"
         let currentDefault=try routeInfo("default",ipv6:false)
@@ -207,7 +203,8 @@ return};var issues:[String]=[]
             }
         });dnsForwarder=forwarder;forwarder.start()
         phase="dnsBaseline"
-        let baseline=plan.snapshot.resolvers.filter{forwarder.probe($0)}
+        let resolverChecks=try NetworkPreparationPool.shared.map(plan.snapshot.resolvers,operation:forwarder.probe)
+        let baseline=zip(plan.snapshot.resolvers,resolverChecks).filter{$0.1}.map{$0.0}
         guard baseline.contains(where:{$0.interface==primary}) else {throw NetworkEnvironmentNotReady("原公网 DNS 不可用，未接管网络")}
         for domain in plan.domains {
             // 没有企业作用域时由转发器拒绝内网查询；已有作用域仍须通过可用性检查。
@@ -268,28 +265,50 @@ return};var issues:[String]=[]
             }
             for destination in ["8.8.8.8","2606:4700:4700::1111"] {guard field("interface",try routeInfo(destination,ipv6:destination.contains(":")))==tunnel else{throw ProxyError("TUN 路由接管验证失败")}}
             guard let current=SCDynamicStoreCopyValue(dynamic,dnsKey as CFString) as? NSDictionary,current==expected as NSDictionary else{throw ProxyError("TUN DNS 生效验证失败")}
-            guard verifyProtection() else{throw ProxyError("企业路由保护核对失败")};guard baseline.allSatisfy({forwarder.probe($0)}) else{throw ProxyError("启动前可用的原 DNS 在接管后不可达")}
+            guard verifyProtection() else{throw ProxyError("企业路由保护核对失败")};guard try NetworkPreparationPool.shared.map(baseline,operation:forwarder.probe).allSatisfy({$0}) else{throw ProxyError("启动前可用的原 DNS 在接管后不可达")}
             if let port=request.systemProxyPort {phase="proxyActivation";try applyProxy(port:port,plan:plan);guard verifyProxy() else{throw ProxyError("兼容代理入口核对失败")}}
             activeRequest=request
             startNetworkMonitor()
             }
-        }catch{let original=error;try stop();throw original}
+        }catch{let original=error;try rollbackStartup();throw original}
+    }
+    private func rollbackStartup() throws {
+        connectionTiming?.finish(succeeded:false)
+        connectionTiming?.begin("recovery")
+        do {try stop();connectionTiming?.finish()}
+        catch {connectionTiming?.finish(succeeded:false);throw error}
     }
     func handle(_ request:TunRequest,fd:Int32)->TunReply {
-        do {switch request.operation {case "status":
+        let timing=ConnectionTiming()
+        if ["prepare","activate","stop","recover"].contains(request.operation) {
+            connectionTiming=timing;timing.begin("helperOperation")
+        }
+        defer {connectionTiming=nil}
+        do {
+            var reply=try handleOperation(request,fd:fd)
+            timing.finish()
+            reply.stageTimings=timing.samples
+            return reply
+        } catch {
+            timing.finish(succeeded:false)
+            return TunReply(ok:false,message:"TUN 阶段 "+phase+"："+Redactor.redact(error.localizedDescription),coreDiagnostics:["prepare","activate"].contains(request.operation) ? coreDiagnostics.recent:nil,running:process?.isRunning==true,phase:phase,networkNotReady:error is NetworkEnvironmentNotReady,stageTimings:timing.samples)
+        }
+    }
+    private func handleOperation(_ request:TunRequest,fd:Int32) throws -> TunReply {
+        switch request.operation {case "status":
             if request.verifyNetwork==true,let record=journal,process?.isRunning==true {
                 let tunnels=record.routes.filter{$0.interface==record.interface};let verified=tunnels.count==4 && tunnels.allSatisfy{route in guard let info=try? routeInfo(route.destination,ipv6:route.ipv6,scope:route.scope),let current=prefix(info) else{return false};return NetworkInspection.samePrefix(current,route.destination) && field("interface",info)==route.interface && field("gateway",info)==route.gateway}
                 let current=SCDynamicStoreCopyValue(dynamic,record.dnsKey as CFString) as? NSDictionary;let expected=try PropertyListSerialization.propertyList(from:record.expectedDNS,format:nil) as! NSDictionary
                 return TunReply(ok:true,message:networkStatus,coreDiagnostics:coreDiagnostics.recent,running:true,routesVerified:verified,dnsVerified:current==expected,proxyVerified:verifyProxy(),protectionVerified:verifyProtection(),protectionSummary:networkSummary,phase:phase)
             }
             return TunReply(ok:true,message:networkStatus+(journal != nil && process==nil ? " · 存在待恢复记录":""),coreDiagnostics:process?.isRunning==true ? coreDiagnostics.recent:nil,running:process?.isRunning==true,protectionSummary:networkSummary,phase:phase)
-        case "prepare":lastFailure=nil;do{try start(request,fd:fd)}catch{let original=error;try stop();throw original};phase="prepared";return TunReply(ok:true,message:"核心已准备，网络尚未接管",running:true,dnsServer:journal.map{String($0.address4.split(separator:"/")[0])})
+        case "prepare":lastFailure=nil;do{try start(request,fd:fd)}catch{let original=error;try rollbackStartup();throw original};phase="prepared";return TunReply(ok:true,message:"核心已准备，网络尚未接管",running:true,dnsServer:journal.map{String($0.address4.split(separator:"/")[0])})
         case "activate":
             guard request.protocolVersion==4,owner==fd,process?.isRunning==true,let activate=activatePrepared else{throw ProxyError("TUN 准备状态无效")}
             phase="activation"
-            do{try activate();activatePrepared=nil;phase="active";return TunReply(ok:true,message:"TUN 路由及 DNS 已接管；应用连接另行检测",running:true)}catch{let original=error;try stop();throw original}
-        case "stop","recover":try stop();phase="restored";return TunReply(ok:true,message:"原网络已恢复")
-        default:throw ProxyError("只允许状态、启动、停止、恢复操作")}}catch{return TunReply(ok:false,message:"TUN 阶段 "+phase+"："+Redactor.redact(error.localizedDescription),coreDiagnostics:["prepare","activate"].contains(request.operation) ? coreDiagnostics.recent:nil,running:process?.isRunning==true,phase:phase,networkNotReady:error is NetworkEnvironmentNotReady)}
+            do{try activate();activatePrepared=nil;phase="active";return TunReply(ok:true,message:"TUN 路由及 DNS 已接管；应用连接另行检测",running:true)}catch{let original=error;try rollbackStartup();throw original}
+        case "stop","recover":phase="recovery";try stop();phase="restored";return TunReply(ok:true,message:"原网络已恢复")
+        default:throw ProxyError("只允许状态、启动、停止、恢复操作")}
     }
 }
 func run() throws {

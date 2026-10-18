@@ -12,12 +12,21 @@ import QingzhouKit
     @Published var pendingMode:ProxyMode?
     @Published var state=AppState()
     @Published var connection=Connection.disconnected
+    @Published var startupStage:String?
+    private(set) var startupGeneration=UUID()
+    private var startupClient:CoreAPIClient?
+    private var startupProbeTask:Task<[ConnectivityResult],Never>?
     @Published var reachability="尚未检测"
     @Published var connectivityResults:[ConnectivityResult]=[]
     var connectivityHealth:ConnectivityHealth {ConnectivityHealth.evaluate(connectivityResults)}
     @Published var networkReconnecting = false
     var networkRechecking:Bool {networkReconnecting || (connection == .connected && state.captureMode.usesTunnel && helperStatus == "网络变化，正在重新检查")}
-    var connectionSummary:String {networkReconnecting ? "网络恢复中 · 正在自动重连":networkRechecking ? "已连接 · 网络变化，正在重新检查":connection.rawValue+" · 连通性"+connectivityHealth.rawValue}
+    var connectionSummary:String {
+        if connection == .connecting {return "连接中 · "+(startupStage ?? "准备网络与核心")}
+        if networkReconnecting {return "网络恢复中 · 正在自动重连"}
+        if networkRechecking {return "已连接 · 网络变化，正在重新检查"}
+        return connection.rawValue+" · 连通性"+connectivityHealth.rawValue
+    }
     @Published var busy=false {didSet{if busy{cancelHealthRefresh();healthRefreshPending=true}else{drainPendingDisconnect()}}}
     @Published var healthChecking=false
     @Published var recovering=false
@@ -154,62 +163,111 @@ import QingzhouKit
     private func report(_ error:Error) {if error is CancellationError{return};errorMessage=Redactor.redact(error.localizedDescription);log(errorMessage!)}
     private func persist(_ next:AppState) throws {guard let store else {throw ProxyError("配置未加载")};try store.commit(next);state=store.state}
     private func secrets(_ next:AppState,_ control:CoreControlContext) -> [String] {[control.secret]+next.nodes.flatMap{[(try? credentials.get($0.credentialRef)) ?? "",(try? credentials.get($0.credentialRef+".obfs")) ?? ""]}}
+    func checkStartup(_ generation:UUID) throws {
+        try Task.checkCancellation()
+        guard startupGeneration==generation,!stopRequested,!pendingRecovery else {throw CancellationError()}
+    }
+    private func startupProbes(port:Int?,client:CoreAPIClient,mode:ProxyMode,generation:UUID) async throws -> [ConnectivityResult] {
+        let task=Task {await ConnectivityProbe.all(port:port,client:client,mode:mode)}
+        startupProbeTask=task
+        defer {startupProbeTask=nil}
+        let results=await withTaskCancellationHandler(operation:{await task.value},onCancel:{task.cancel()})
+        try checkStartup(generation)
+        return results
+    }
     private func startService(_ next:AppState) async throws {
-        defer {networkReconnecting=false}
+        let generation=UUID();startupGeneration=generation
+        let total=DispatchTime.now().uptimeNanoseconds
+        var attempts=0
+        var succeeded=false
+        defer {
+            networkReconnecting=false;startupStage=nil
+            log(ConnectionStageTiming(stage:"connectionTotal",milliseconds:Int((DispatchTime.now().uptimeNanoseconds-total)/1_000_000),succeeded:succeeded).summary+" attempts=\(attempts)")
+        }
         try await NetworkPreparationRetry.run(operation:{
-            self.networkReconnecting=false
-            try await self.startServiceAttempt(next)
-        },shouldContinue:{!self.stopRequested && !self.pendingRecovery},wait:{delay in
+            try self.checkStartup(generation)
+            attempts+=1;self.networkReconnecting=false
+            self.log("连接准备 attempt=\(attempts)")
+            try await self.startServiceAttempt(next,generation:generation)
+        },shouldContinue:{self.startupGeneration==generation && !self.stopRequested && !self.pendingRecovery},wait:{delay in
+            try self.checkStartup(generation)
             self.networkReconnecting=true
             self.connectivityResults=ConnectivityResult.pending
+            self.startupStage="第 \(attempts+1) 次准备，\(Int(delay)) 秒后重试"
             self.reachability="网络变化，正在重新准备连接"
-            self.log("准备期间原路径变化，已回滚；等待 \(Int(delay)) 秒后重新采样")
-            // 分段等待使用户断开或恢复请求及时生效，不依赖健康检查计时器。
+            self.log("连接重试 attempt=\(attempts+1) waitSeconds=\(Int(delay))")
             for _ in 0..<Int(delay*4) {
-                guard !self.stopRequested,!self.pendingRecovery else {throw CancellationError()}
+                try self.checkStartup(generation)
                 try await Task.sleep(nanoseconds:250_000_000)
             }
         })
+        succeeded=true
     }
-    private func startServiceAttempt(_ next:AppState) async throws {
+    private func startServiceAttempt(_ next:AppState,generation:UUID) async throws {
+        let timing=ConnectionTiming()
+        timing.begin("corePreparation");startupStage="准备网络与核心"
+        defer {timing.finish(succeeded:false);for sample in timing.samples {log(sample.summary)}}
         if next.captureMode == .systemProxy {try NetworkSafety.check()}
         NSApplication.shared.activate(ignoringOtherApps:true)
         let control=try CoreControlContext.make();_=try ConfigBuilder.build(state:next,credentials:credentials,control:control)
         core.secrets=secrets(next,control);networkChanged=false;coreFailed=false;helperFailureReason=nil
-        try await capture.start(next,credentials:credentials,control:control)
+        await capture.helper.setTimingObserver { [weak self] samples in
+            Task {@MainActor in
+                guard let self,self.startupGeneration==generation else {return}
+                for sample in samples {self.log(sample.summary)}
+            }
+        }
         let client=CoreAPIClient(context:control)
+        startupClient=client
+        defer {startupClient=nil}
         do {
+            try self.checkStartup(generation)
+            try await capture.start(next,credentials:credentials,control:control)
+            try self.checkStartup(generation)
+            timing.begin("fallback");startupStage="检查代理通道"
             _=try await client.proxies()
+            try self.checkStartup(generation)
             try await client.initializeFallbacks(state: next)
-            let results=await ConnectivityProbe.all(port:next.listenPort,client:client,mode:next.mode)
+            try self.checkStartup(generation)
+            timing.begin("preCaptureProbe")
+            let results=try await startupProbes(port:next.listenPort,client:client,mode:next.mode,generation:generation)
+            try self.checkStartup(generation)
             connectivityResults=results;reachability=ConnectivityResult.combinedSummary(results)
             for result in results {log(result.summary)}
             guard ConnectivityHealth.evaluate(results) == .healthy else {throw ProxyError("启动连通性检查失败："+reachability)}
             guard !networkChanged,!coreFailed else {throw ProxyError("启动期间核心或网络发生变化")}
+            timing.begin("captureActivation");startupStage="应用接管"
             try await capture.activateTunnel()
+            try self.checkStartup(generation)
             if next.captureMode.usesTunnel {
-                let captured=await ConnectivityProbe.all(port:nil,client:client,mode:next.mode)
+                timing.begin("postCaptureProbe");startupStage="验证实际网络"
+                let captured=try await startupProbes(port:nil,client:client,mode:next.mode,generation:generation)
+                try self.checkStartup(generation)
                 connectivityResults=captured;reachability=ConnectivityResult.combinedSummary(captured)
                 for result in captured {log("接管后 · "+result.summary)}
                 let status=try await capture.helperStatus()
+                try self.checkStartup(generation)
                 guard status.running else {throw ProxyError("TUN 保护流程已停止核心："+status.message)}
                 guard ConnectivityHealth.evaluate(captured) == .healthy else {throw ProxyError("TUN 实际接管路径检查失败："+reachability)}
             }
+            timing.begin("systemProxyActivation")
             try capture.activateSystemProxy(port:next.listenPort,protectedDomains:next.protectedDomains)
             if next.captureMode == .systemProxy {try await proxy.verifyApplied()}
+            try self.checkStartup(generation)
             guard capture.running else {throw ProxyError("核心已经退出")}
-            try Task.checkCancellation()
+            timing.finish()
             connection = .connected;recoveryPending=proxy.hasRecovery
-            if stopRequested || pendingRecovery { await client.shutdown() }
-            else { startTelemetry(client) }
+            startTelemetry(client)
         } catch {
+            timing.finish(succeeded:false)
             await client.shutdown()
             let original=error
             if next.captureMode.usesTunnel,let status=try? await capture.helperStatus() {
                 log("辅助服务失败阶段："+(status.phase ?? "未知")+"；原因："+status.message)
                 for line in status.coreDiagnostics ?? [] {log("TUN 核心："+line)}
             }
-            do{try await capture.emergencyRecover()}catch{recoveryPending=true;throw ProxyError("启动失败："+original.localizedDescription+"；"+error.localizedDescription)}
+            timing.begin("recovery")
+            do{try await capture.emergencyRecover();timing.finish()}catch{timing.finish(succeeded:false);recoveryPending=true;throw ProxyError("启动失败："+original.localizedDescription+"；"+error.localizedDescription)}
             throw original
         }
     }
@@ -330,14 +388,18 @@ import QingzhouKit
             stopTelemetry();connection = .error;report(original)
         }
     }
-    private func disconnectInternal() async throws {stopTelemetry();connection = .disconnecting;do{try await capture.stop()}catch{recoveryPending=true;connection = .error;throw error};recoveryPending=proxy.hasRecovery;connection = .disconnected;connectivityResults=[];reachability="尚未检测";log("本次连接已停止；本地代理恢复完成，辅助服务是否恢复取决于本次接管状态")}
+    private func disconnectInternal() async throws {startupGeneration=UUID();startupStage=nil;stopTelemetry();connection = .disconnecting;do{try await capture.stop()}catch{recoveryPending=true;connection = .error;throw error};recoveryPending=proxy.hasRecovery;connection = .disconnected;connectivityResults=[];reachability="尚未检测";log("本次连接已停止；本地代理恢复完成，辅助服务是否恢复取决于本次接管状态")}
     func disconnect() async {
         guard canStop else{return}
+        startupGeneration=UUID();startupStage=nil;startupProbeTask?.cancel()
+        if let startupClient {Task {await startupClient.shutdown()}}
         log("用户请求断开连接");stopTelemetry();cancelMeasurement();stopRequested=true
         drainPendingDisconnect()
     }
     func recover() async {
         guard !loadingFailed,!recovering else{return}
+        startupGeneration=UUID();startupStage=nil;startupProbeTask?.cancel()
+        if let startupClient {Task {await startupClient.shutdown()}}
         recovering=true;pendingRecovery=true;stopRequested=false
         stopTelemetry();cancelMeasurement();drainPendingDisconnect()
     }

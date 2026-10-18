@@ -126,3 +126,10 @@ python3 scripts/runtime-optimization-mutations.py
 新增客户端位于 [clients/qingzhou](clients/qingzhou/README.md)，保留现有 macOS SwiftUI 应用。三端共享 Flutter 业务和界面，原生服务负责网络接管；当前尚未完成三端安装与实网验收。构建方法、功能差距和交付边界见客户端说明及 [跨平台验证记录](docs/verification-crossplatform.md)。
 
 当前暂停 iOS 开发，继续推进 Android 和 Windows。Windows 本机操作见 [构建与安装说明](docs/windows-build.md)。
+
+
+## 连接启动提速（0.8.17）
+
+双目标节点检测在任一成功后取消剩余请求；TUN 节点域名去重并以四并发、三秒单项/六秒整批预算解析，底层槽位跨重试共享。接管前后 DNS 基线以四并发检查，所有原有保护和两轮连通性验收保留。连接页显示实际阶段，重试显示次数和等待时间；诊断日志增加脱敏阶段耗时。辅助服务协议仍为 4，新包仍需重新批准更新辅助服务。
+
+隔离检查与基准：`.build/debug/QingzhouChecks startup-checks`、`.build/debug/QingzhouChecks startup-benchmark .build/startup-benchmark.json`、`python3 scripts/startup-optimization-mutations.py`。合成基准不能代替真实 TUN 提速结果。实现、验收与未完成项目见[启动优化验收记录](docs/verification-startup-optimization.md)。

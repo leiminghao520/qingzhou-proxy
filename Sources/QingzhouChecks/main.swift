@@ -4,6 +4,21 @@ import Darwin
 import SystemConfiguration
 
 let args = CommandLine.arguments
+if args.count == 3 && args[1] == "startup-benchmark" {
+    Task {
+        do {try await runStartupBenchmark(output:URL(fileURLWithPath:args[2]));exit(0)}
+        catch {print("启动隔离基准失败："+error.localizedDescription);exit(1)}
+    }
+    dispatchMain()
+}
+if args.count == 2 && args[1] == "startup-checks" {
+    Task {
+        do {try await runStartupOptimizationChecks()} catch {CheckHarness.failure("启动优化检查异常："+error.localizedDescription,file:#filePath,line:#line)}
+        print("RESULT startup_assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
+        exit(CheckHarness.failures == 0 ? 0 : 1)
+    }
+    dispatchMain()
+}
 if args.count == 3 && args[1] == "traffic-transport-checks", let port = Int(args[2]), (1...65535).contains(port) {
     Task { @MainActor in
         await runTrafficTransportChecks(port: port)
@@ -312,6 +327,7 @@ do{let t=CapturePlanTests();run("CapturePlan.protection",t){try t.testProtection
 do{let t=KeychainUXTests();run("KeychainUX.authorization",t){try t.testAuthorizationRetryAndCache()};run("KeychainUX.errors",t){try t.testDistinctErrorsAndAtomicCache()}}
 do{let t=StabilityTests();run("Stability.snapshotRetryAndLatency",t){t.testSnapshotRetryAndLatency()};run("Stability.dnsQueueBoundsBudgetAndStop",t){t.testDNSQueueBoundsBudgetAndStop()};run("Stability.subscriptionClassificationAndRetry",t){t.testSubscriptionClassificationAndRetry()}}
 Task {
+    do {try await runStartupOptimizationChecks()} catch {CheckHarness.failure("启动优化检查异常",file:#filePath,line:#line)}
     await runRuntimeOptimizationChecks()
     await runStabilityAsyncChecks()
     await runCaptureActivationChecks()
@@ -325,7 +341,7 @@ Task {
     await runNetworkProbeChecks()
     await runAsyncChecks()
     do{try await runTransactionChecks()}catch{CheckHarness.failure("事务场景异常",file:#filePath,line:#line)}
-    print("RESULT scenarios=\(scenarios + 45) assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
+    print("RESULT scenarios=\(scenarios + 46) assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
     exit(CheckHarness.failures == 0 ? 0 : 1)
 }
 dispatchMain()

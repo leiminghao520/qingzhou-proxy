@@ -100,9 +100,9 @@ public final class ScopedDNSForwarder {
         let query=Data([0x71,0x7a,1,0,0,1,0,0,0,0,0,0,0,0,2,0,1])
         let deadline=Date().addingTimeInterval(5)
         for server in resolver.servers {
-            guard Date()<deadline else{return false}
+            guard !isStopped,Date()<deadline else{return false}
             let response=transport?(query,server,resolver.interface) ?? (transport==nil ? Self.exchange(query,server,resolver.interface,deadline:deadline):nil)
-            if let response,Date()<deadline,DNSPacket.acceptable(response,query:query) {return true}
+            if let response,!isStopped,Date()<deadline,DNSPacket.acceptable(response,query:query) {return true}
         }
         return false
     }

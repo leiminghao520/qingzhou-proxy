@@ -112,6 +112,9 @@ struct SimpleConnectionView: View {
                         .liquidControl(in: Circle(), tint: Theme.accentBlue.opacity(0.1), interactive: false)
                         .accessibilityHidden(true)
                         Text(status).font(.title2.bold()).multilineTextAlignment(.center)
+                        if model.connection == .connecting,let stage=model.startupStage {
+                            Text(stage).font(.callout).foregroundStyle(.secondary).accessibilityIdentifier("connectionStage")
+                        }
                         if needsImport && model.connection != .connected {
                             Text("添加订阅或节点，开始使用轻舟。")
                                 .foregroundStyle(.secondary)

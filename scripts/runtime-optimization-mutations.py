@@ -34,9 +34,9 @@ mutations = [
 ]
 
 
-def run(command, output):
+def run(command, output, timeout=120):
     with output.open("wb") as log:
-        return subprocess.run(command, cwd=STAGE, stdout=log, stderr=log, timeout=120).returncode
+        return subprocess.run(command, cwd=STAGE, stdout=log, stderr=log, timeout=timeout).returncode
 
 
 # 先确认隔离副本本身通过，避免把既有失败计为检出。
@@ -57,14 +57,18 @@ for index, (name, filename, old, new) in enumerate(mutations):
         product = "QingzhouHelper" if folder == "QingzhouHelper" else "QingzhouChecks"
         if run(["bash", "scripts/swift-local.sh", "build", "--product", product], STAGE / f"build-{index}.log") == 0:
             command = ["bash", "scripts/network-monitor-checks.sh"] if folder == "QingzhouHelper" else [str(STAGE / ".build/debug/QingzhouChecks"), "optimization-checks"]
-            status = "KILLED" if run(command, STAGE / f"checks-{index}.log") else "SURVIVED"
+            try:
+                status = "KILLED" if run(command, STAGE / f"checks-{index}.log", timeout=30) else "SURVIVED"
+            except subprocess.TimeoutExpired:
+                # 正常基线已通过；变异造成的挂起单独记录，不能让整个检查丢失后续结果。
+                status = "KILLED_TIMEOUT"
         results.append({"name": name, "file": filename, "status": status})
         print(status, name, flush=True)
     finally:
         path.write_text(original)
 summary = {"scope": "首批优化的十五项定向变异，不代表全项目变异检出率", "results": results}
-for status in ("KILLED", "SURVIVED", "BUILD_ERROR"):
+for status in ("KILLED", "KILLED_TIMEOUT", "SURVIVED", "BUILD_ERROR"):
     summary[status] = sum(row["status"] == status for row in results)
 (ROOT / ".build/runtime-optimization-mutations.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2))
 print("RESULT " + json.dumps({key: value for key, value in summary.items() if key != "results"}, ensure_ascii=False))
-raise SystemExit(0 if summary["KILLED"] == len(mutations) else 1)
+raise SystemExit(0 if summary["KILLED"] + summary["KILLED_TIMEOUT"] == len(mutations) else 1)
