@@ -210,7 +210,9 @@ return};var issues:[String]=[]
         let baseline=plan.snapshot.resolvers.filter{forwarder.probe($0)}
         guard baseline.contains(where:{$0.interface==primary}) else {throw NetworkEnvironmentNotReady("原公网 DNS 不可用，未接管网络")}
         for domain in plan.domains {
-            guard let resolver=plan.resolvers(for:domain).first,baseline.contains(where:{$0.service==resolver.service}) else {throw ProxyError("企业 DNS 无法确认可用，未接管网络")}
+            // 没有企业作用域时由转发器拒绝内网查询；已有作用域仍须通过可用性检查。
+            guard let resolver=plan.resolvers(for:domain).first else {continue}
+            guard baseline.contains(where:{$0.service==resolver.service}) else {throw ProxyError("企业 DNS 无法确认可用，未接管网络")}
         }
         phase="coreValidation"
         let config=try TunConfigBuilder.build(state:state,credentials:memory,control:control,address4:address4,address6:address6,originalDNS:dns,bypass:bypass.map{$0+($0.contains(":") ? "/128":"/32")},httpCompatibilityPort:request.httpCompatibilityPort,plan:plan,dnsForwardPort:forwarder.port,nodeInterfaces:try plan.nodeInterfaces(nodeAddresses,family:state.effectiveAddressFamilyPolicy))

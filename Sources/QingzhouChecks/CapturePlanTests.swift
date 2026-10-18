@@ -21,7 +21,20 @@ final class CapturePlanTests:CheckCase {
         var bad=fixture();bad.routes.append(ProtectedRoute(destination:"0.0.0.0/1",gateway:"link#15",interface:"utun6"));expectThrows(try CapturePlan.make(snapshot:bad,extraCIDRs:[],extraDomains:[]))
         expectThrows(try CapturePlan.make(snapshot:fixture(),extraCIDRs:["0.0.0.0/0"],extraDomains:[]))
         expectThrows(try CapturePlan.make(snapshot:fixture(),extraCIDRs:[],extraDomains:["*.bad"]))
-        var noVPN=fixture();noVPN.resolvers.removeAll{$0.interface=="utun6"};expectThrows(try CapturePlan.make(snapshot:noVPN,extraCIDRs:[],extraDomains:["private.example"]))
+        var noVPN=fixture();noVPN.resolvers.removeAll{$0.interface=="utun6"};noVPN.routes.removeAll{CapturePlan.isVPN($0.interface)}
+        let offline=try CapturePlan.make(snapshot:noVPN,extraCIDRs:[],extraDomains:["private.example"])
+        expectTrue(offline.protects("api.private.example"));expectTrue(offline.resolvers(for:"private.example").isEmpty)
+        expectTrue(offline.resolvers(for:"api.private.example").isEmpty)
+        expectEqual(offline.resolvers(for:"www.example.com").first?.interface,"en0")
+        expectEqual(offline.resolvers(for:"private.example.attacker.test").first?.interface,"en0")
+        let relay=try ScopedDNSForwarder(plan:offline);defer{relay.stop()}
+        var contacted=false
+        let failed=relay.resolve(query("api.private.example"),name:"api.private.example",exchange:{_,_,_ in contacted=true;return nil})
+        expectEqual(failed[3]&15,2);expectFalse(contacted)
+        noVPN.resolvers[0].domains=["private.example"]
+        let lan=try CapturePlan.make(snapshot:noVPN,extraCIDRs:[],extraDomains:["private.example"])
+        expectEqual(lan.resolvers(for:"api.private.example").first?.interface,"en0")
+        expectEqual(try lan.domainRoute(address:"192.168.66.20",resolver:lan.resolvers(for:"api.private.example")[0]).interface,"en0")
     }
     func query(_ name:String)->Data {var bytes:[UInt8]=[0x12,0x34,1,0,0,1,0,0,0,0,0,0];for label in name.split(separator:"."){bytes.append(UInt8(label.utf8.count));bytes+=label.utf8};bytes += [0,0,1,0,1];return Data(bytes)}
     func testDNSRetriesAndNoPublicFallback() throws {

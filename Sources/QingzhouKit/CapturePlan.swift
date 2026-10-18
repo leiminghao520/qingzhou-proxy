@@ -112,7 +112,6 @@ public struct CapturePlan:Codable,Equatable,Sendable {
             }
         }
         let autoDomains=snapshot.resolvers.flatMap(\.protectedDomains)
-        guard extraDomains.isEmpty || snapshot.resolvers.contains(where:{Self.isVPN($0.interface)}) else{throw ProxyError("补充内网域名需要可识别的企业 DNS 接口")}
         return CapturePlan(snapshot:snapshot,protectedRoutes:stableRoutes.sorted{(Int($0.destination.split(separator:"/").last ?? "0") ?? 0)>(Int($1.destination.split(separator:"/").last ?? "0") ?? 0)},domains:Array(Set(autoDomains+extraDomains)).map{$0.lowercased()}.sorted(),exclusions:Array(Set(Self.localCIDRs+extraCIDRs)).sorted())
     }
     public func protects(_ domain:String)->Bool {
@@ -157,6 +156,8 @@ public struct CapturePlan:Codable,Equatable,Sendable {
             // 未匹配到明确作用域时只选择最高优先级企业解析器，不向所有 VPN 广播。
             let corporate=snapshot.resolvers.filter{Self.isVPN($0.interface)}.sorted{$0.order<$1.order}
             if let first=corporate.first {return [first]}
+            // 企业 VPN 离线时保留域名保护，只拒绝该域名的查询，不阻止普通代理连接。
+            if domains.contains(where:{name==$0 || name.hasSuffix("."+$0)}) {return []}
         }
         let defaults=snapshot.resolvers.filter{$0.defaultResolver};return defaults.isEmpty ? snapshot.resolvers.filter{$0.interface==snapshot.primaryInterface}:defaults
     }
