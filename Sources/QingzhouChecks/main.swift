@@ -4,6 +4,14 @@ import Darwin
 import SystemConfiguration
 
 let args = CommandLine.arguments
+if args.count == 2 && args[1] == "vps-checks" {
+    Task {
+        do {try await runVPSChecks()} catch {CheckHarness.failure("VPS 联动检查异常："+error.localizedDescription,file:#filePath,line:#line)}
+        print("RESULT vps_assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
+        exit(CheckHarness.failures == 0 ? 0 : 1)
+    }
+    dispatchMain()
+}
 if args.count == 2 && args[1] == "quit-recovery-checks" {
     Task {
         do {try await runQuitRecoveryChecks()} catch {CheckHarness.failure("退出恢复检查异常："+error.localizedDescription,file:#filePath,line:#line)}
@@ -350,6 +358,7 @@ run("DomesticRouting.conflictOrder",t){t.testConflictOrderAndDirectRulesArePrese
 }
 
 Task {
+    do {try await runVPSChecks()} catch {CheckHarness.failure("VPS 联动检查异常",file:#filePath,line:#line)}
     do {try await runStartupOptimizationChecks()} catch {CheckHarness.failure("启动优化检查异常",file:#filePath,line:#line)}
     do {try await runQuitRecoveryChecks()} catch {CheckHarness.failure("退出恢复检查异常",file:#filePath,line:#line)}
     await runRuntimeOptimizationChecks()

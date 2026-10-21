@@ -1,0 +1,32 @@
+{% extends 'base.html' %}{% from '_macros.html' import csrf,device_fields,owner_fields with context %}
+{% block location %}设备与订阅{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ url_for('user_detail',user_id=device.user_id) }}">← {{ device.user_name }}</a>
+<header class="page-header"><div><p class="eyebrow">专属设备订阅</p><h1>{{ device.name }}</h1><p class="muted">{{ device.platform }} · 人工登记 · 最近在线 {{ device.last_online_at|bjtime }}</p></div><span class="badge {{ 'positive' if device.enabled and device.user_enabled else '' }}">{{ '启用' if device.enabled and device.user_enabled else '停用' }}</span></header>
+{% if pending %}<p class="notice warning">凭据状态已保存，在线连接断开待重试。在断开完成前，该设备的新连接也会被拒绝。<a href="{{ url_for('operations') }}">查看重试状态 →</a></p>{% endif %}
+<div class="cards compact"><article><span>在线实例</span><strong>{{ metrics.online if metrics.online is not none else '—' }}</strong></article><article><span>近 180 天已观测下载</span><strong>{{ usage.rx|bytes }}</strong></article><article><span>近 180 天已观测上传</span><strong>{{ usage.tx|bytes }}</strong></article></div>
+<section class="panel subscription-panel"><div class="step-heading"><span class="step">1</span><div><h2>选择客户端</h2><p class="muted">按实际使用的软件获取合适格式。</p></div></div>
+<form method="get" class="filters"><label class="grow">客户端／配置类型<select name="client">{% for value,format in formats.items() %}<option value="{{ value }}" {{ 'selected' if kind==value }}>{{ format[0] }}</option>{% endfor %}</select></label><button class="secondary">切换格式</button></form>
+<div class="step-heading"><span class="step">2</span><div><h2>获取专属订阅</h2><p class="muted">{{ formats[kind][0] }}</p></div></div>
+{% if device.enabled and device.user_enabled %}
+{% if kind=='shadowrocket' %}<p class="notice info">在 Shadowrocket 的订阅管理中添加此地址，并更新订阅。分流规则沿用客户端当前配置。</p>
+{% elif kind=='shadowrocket-full' %}<p class="notice info">下载后作为 Shadowrocket 配置文件导入，包含节点与分流。启用前检查是否需要保留已有规则。</p>
+{% elif kind=='mihomo' %}<p class="notice info">在 Clash Verge 等 Mihomo 客户端的配置管理中添加此地址，更新并启用。此处提供完整 YAML 配置。</p>
+{% elif kind=='sing-box' %}<p class="notice info">下载 JSON 后通过 sing-box 配置入口导入。请使用支持当前配置格式的客户端。</p>
+{% else %}<p class="notice info">此地址返回通用 HY2 节点链接。下载或打开后，将文件中的 hysteria2:// 链接导入支持的客户端；不包含分流规则。</p>{% endif %}
+<label for="subscription-url">设备私有地址<input id="subscription-url" type="password" readonly value="{{ link }}" class="mono" aria-describedby="secret-tip"></label>
+<button type="button" class="secondary visibility-toggle" id="subscription-visibility" aria-controls="subscription-url" aria-pressed="false">显示订阅地址</button>
+<p id="secret-tip" class="muted">此地址包含访问凭据，仅分享给该设备的使用者。</p>
+<div class="actions"><button type="button" data-copy="subscription-url">复制{{ '下载地址' if kind=='hy2' else '订阅地址' }}</button><a class="button secondary" href="{{ link }}">下载配置</a></div>
+<details class="qr-details"><summary>展开订阅地址二维码</summary><img width="184" height="184" data-src="{{ url_for('qr',device_id=device.id,kind=kind) }}" alt="此设备的私有订阅地址二维码"><p class="muted">二维码内容为上方地址；通用 HY2 请先下载并导入文件内的节点链接。</p></details>
+{% else %}<p class="notice warning">设备或所属用户已停用，订阅不可获取。启用后再导入。</p>{% endif %}
+</section>
+<section class="panel"><h2>设备资料</h2><form class="form-grid" method="post">{{ csrf() }}<input type="hidden" name="action" value="edit">{{ device_fields(device) }}<div class="form-end"><button class="secondary">保存资料</button></div></form></section>
+<section class="panel qingzhou-link-panel" id="qingzhou-link" aria-labelledby="qingzhou-link-title">
+<div class="panel-head"><div class="link-panel-title"><span class="pairing-symbol small-symbol" aria-hidden="true">⇄</span><div><h2 id="qingzhou-link-title">轻舟 VPS 联动</h2><p class="muted">让设备信息与轻舟保持同步</p></div></div><span class="badge">独立授权</span></div>
+<div class="link-panel-content"><div><p>在轻舟中查看设备用量、服务器状态与套餐，按需启用加密备份。</p><p class="muted">每个配对码有效十分钟，仅可兑换一次；已有订阅和代理连接照常使用。</p></div>
+{% if device.enabled and device.user_enabled %}<form method="post" action="{{ url_for('client_api.pair_create', device_id=device.id) }}">{{ csrf() }}<button>生成轻舟配对码 <span aria-hidden="true">→</span></button></form>{% else %}<span class="badge warning">启用设备及所属用户后可配对</span>{% endif %}</div>
+<div class="link-panel-revoke"><div><h3>撤销联动授权</h3><p class="muted">取消此设备的联动访问及未使用的配对码，节点订阅和代理连接保持不变。</p></div><form method="post" action="{{ url_for('client_api.pair_revoke', device_id=device.id) }}" data-confirm="撤销此设备全部轻舟联动授权及未使用的配对码？节点订阅与代理连接不受影响。">{{ csrf() }}<button class="secondary">撤销授权</button></form></div>
+</section>
+<section class="panel danger-zone"><h2>设备操作</h2><div class="two-columns"><div><h3>{{ '停用设备' if device.enabled else '重新启用设备' }}</h3><p class="muted">仅影响本设备，其他设备可以继续使用。</p><form method="post" class="stack" data-confirm="{{ '本设备的订阅将失效，并断开已有连接。' if device.enabled else '重新启用本设备；如果所属用户已停用，仍无法连接。' }}">{{ csrf() }}<input type="hidden" name="action" value="{{ 'disable' if device.enabled else 'enable' }}">{% if device.enabled %}{{ owner_fields(device.role) }}{% endif %}<button class="secondary">{{ '停用设备' if device.enabled else '重新启用' }}</button></form></div><div><h3>轮换凭据</h3><p class="muted">旧密码和旧订阅立即失效，需重新导入此设备的新配置。</p><form method="post" class="stack" data-confirm="旧密码和旧订阅将立即失效。断开完成后，需要重新导入新配置才能连接。">{{ csrf() }}<input type="hidden" name="action" value="rotate">{{ owner_fields(device.role) }}<button class="danger">轮换设备凭据</button></form></div></div></section>
+{% endblock %}

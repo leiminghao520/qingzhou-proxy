@@ -8,7 +8,7 @@ enum InterfaceMode: String {
 
 enum AppPage: String, Identifiable {
     case home, lines, subscriptions, settings, overview, nodes, groups, rules, profiles
-    case connections, explanation, diagnostics, logs
+    case connections, explanation, diagnostics, logs, vps
     var id: Self { self }
     var title: String {
         switch self {
@@ -25,6 +25,7 @@ enum AppPage: String, Identifiable {
         case .explanation: return "规则解释"
         case .diagnostics: return "诊断"
         case .logs: return "运行日志"
+        case .vps: return "VPS 联动"
         }
     }
     var icon: String {
@@ -41,6 +42,7 @@ enum AppPage: String, Identifiable {
         case .explanation: return "magnifyingglass.circle"
         case .diagnostics: return "stethoscope"
         case .logs: return "terminal"
+        case .vps: return "server.rack"
         }
     }
 }

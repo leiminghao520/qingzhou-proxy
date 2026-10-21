@@ -1,0 +1,8 @@
+Flask>=3.1,<4
+argon2-cffi>=23.1,<26
+pyotp>=2.9,<3
+cryptography>=42,<47
+PyYAML>=6,<7
+qrcode[pil]>=7.4,<9
+gunicorn>=22,<24
+pytest>=8,<9

@@ -1,0 +1,7 @@
+{% extends 'base.html' %}{% from '_macros.html' import csrf,service_cards with context %}
+{% block location %}服务运维{% endblock %}
+{% block content %}<header class="page-header"><div><p class="eyebrow">服务健康</p><h1>服务运维</h1><p class="muted">检查运行状态，处理尚未断开的设备连接。</p></div><a class="button secondary" href="{{ url_for('operations') }}">刷新状态</a></header>
+<section class="panel">{{ service_cards(service) }}</section>
+<section class="panel"><div class="panel-head"><div><h2>待断开连接</h2><p class="muted">每分钟自动重试。待处理设备无法建立新连接。</p></div>{% if pending %}<form method="post">{{ csrf() }}<input type="hidden" name="operation" value="retry-kicks"><button>立即重试</button></form>{% endif %}</div><div class="table-wrap"><table><thead><tr><th>设备</th><th>创建时间</th><th>尝试次数</th></tr></thead><tbody>{% for item in pending %}<tr><td>{{ item.name }}</td><td>{{ item.created_at|bjtime }}</td><td>{{ item.attempts }}</td></tr>{% else %}<tr><td colspan="3" class="empty">没有待处理任务</td></tr>{% endfor %}</tbody></table></div></section>
+<section class="panel"><h2>网页服务</h2><p class="muted">先校验 Nginx 配置，再执行重载。</p><form method="post" data-confirm="将校验并重载 Nginx 网页服务配置。">{{ csrf() }}<input type="hidden" name="operation" value="reload"><button class="secondary">校验并重载 Nginx</button></form></section>
+<section class="panel"><h2>版本恢复</h2><p class="muted">恢复需要配套的程序、数据库和服务配置备份，由管理员在维护窗口执行。单独恢复代理配置可能造成认证状态不一致。</p></section>{% endblock %}

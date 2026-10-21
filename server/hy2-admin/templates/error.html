@@ -1,0 +1,1 @@
+{% extends 'base.html' %}{% block content %}<section class="panel error-page"><p class="eyebrow">{{ code }}</p><h1>{{ message }}</h1><p class="muted">如刚刚修改过凭据，请使用最新订阅地址。</p><a class="button" href="{{ url_for('dashboard') if session.admin else url_for('login') }}">返回{{ '概览' if session.admin else '登录' }}</a></section>{% endblock %}

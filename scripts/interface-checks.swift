@@ -41,6 +41,7 @@ struct InterfaceChecks {
         let model = AppModel()
         guard !model.loadingFailed, !model.state.autoConnect else { throw ProxyError("隔离模型初始化失败") }
         var checks = 0
+        var screenshotCount = 0
         func check(_ condition: Bool, _ message: String) throws {
             guard condition else { throw ProxyError(message) }
             checks += 1
@@ -77,7 +78,44 @@ struct InterfaceChecks {
             window.appearance = NSAppearance(named: appearance)
             await settle()
             try screenshot(window, to: output.appendingPathComponent(name + ".png"))
+            screenshotCount += 1
         }
+        let vps=VPSCenter(directory:output.appendingPathComponent("isolated-vps"),refreshEnabled:false)
+        vps.binding=VPSCenter.Binding(endpoint:"https://fixture.invalid/api/client/v1",subscription:UUID(),tokenRef:"fixture")
+        vps.owner=true
+        vps.status = .object(["state":.string("fresh"),"captured_at":.number(Date().timeIntervalSince1970),"data":.object(["hysteria":.string("active"),"auth":.string("active"),"nginx":.string("active")])])
+        vps.billing = .object(["state":.string("fresh"),"data":.object(["configured":.bool(true),"charge_type":.string("BANDWIDTH_PREPAID"),"packages":.array([.object(["total_gb":.number(100),"remaining_gb":.number(35)])])])])
+        vps.devices = .object(["devices":.array([.object(["name":.string("隔离测试 Mac"),"platform":.string("macOS"),"enabled":.number(1)])])])
+        vps.usage = .object(["today":.object(["upload":.number(1048576),"download":.number(8388608),"complete":.bool(false)])])
+        host.rootView=AnyView(VPSView(model:model,center:vps))
+        try await capture("vps-linked-light")
+        try await capture("vps-linked-dark",.darkAqua)
+        func scrollView(_ view:NSView)->NSScrollView? {
+            if let scroll=view as? NSScrollView{return scroll}
+            for child in view.subviews {if let scroll=scrollView(child){return scroll}}
+            return nil
+        }
+        if let scroll=scrollView(host),let document=scroll.documentView {
+            scroll.contentView.scroll(to:NSPoint(x:0,y:max(0,document.bounds.height-scroll.contentView.bounds.height)))
+            scroll.reflectScrolledClipView(scroll.contentView)
+            try await capture("vps-tools-light")
+            try await capture("vps-tools-dark",.darkAqua)
+            vps.billing = .object(["state":.string("fresh"),"captured_at":.number(Date().timeIntervalSince1970),"data":.object([
+                "configured":.bool(true),"charge_type":.string("TRAFFIC_POSTPAID_BY_HOUR"),
+                "expires":.string("2027-09-15T13:22:51Z"),"bills":.array([]),
+                "packages":.array([.object(["scope":.string("instance_package"),"unit":.string("GiB"),
+                    "total_gb":.number(1536),"remaining_gb":.number(1496.01)])])])])
+            scroll.contentView.scroll(to:NSPoint(x:0,y:350))
+            scroll.reflectScrolledClipView(scroll.contentView)
+            try await capture("vps-lighthouse-light")
+            try await capture("vps-lighthouse-dark",.darkAqua)
+        }else{throw ProxyError("VPS 滚动容器不可用")}
+        vps.startSpeed(model:model)
+        try check(!vps.speedRunning,"断开时不能运行 VPS 测速")
+        try check(VPSCenter.isBackupName("backup-20261021T000000Z.tar.age") && !VPSCenter.isBackupName("../foreign.age"),"备份清理仅匹配受管文件名")
+        vps.binding=nil
+        try await capture("vps-pairing-light")
+        host.rootView=AnyView(root)
         try await capture("simple-empty-light")
         try await capture("simple-empty-dark", .darkAqua)
         // 只在独立检查程序中注入 SDK 的环境存储值，不改变系统辅助功能设置。
@@ -173,6 +211,7 @@ struct InterfaceChecks {
             try? await Task.sleep(nanoseconds: 600_000_000)
             view.layoutSubtreeIfNeeded()
             try screenshot(panel, to: output.appendingPathComponent(name + ".png"))
+            screenshotCount += 1
             panel.orderOut(nil)
         }
         try await component(SimpleLinesView(model: model, onImport: {}, onEdit: { _ in }, onProfessional: {}), "simple-lines")
@@ -205,7 +244,7 @@ struct InterfaceChecks {
         try check(!invalid.validating && invalid.result.issues.isEmpty,"规则文本修复后校验通过")
         try check(model.connection==connection,"新增界面未改变连接状态")
         try check(!FileManager.default.fileExists(atPath: model.directory.appendingPathComponent("proxy-recovery.json").path), "截图未创建代理接管记录")
-        print("INTERFACE_CHECKS_OK assertions=\(checks) screenshots=34")
+        print("INTERFACE_CHECKS_OK assertions=\(checks) screenshots=\(screenshotCount)")
         if CommandLine.arguments.contains("--interactive") {
             window.makeKeyAndOrderFront(nil)
             NSApplication.shared.activate(ignoringOtherApps: true)

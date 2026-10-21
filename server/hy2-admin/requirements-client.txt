@@ -1,0 +1,6 @@
+-r requirements.txt
+tencentcloud-sdk-python-common==3.1.177
+tencentcloud-sdk-python-cvm==3.1.177
+tencentcloud-sdk-python-vpc==3.1.177
+tencentcloud-sdk-python-billing==3.1.177
+tencentcloud-sdk-python-lighthouse==3.1.177

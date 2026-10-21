@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{% block title %}HY2 · 节点管理{% endblock %}</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static',filename='favicon.svg') }}">
+<script src="{{ url_for('static',filename='app.js') }}" defer></script>
+<link rel="stylesheet" href="{{ url_for('static',filename='style.css') }}"></head>
+<body class="{{ 'authenticated' if session.admin else 'guest' }}">
+<a class="skip-link" href="#content">跳到主要内容</a>
+{% if session.admin %}
+<aside id="sidebar" aria-hidden="false">
+<a class="brand" href="{{ url_for('dashboard') }}"><span class="brand-icon">H2</span><span>HY2 Console<small>私人节点管理</small></span></a>
+<p class="nav-label">工作空间</p>
+<nav aria-label="主导航">
+{% for endpoint,label,icon in [('dashboard','运行概览','◫'),('users','用户与设备','◎'),('operations','服务运维','◇'),('audit_page','操作记录','☷'),('security','安全设置','⚿')] %}
+<a href="{{ url_for(endpoint) }}" class="{{ 'active' if request.endpoint==endpoint or (endpoint=='users' and request.endpoint in ['user_detail','device_detail','client_api.pair_create']) else '' }}" {% if request.endpoint==endpoint %}aria-current="page"{% endif %}><span aria-hidden="true">{{ icon }}</span>{{ label }}</a>
+{% endfor %}</nav>
+<div class="sidebar-footer"><span class="status-dot"></span> 独立设备 · 私有订阅<small>后台身份与代理凭据独立</small></div>
+</aside>
+<button class="sidebar-backdrop" id="sidebar-backdrop" type="button" aria-label="关闭导航" hidden></button>
+{% endif %}
+<div class="workspace">
+<div class="topbar">
+{% if session.admin %}<button class="icon-button mobile-menu" id="menu-toggle" aria-controls="sidebar" aria-expanded="false" aria-label="展开导航">☰</button><span class="topbar-label">控制台 <span>/</span> {% block location %}工作空间{% endblock %}</span>{% else %}<a class="brand" href="{{ url_for('login') }}"><span class="brand-icon">H2</span>HY2 Console</a>{% endif %}
+<div class="top-actions"><button class="icon-button" id="theme-toggle" aria-label="切换深色模式">◐</button>
+{% if session.admin %}<span class="admin-name">{{ session.admin }}</span><form method="post" action="{{ url_for('logout') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="text-button">退出</button></form>{% endif %}</div>
+</div>
+<main id="content">
+{% for category,message in get_flashed_messages(with_categories=true) %}<div class="notice {{ category }}" role="status">{{ message }}</div>{% endfor %}
+{% block content %}{% endblock %}
+</main>
+<footer>HY2 Console <span>时间均为北京时间 · 用量按实际采样统计</span></footer>
+</div><div id="toast" role="status" aria-live="polite" hidden></div>
+<dialog id="confirm-dialog"><h2>确认此操作</h2><p id="confirm-message"></p><div class="actions"><button id="confirm-cancel" class="secondary">取消</button><button id="confirm-accept" class="danger">确认继续</button></div></dialog>
+</body></html>

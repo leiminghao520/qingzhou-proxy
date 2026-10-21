@@ -11,6 +11,7 @@ public final class ExternalDownloadClient: NSObject, DownloadClient, URLSessionD
     private struct Pending {
         var data = Data()
         var usage: String?
+        var clientAPI: String?
         var failure: Error?
         let limit: Int
         let continuation: CheckedContinuation<DownloadResult, Error>
@@ -82,7 +83,7 @@ public final class ExternalDownloadClient: NSObject, DownloadClient, URLSessionD
         if let http = response as? HTTPURLResponse {
             if !(200...299).contains(http.statusCode) {item.failure = SubscriptionFailure.status(http.statusCode)}
             else if response.expectedContentLength > Int64(item.limit) {item.failure = SubscriptionFailure.tooLarge}
-            else {item.usage = http.value(forHTTPHeaderField: "subscription-userinfo")}
+            else {item.usage = http.value(forHTTPHeaderField: "subscription-userinfo"); item.clientAPI = http.value(forHTTPHeaderField:"Qingzhou-Client-API")}
         } else {item.failure = SubscriptionFailure.http}
         pending[key] = item
         completionHandler(item.failure == nil ? .allow : .cancel)
@@ -101,7 +102,7 @@ public final class ExternalDownloadClient: NSObject, DownloadClient, URLSessionD
         lock.lock(); let item = pending.removeValue(forKey: ObjectIdentifier(task)); lock.unlock()
         guard let item else {return}
         if let error = item.failure ?? error.map({SubscriptionFailure.classify($0)}) {item.continuation.resume(throwing: error)}
-        else {item.continuation.resume(returning: DownloadResult(data: item.data, usageHeader: item.usage))}
+        else {item.continuation.resume(returning: DownloadResult(data: item.data, usageHeader: item.usage, clientAPI:item.clientAPI))}
     }
 }
 

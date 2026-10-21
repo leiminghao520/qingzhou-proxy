@@ -35,3 +35,22 @@ extension BackupService {
         do{for ref in CredentialReferences.all(state){guard let value=snapshot.credentials[ref] else{throw ProxyError("快照凭据缺失")};if let existing=try? credentials.get(ref){guard existing==value else{throw ProxyError("旧凭据引用发生冲突，未覆盖现有凭据")}}else{created.append(ref);try credentials.set(value,for:ref)}};try SecureFile.write(JSONEncoder().encode(state),to:url)}catch{for ref in created{try? credentials.remove(ref)};throw error}
     }
 }
+
+extension BackupService {
+    // 恢复密钥单独使用域隔离的认证标签，不能当作普通配置备份导入。
+    public static func encryptRecoveryKey(_ secret:String,password:String) throws -> Data {
+        let salt=Data((0..<16).map{_ in UInt8.random(in:0...255)})
+        let sealed=try AES.GCM.seal(Data(secret.utf8),using:key(password,salt:salt,rounds:600000),authenticating:Data("QingzhouVPSRecovery-v1".utf8)).combined!
+        return try JSONEncoder().encode(BackupEnvelope(version:1,rounds:600000,salt:salt,sealed:sealed))
+    }
+    public static func decryptRecoveryKey(_ data:Data,password:String) throws -> String {
+        guard data.count<16384 else{throw ProxyError("恢复密钥文件过大")}
+        do {
+            let envelope=try JSONDecoder().decode(BackupEnvelope.self,from:data)
+            guard envelope.version==1 else{throw ProxyError("恢复密钥版本不支持")}
+            let raw=try AES.GCM.open(AES.GCM.SealedBox(combined:envelope.sealed),using:key(password,salt:envelope.salt,rounds:envelope.rounds),authenticating:Data("QingzhouVPSRecovery-v1".utf8))
+            guard let text=String(data:raw,encoding:.utf8),text.contains("AGE-SECRET-KEY-") else{throw ProxyError("恢复密钥无效")}
+            return text
+        } catch{throw ProxyError("恢复密钥口令错误或文件损坏")}
+    }
+}

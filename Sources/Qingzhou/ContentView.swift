@@ -5,6 +5,11 @@ import QingzhouKit
 
 struct ContentView: View {
     @ObservedObject var model: AppModel
+    @StateObject private var vpsCenter:VPSCenter
+    init(model:AppModel) {
+        self.model=model
+        _vpsCenter=StateObject(wrappedValue:VPSCenter(directory:model.directory.appendingPathComponent("VPS")))
+    }
     @AppStorage("appearancePreference") private var appearance = AppearancePreference.system
     @AppStorage("interfaceMode") private var interfaceMode = InterfaceMode.simple
     @State private var page = AppPage.home
@@ -16,12 +21,12 @@ struct ContentView: View {
 
     private var navSections: [(title: String, items: [AppPage])] {
         if interfaceMode == .simple {
-            return [("日常使用", [.home, .lines, .subscriptions, .settings])]
+            return [("日常使用", [.home, .lines, .subscriptions, .vps, .settings])]
         }
         return [
             ("核心控制", [.overview, .nodes, .groups]),
             ("规则与配置", [.subscriptions, .rules, .profiles]),
-            ("监控与工具", [.connections, .explanation, .diagnostics, .logs]),
+            ("监控与工具", [.connections, .explanation, .diagnostics, .vps, .logs]),
             ("系统偏好", [.settings])
         ]
     }
@@ -285,6 +290,7 @@ struct ContentView: View {
             if interfaceMode == .simple {
                 SimpleSubscriptionsView(model: model, onImport: { importing = true })
             } else { SubscriptionsView(model: model) }
+        case .vps: VPSView(model:model,center:vpsCenter)
         case .rules: RuleView(model: model)
         case .connections: ConnectionsView(model: model)
         case .logs: RuntimeLogView(buffer: model.logBuffer)

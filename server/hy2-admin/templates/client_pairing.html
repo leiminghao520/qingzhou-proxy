@@ -1,0 +1,32 @@
+{% extends 'base.html' %}{% block content %}
+<div class="pairing-page">
+<a class="back-link" href="{{ url_for('device_detail',user_id=device.user_id,device_id=device.id) }}">← 返回设备详情</a>
+<header class="page-header"><div><p class="eyebrow">轻舟 · VPS 联动</p><h1>连接你的轻舟</h1><p class="muted">将此设备与轻舟配对，在 App 中查看用量、服务器状态与套餐。</p></div></header>
+<div class="pairing-layout">
+<section class="panel pairing-card" aria-labelledby="pairing-title">
+<div class="pairing-card-heading"><span class="pairing-symbol" aria-hidden="true">⇄</span><span class="badge positive">一次性授权</span></div>
+<h2 id="pairing-title">配对现有设备</h2><p class="muted pairing-intro">{{ device.name }}{% if device.platform %} · {{ device.platform }}{% endif %}</p>
+<div class="pairing-code-box">
+<label for="pairing-code">一次性配对码 <span class="pairing-code-meta">32 位 · 区分大小写</span></label>
+<input id="pairing-code" class="pairing-code" type="text" readonly value="{{ code }}" autocomplete="off" spellcheck="false" aria-label="一次性配对码" aria-describedby="pairing-copy-tip">
+<div class="pairing-code-actions"><span class="pairing-expiry" id="pairing-expiry" data-expires="{{ expires }}">十分钟内有效</span><button type="button" data-copy="pairing-code" data-copy-label="配对码" id="pairing-copy">复制配对码</button></div>
+<p id="pairing-copy-tip" class="muted">复制后，粘贴到轻舟的「VPS 联动」页面。</p>
+</div>
+<div class="pairing-security"><span aria-hidden="true">◇</span><p>仅限此设备使用，成功配对后此码立即失效。<br>请勿向他人分享配对码或此页面截图。</p></div>
+<div class="pairing-card-footer"><span>配对码有问题？</span><a href="{{ url_for('device_detail',user_id=device.user_id,device_id=device.id) }}#qingzhou-link">返回重新生成 →</a></div>
+</section>
+<aside class="panel pairing-guide" aria-labelledby="pairing-guide-title">
+<p class="eyebrow">只需三步</p><h2 id="pairing-guide-title">在 App 中完成配对</h2>
+<ol class="pairing-steps">
+<li><span class="step">1</span><div><h3>复制配对码</h3><p>点击左侧复制按钮，完整复制全部 32 位字符。</p></div></li>
+<li><span class="step">2</span><div><h3>打开 VPS 联动</h3><p>在轻舟中选择此设备的订阅，点击「检查联动能力」。</p></div></li>
+<li><span class="step">3</span><div><h3>粘贴并配对</h3><p>将配对码粘贴到输入框，点击「配对」即可。</p></div></li>
+</ol>
+<div class="pairing-guide-note"><strong>无需修改现有订阅</strong><p>联动授权独立于代理连接，配对不会更换节点或断开当前连接。</p></div>
+</aside>
+</div>
+<p class="pairing-footnote">重新生成会使此前的码失效。请使用最新配对码；不要刷新并重复提交此页面。</p>
+</div>
+{% endblock %}
+{% block title %}配对轻舟 · HY2 Console{% endblock %}
+{% block location %}用户与设备 / 配对轻舟{% endblock %}

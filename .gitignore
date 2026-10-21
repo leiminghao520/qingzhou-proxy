@@ -11,3 +11,13 @@ Vendor/*-source.tar.gz
 *.keyref
 *.pem
 *.key
+
+# 服务端运行数据与测试缓存不得进入源码交付。
+server/**/__pycache__/
+server/**/.pytest_cache/
+server/**/.coverage*
+server/**/*.sqlite3*
+server/**/*.env
+scripts/__pycache__/
+.playwright-cli/
+output/playwright/

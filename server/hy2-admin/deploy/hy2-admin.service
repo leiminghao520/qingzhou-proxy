@@ -1,0 +1,26 @@
+[Unit]
+Description=Hysteria 2 visual administration
+After=network-online.target hysteria-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hy2admin
+Group=hy2admin
+WorkingDirectory=/opt/hy2-admin
+EnvironmentFile=/etc/hy2-admin.env
+ExecStart=/opt/hy2-admin/.venv/bin/gunicorn --workers 2 --bind 127.0.0.1:8787 --access-logfile - --access-logformat %%(h)s\ %%(s)s\ %%(b)s app:create_app()
+Restart=on-failure
+RestartSec=3
+UMask=0077
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/hy2-admin
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target
