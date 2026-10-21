@@ -39,7 +39,7 @@ final class NetworkPolicyTests:CheckCase {
         expectNil(NetworkInspection.routeGateway("flags: <UP,DONE>",index:{_ in 14}))
         for operation in [NetworkInspection.RouteOperation.add,.delete] {
             expectEqual(NetworkInspection.routeArguments(operation,destination:"169.254.0.0/16",gateway:"link#14",interface:"en0"),["-n",operation.rawValue,"-net","169.254.0.0/16","-interface","en0"])
-            expectEqual(NetworkInspection.routeArguments(operation,destination:"ff02::fb/128",gateway:"link#14",ipv6:true,scope:"en0",interface:"en0"),["-n",operation.rawValue,"-inet6","-ifscope","en0","-net","ff02::fb/128","-interface","en0"])
+            expectEqual(NetworkInspection.routeArguments(operation,destination:"ff02::fb/128",gateway:"link#14",ipv6:true,scope:"en0",interface:"en0"),["-n",operation.rawValue,"-inet6","-ifscope","en0","-host","ff02::fb","-interface","en0"])
         }
         expectEqual(NetworkInspection.routePrefix(destination:"fe80::%en0",mask:"ffff:ffff:ffff:ffff::"),"fe80::/64")
         expectEqual(NetworkInspection.routePrefix(destination:"ff02::fb%en0",mask:nil,host:true),"ff02::fb/128")
@@ -52,7 +52,7 @@ final class NetworkPolicyTests:CheckCase {
         expectNil(NetworkInspection.routePrefix(destination:"default",mask:"128.0.0.0",host:true))
         expectEqual(NetworkInspection.routeArguments(.get,destination:"111.132.47.193",scope:"en0"),["-n","get","-ifscope","en0","-host","111.132.47.193"])
         expectEqual(NetworkInspection.routeArguments(.add,destination:"0.0.0.0/1",gateway:"192.0.2.1",scope:"en0"),["-n","add","-ifscope","en0","-net","0.0.0.0/1","192.0.2.1"])
-        expectEqual(NetworkInspection.routeArguments(.delete,destination:"::/1",gateway:"fe80::1%en0",ipv6:true,scope:"en0"),["-n","delete","-inet6","-ifscope","en0","-net","::/1","fe80::1%en0"])
+        expectEqual(NetworkInspection.routeArguments(.delete,destination:"::/1",gateway:"fe80::1%en0",ipv6:true,scope:"en0"),["-n","delete","-inet6","-ifscope","en0","-net","::","-prefixlen","1","fe80::1%en0"])
         expectEqual(NetworkInspection.routeArguments(.delete,destination:"0.0.0.0/1",gateway:"192.168.1.1"),["-n","delete","-net","0.0.0.0/1","192.168.1.1"])
 
         let abbreviated=TunAddressPlan.routePrefixes("100.64/10 10.251.1.1 UGSc utun6\n127 127.0.0.1 UCS lo0\n172.16/12 10.251.1.1 UGSc utun6\n198.18.0/16 10.251.1.1 UGSc utun6\n192.168.66 link#11 UCS en0\nfe80::%utun0/64 link#13 UcI utun0")

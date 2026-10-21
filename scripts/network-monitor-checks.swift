@@ -9,6 +9,14 @@ final class Service {
     let queue = DispatchQueue(label: "cn.qingzhou.monitor.fixture")
     let dynamic = SCDynamicStoreCreate(nil, "只读监控夹具" as CFString, nil, nil)!
     var capturePlan: CapturePlan?
+    var dynamicRules:DynamicCaptureRules?
+    var changeWindow=CaptureChangeWindow()
+    var protectedQueriesSuspended=false
+    var captureNodeAddresses:[String:[String]]=[:]
+    var captureNodeInterfaces:[String:String]=[:]
+    var knownProtectedDomains:Set<String>=[]
+    var dnsForwarder:ScopedDNSForwarder?
+    var domainRouteSummary:[String]=[]
     var journal: Journal?
     var activeRequest: TunRequest? = TunRequest(operation: "prepare", state: AppState())
     var owner: Int32? = 1
@@ -34,8 +42,14 @@ final class Service {
     var activatePrepared: (() throws -> Void)?
     var lastFailure: String?
     var stops = 0, starts = 0, proxyReads = 0
+    var preservedExternal=false
     var proxyIssues: [String] = []
+    var proxyMismatchSince:TimeInterval?
+    var proxyVerificationClock:()->TimeInterval={100}
+    var proxyVerificationWait:(TimeInterval)->Void={_ in fatalError("监控夹具禁止阻塞等待")}
+    func proxyLiveSample()->ProxyLiveSample? {ProxyLiveSample(expected:[:],current:[:])}
     var routeInfoHook: (() throws -> String)?
+    var writeRouteHook: (([String]) throws -> String)?
     var routeWrites = 0
     func routeInfo(_ destination:String,ipv6:Bool,scope:String?=nil,deadline:Date?=nil) throws -> String {
         guard let routeInfoHook else {throw ProxyError("夹具必须注入路由查询")}
@@ -44,10 +58,10 @@ final class Service {
     func field(_ label:String,_ text:String)->String? {label == "gateway" ? NetworkInspection.routeGateway(text):NetworkInspection.routeField(label,text)}
     func prefix(_ info:String)->String? {NetworkInspection.routePrefix(destination:field("destination",info),mask:field("mask",info),host:info.contains("HOST"))}
     func save() throws {}
-    func writeRoute(_ arguments:[String],deadline:Date?) throws -> String {routeWrites += 1;throw ProxyError("夹具禁止写系统路由")}
+    func writeRoute(_ arguments:[String],deadline:Date?) throws -> String {routeWrites += 1;if let writeRouteHook {return try writeRouteHook(arguments)};throw ProxyError("夹具禁止写系统路由")}
 
-    func proxyOwnershipIssues() -> [String] { proxyReads += 1; return proxyIssues }
-    func stop() throws { if !performingNetworkResume {cancelNetworkResume()}; stops += 1; try stopHook?(); networkChecks?.cancel(); capturePlan = nil; activeRequest = nil; owner = nil }
+    func proxyConfigurationIssues() -> [String] { proxyReads += 1; return proxyIssues }
+    func stop(preserveExternal:Bool=false) throws { preservedExternal=preserveExternal; if !performingNetworkResume {cancelNetworkResume()}; stops += 1; try stopHook?(); networkChecks?.cancel(); capturePlan = nil; activeRequest = nil; owner = nil }
     func start(_ request: TunRequest, fd: Int32) throws { starts += 1; try startHook?(); activeRequest = request; owner = fd; activatePrepared = {try self.activateHook?()} }
 }
 
@@ -58,6 +72,9 @@ final class Service {
         if !condition() { fatalError(message) }
     }
     static func main() throws {
+        if CommandLine.arguments.count==4 && CommandLine.arguments[1]=="--dynamic-fixture" {
+            try runDynamicFixture(URL(fileURLWithPath:CommandLine.arguments[2]),ports:JSONDecoder().decode([String:Int].self,from:Data(CommandLine.arguments[3].utf8)));return
+        }
         let dns: NSDictionary = ["ServerAddresses": ["100.64.1.1"]]
         let dnsData = try PropertyListSerialization.data(fromPropertyList: dns, format: .binary, options: 0)
         let table = "Internet:\nDestination Gateway Flags Netif\ndefault 192.168.1.1 UGSc en0\n10/8 192.168.1.1 UGSc en0\n0/1 link#42 USc utun42\n172.20/16 172.20.0.1 UGSc utun88\n"
@@ -79,9 +96,43 @@ final class Service {
         let original = stable.capturePlan!
         stable.activeRequest?.systemProxyPort = 7890
         stable.checkNetworkChange(); stable.checkNetworkChange()
-        check(samples == 2 && snapshots == 2 && dnsReads == 2 && stable.proxyReads == 2, "每轮只采一次路由，重新读取 DNS 和代理所有权")
+        check(samples == 2 && snapshots == 2 && dnsReads == 4 && stable.proxyReads == 2, "每轮只采一次路由，重新读取 DNS 和代理所有权")
         check(stable.stops == 0 && stable.starts == 0, "稳定网络不重启")
         check(stable.capturePlan == original, "采样复用不改变保护计划")
+
+        let ipv6Info="destination: 240e:1c:200::1\ngateway: fe80::1%en0\ninterface: en0\nflags: <UP,GATEWAY,HOST,STATIC>"
+        let omitted = try fixture()
+        omitted.journal!.routes.append(OwnedRoute(destination:"240e:1c:200::1/128",gateway:"fe80::1%en0",interface:"en0",ipv6:true))
+        omitted.routeInfoHook = {ipv6Info}
+        omitted.checkNetworkChange()
+        check(omitted.stops == 0, "表采样遗漏但精确查询身份一致时保持连接")
+        for changed in [ipv6Info.replacingOccurrences(of:"HOST,",with:"")+"\nmask: ::",ipv6Info.replacingOccurrences(of:"fe80::1",with:"fe80::2"),ipv6Info.replacingOccurrences(of:"STATIC",with:"STATIC,IFSCOPE")] {
+            let invalid=try fixture()
+            invalid.journal!.routes=omitted.journal!.routes
+            invalid.routeInfoHook={changed}
+            invalid.checkNetworkChange()
+            check(invalid.stops == 1, "前缀、网关或作用域不一致不能通过补查放行")
+        }
+        let conflict=try fixture()
+        conflict.routeInfoHook={"destination: default\nmask: 128.0.0.0\ninterface: utun42\nflags: <UP,STATIC>"}
+        conflict.routeSample={try NetworkRouteSample(read:{table.replacingOccurrences(of:"link#42",with:"link#99")})}
+        conflict.checkNetworkChange()
+        check(conflict.stops == 1, "已有同前缀冲突不得用查询结果覆盖")
+        for valid in [true,false] {
+            let writer=try fixture()
+            var reads=0
+            writer.routeInfoHook={reads += 1;return reads == 1 ? "destination: default\nmask: ::\ngateway: fe80::1%en0\ninterface: en0\nflags: <UP,GATEWAY>" : (valid ? ipv6Info : ipv6Info.replacingOccurrences(of:"HOST,",with:"")+"\nmask: ::")}
+            writer.writeRouteHook={arguments in
+                check(arguments.contains("-host") && !arguments.contains("-net"), "写入真实主机命令")
+                return "已写入"
+            }
+            do {
+                try writer.addRoute("240e:1c:200::1/128","fe80::1%en0","en0",ipv6:true)
+                check(valid,"错误掩码必须在激活前拒绝")
+            } catch {check(!valid,"正确主机路由应写入成功")}
+            check(writer.routeWrites == 1 && reads == 2,"写后必须重新核验")
+            check(writer.journal!.routes.last!.destination == "240e:1c:200::1/128", "失败不把错误前缀认领到恢复记录")
+        }
 
         let dnsChanged = try fixture()
         dnsChanged.networkDNSRead = { _ in nil }
@@ -121,6 +172,7 @@ final class Service {
         let replanned = try fixture()
         var now = Date(timeIntervalSince1970: 100)
         replanned.networkClock = { now }
+        replanned.networkUptime = {now.timeIntervalSince1970}
         replanned.networkSnapshotRead = { sample in NetworkSnapshot(primaryInterface: "en1", routes: NetworkSnapshot.parseRoutes(sample.table), resolvers: [resolver]) }
         replanned.checkNetworkChange()
         check(replanned.stops == 0, "变化先稳定一秒")
@@ -217,6 +269,35 @@ final class Service {
         } catch {check(!(error is NetworkEnvironmentNotReady), "默认路由冲突仍立即停止")}
         check(corporate.routeWrites == 0, "所有冲突测试均未调用系统路由写入")
 
+        let rejected=try fixture()
+        rejected.routeInfoHook={"destination: default\nmask: ::\ngateway: fe80::1%en0\ninterface: en0\nflags: <UP,GATEWAY>"}
+        rejected.writeRouteHook={_ in "route: writing to routing socket: File exists\nadd host: File exists"}
+        let beforeReject=rejected.journal!.routes.count
+        do {try rejected.addRoute("240e:1c:200::1/128","fe80::1%en0","en0",ipv6:true);check(false,"零退出码的路由错误必须拒绝")}
+        catch {check(rejected.journal!.routes.count == beforeReject,"明确未写入时不能留下外部路由所有权记录")}
+        let legacyBlocked=try fixture()
+        legacyBlocked.routeInfoHook={ipv6Info.replacingOccurrences(of:"STATIC",with:"STATIC,IFSCOPE")}
+        legacyBlocked.routeSample={try NetworkRouteSample(read:{"Internet6:\n240e:1c:200::1/0 fe80::1%en0 UGSc en0"})}
+        let beforeLegacy=legacyBlocked.journal!.routes.count
+        do {try legacyBlocked.addRoute("240e:1c:200::1/128","fe80::1%en0","en0",ipv6:true);check(false,"未知归属的异常项不能自动覆盖")}
+        catch {check(legacyBlocked.routeWrites == 0 && legacyBlocked.journal!.routes.count == beforeLegacy,"缓存存在时仍识别残留，且不认领外部异常路由")}
+        let preexisting=try fixture()
+        preexisting.routeInfoHook={ipv6Info.replacingOccurrences(of:"STATIC",with:"STATIC,IFSCOPE")}
+        preexisting.routeSample={try NetworkRouteSample(read:{"Internet6:\n240e:1c:200::1 fe80::1%en0 UGHS en0"})}
+        let beforeExisting=preexisting.journal!.routes.count
+        try preexisting.addRoute("240e:1c:200::1/128","fe80::1%en0","en0",ipv6:true)
+        check(preexisting.routeWrites == 0 && preexisting.journal!.routes.count == beforeExisting,"全局既有路由不能被缓存查询掩盖后重新写入并认领")
+
+        let cached=try fixture()
+        let physical=ProtectedRoute(destination:"202.101.172.35/32",gateway:"192.168.72.1",interface:"en0")
+        let cachedInfo="destination: 202.101.172.35\ngateway: 192.168.72.1\ninterface: en0\nflags: <UP,GATEWAY,HOST,WASCLONED,IFSCOPE>"
+        cached.routeSample={try NetworkRouteSample(read:{"Internet:\n202.101.172.35 192.168.72.1 UGHS en0\n202.101.172.35 192.168.72.1 UGHWI en0"})}
+        let cachedValid=try cached.verifiedRoute(physical,info:cachedInfo)
+        check(cachedValid,"接口缓存不能掩盖完整表中的全局静态路由")
+        cached.routeSample={try NetworkRouteSample(read:{"Internet:\n202.101.172.35 192.168.72.2 UGHS en0"})}
+        let cachedInvalid=try cached.verifiedRoute(physical,info:cachedInfo)
+        check(!cachedInvalid,"全局网关错误不能因接口缓存相同而放行")
+
         let activation = try fixture()
         var activateCallbacks: [() -> Void] = [], notReady = true
         activation.networkResumeSchedule = { _, callback in activateCallbacks.append(callback) }
@@ -227,6 +308,59 @@ final class Service {
         check(activation.phase == "active" && activation.starts == 2, "激活重试仍完成全部安全核验流程")
         check(TunReply(ok: true, message: "等待", running: false, phase: "networkReconnecting").networkReconnecting, "真实运行态与待重连态分别表达")
         check(!TunReply(ok: true, message: "失败", running: false, phase: "networkProtectionFailed").networkReconnecting, "终止失败不能伪装为等待")
+
+        // 完整监听流程：先连接轻舟，再分批添加企业 DNS 与路由，最后退出并重新接入。
+        let hot=try fixture()
+        let directory=FileManager.default.temporaryDirectory.appendingPathComponent("qz-hot-"+UUID().uuidString)
+        defer {try? FileManager.default.removeItem(at:directory)}
+        hot.dynamicRules=try DynamicCaptureRules(directory:directory,plan:hot.capturePlan!)
+        var tick=100.0
+        hot.networkUptime={tick}
+        var corporateResolvers=[resolver]
+        var corporateRoutes:[ProtectedRoute]=[]
+        hot.routeSample={try NetworkRouteSample(read:{table+corporateRoutes.map{$0.destination+" "+$0.gateway+" UGSc "+$0.interface+"\n"}.joined()})}
+        hot.networkSnapshotRead={sample in NetworkSnapshot(primaryInterface:"en0",routes:NetworkSnapshot.parseRoutes(sample.table),resolvers:corporateResolvers)}
+        let corpDNS=DNSResolverScope(service:"corp",interface:"utun6",servers:["10.20.0.53"],domains:["corp.test"])
+        let corpRoute=ProtectedRoute(destination:"10.20.0.0/16",gateway:"10.20.0.1",interface:"utun6")
+        corporateResolvers.append(corpDNS);hot.checkNetworkChange()
+        check(hot.protectedQueriesSuspended && hot.starts == 0,"DNS 先到时只暂停企业查询，不重启公网核心")
+        tick += 0.5;corporateRoutes=[corpRoute];hot.checkNetworkChange()
+        tick += 0.5;hot.checkNetworkChange()
+        check(hot.protectedQueriesSuspended,"路由后到必须重新等待一致采样")
+        tick += 0.5;hot.checkNetworkChange()
+        check(!hot.protectedQueriesSuspended && hot.capturePlan!.domains.contains("corp.test") && hot.starts == 0 && hot.stops == 0,"分批接入完成热更新，核心不重启")
+        corporateResolvers=[resolver];corporateRoutes=[];tick += 1;hot.checkNetworkChange();tick += 1;hot.checkNetworkChange()
+        check(hot.capturePlan!.resolvers(for:"api.corp.test").isEmpty && hot.capturePlan!.domains.contains("corp.test"),"企业退出后仍保护域名，不转公共 DNS")
+        corporateRoutes=[corpRoute];tick += 1;hot.checkNetworkChange();tick += 1;hot.checkNetworkChange()
+        corporateResolvers.append(corpDNS);tick += 1;hot.checkNetworkChange();tick += 1;hot.checkNetworkChange()
+        check(hot.capturePlan!.resolvers(for:"api.corp.test").first?.interface == "utun6" && hot.starts == 0 && hot.stops == 0,"路由先到及重新连接仍不重启核心")
+        for index in 0..<15 {corporateResolvers=[resolver,DNSResolverScope(service:"corp",interface:"utun6",servers:["10.20.0."+String(54+index%2)],domains:["corp.test"])];tick += 1;hot.checkNetworkChange()}
+        check(hot.protectedQueriesSuspended && hot.stops == 0 && hot.lastFailure?.contains("普通代理继续") == true,"持续抖动超过十秒只暂停企业能力")
+        try hot.stop();check(hot.activeRequest == nil,"用户停止取消当前连接意图")
+
+        let takeover=try fixture()
+        takeover.networkSnapshotRead={sample in NetworkSnapshot(primaryInterface:"en0",routes:NetworkSnapshot.parseRoutes(sample.table)+[ProtectedRoute(destination:"0.0.0.0/0",gateway:"10.1.0.1",interface:"utun99")],resolvers:[resolver])}
+        takeover.checkNetworkChange()
+        check(takeover.stops == 1 && takeover.preservedExternal && takeover.lastFailure?.contains("公网大范围") == true,"全隧道企业接管立即退出竞争并保留外部配置")
+        let withdrawn=try fixture()
+        let withdrawalDirectory=FileManager.default.temporaryDirectory.appendingPathComponent("qz-withdraw-"+UUID().uuidString)
+        defer {try? FileManager.default.removeItem(at:withdrawalDirectory)}
+        withdrawn.dynamicRules=try DynamicCaptureRules(directory:withdrawalDirectory,plan:withdrawn.capturePlan!)
+        withdrawn.journal!.routes.append(OwnedRoute(destination:"10.22.0.0/16",gateway:"10.22.0.1",interface:"utun6"))
+        withdrawn.routeSample={try NetworkRouteSample(read:{table})}
+        let withdrawalPlan=withdrawn.capturePlan!
+        let withdrawnOK=try withdrawn.applyCorporatePlan(withdrawalPlan,sample:withdrawn.routeSample())
+        check(withdrawnOK && !withdrawn.journal!.routes.contains{$0.interface == "utun6"} && withdrawn.routeWrites == 0,"企业退出且原保护项已消失时直接撤销记录，不删除外部路由")
+        withdrawn.journal!.routes.append(OwnedRoute(destination:"10.22.0.0/16",gateway:"10.22.0.1",interface:"utun6"))
+        withdrawn.routeSample={try NetworkRouteSample(read:{table+"10.22/16 10.22.0.2 UGSc utun8\n"})}
+        let replacedOK=try withdrawn.applyCorporatePlan(withdrawalPlan,sample:withdrawn.routeSample())
+        check(replacedOK && withdrawn.routeWrites == 0,"企业保护项已被其他 VPN 替换时只放弃认领，不能删除新出口")
+
+        var unstable=withdrawalPlan
+        unstable.protectedRoutes.append(ProtectedRoute(destination:"10.44.0.0/16",gateway:"10.44.0.1",interface:"utun6"))
+        let beforeUnstable=withdrawn.capturePlan
+        do {_=try withdrawn.applyCorporatePlan(unstable,sample:withdrawn.routeSample());check(false,"发布企业计划前必须复核实际路径")}
+        catch {check(error is NetworkEnvironmentNotReady && withdrawn.capturePlan == beforeUnstable && withdrawn.stops == 0,"路径尚未到达只保持企业暂停，不能发布不可用计划或重启公网核心")}
 
         var queued: [() -> Void] = [], cycles = 0
         let burst = try fixture()

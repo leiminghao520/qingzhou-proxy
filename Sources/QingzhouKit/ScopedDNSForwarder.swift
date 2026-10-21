@@ -33,7 +33,10 @@ public enum DNSPacket {
 public final class ScopedDNSForwarder {
     public let port:Int
     private let descriptor:Int32
-    private let plan:CapturePlan
+    private var plan:CapturePlan
+    private var planGeneration:UInt64=0
+    private var suspended=false
+    private let protectSnapshotAnswers:((CapturePlan,UInt64,String,[String],DNSResolverScope,Date)throws->Void)?
     private let protectAnswers:((String,[String],DNSResolverScope,Date)throws->Void)?
     private let transport:((Data,String,String)->Data?)?
     private let work=DNSWorkQueue()
@@ -41,8 +44,8 @@ public final class ScopedDNSForwarder {
     private let lock=NSLock()
     private var stopped=false
     private var started=false
-    public init(plan:CapturePlan,transport:((Data,String,String)->Data?)?=nil,protectAnswers:((String,[String],DNSResolverScope,Date)throws->Void)?=nil) throws {
-        self.plan=plan;self.transport=transport;self.protectAnswers=protectAnswers
+    public init(plan:CapturePlan,transport:((Data,String,String)->Data?)?=nil,protectAnswers:((String,[String],DNSResolverScope,Date)throws->Void)?=nil,protectSnapshotAnswers:((CapturePlan,UInt64,String,[String],DNSResolverScope,Date)throws->Void)?=nil) throws {
+        self.plan=plan;self.transport=transport;self.protectAnswers=protectAnswers;self.protectSnapshotAnswers=protectSnapshotAnswers
         let fd=socket(AF_INET,SOCK_DGRAM,0);guard fd>=0 else{throw ProxyError("DNS 转发监听创建失败")}
         var address=sockaddr_in();address.sin_len=UInt8(MemoryLayout<sockaddr_in>.size);address.sin_family=sa_family_t(AF_INET);address.sin_addr.s_addr=inet_addr("127.0.0.1")
         let result=withUnsafePointer(to:&address){$0.withMemoryRebound(to:sockaddr.self,capacity:1){Darwin.bind(fd,$0,socklen_t(MemoryLayout<sockaddr_in>.size))}}
@@ -68,8 +71,10 @@ public final class ScopedDNSForwarder {
                 continue
             }
             work.submit(run:{[self,sender,size] budget in
+                let submitted=currentPlan()
                 let response=resolve(query,name:name,budget:budget)
-                send(response,to:sender,size:size)
+                let checked=validGeneration(submitted.1,name:name,wasProtected:submitted.0.protects(name)) ? response:DNSPacket.failure(query)
+                send(checked,to:sender,size:size)
             },reject:{[self,sender,size] in send(DNSPacket.failure(query),to:sender,size:size)})
         }
     }
@@ -78,7 +83,27 @@ public final class ScopedDNSForwarder {
         lock.lock();defer{lock.unlock()};guard !stopped else{return}
         _=response.withUnsafeBytes{bytes in withUnsafePointer(to:&peer){$0.withMemoryRebound(to:sockaddr.self,capacity:1){sendto(descriptor,bytes.baseAddress,response.count,0,$0,size)}}}
     }
+    // 计划整体替换，旧代次的异步响应不得返回或触发保护写入。
+    public func updatePlan(_ next:CapturePlan,suspended:Bool=false) {
+        lock.lock();plan=next;planGeneration &+= 1;self.suspended=suspended;lock.unlock()
+    }
+    public func suspendProtectedQueries() {
+        lock.lock();suspended=true;planGeneration &+= 1;lock.unlock()
+    }
+    private func currentPlan()->(CapturePlan,UInt64,Bool) {
+        lock.lock();defer{lock.unlock()};return (plan,planGeneration,suspended)
+    }
+    public func isCurrentRevision(_ revision:UInt64)->Bool {
+        lock.lock();defer{lock.unlock()};return !stopped && !suspended && planGeneration==revision
+    }
+    private func validGeneration(_ generation:UInt64,name:String,wasProtected:Bool)->Bool {
+        lock.lock();defer{lock.unlock()}
+        // 企业计划更新不能取消无关的公网解析；新进入保护范围的域名仍拒绝旧响应。
+        return !stopped && (planGeneration==generation || (!wasProtected && !plan.protects(name)))
+    }
     public func resolve(_ query:Data,name:String,exchange:((Data,String,String)->Data?)?=nil,budget:TimeInterval=5)->Data {
+        let (plan,generation,suspended)=currentPlan()
+        if suspended && plan.protects(name) {return DNSPacket.failure(query)}
         let deadline=Date().addingTimeInterval(min(5,max(0,budget)))
         for resolver in plan.resolvers(for:name) {for server in resolver.servers {
             guard !isStopped else{return DNSPacket.failure(query)}
@@ -86,10 +111,14 @@ public final class ScopedDNSForwarder {
             let response:Data?
             if let hook=exchange ?? transport {response=hook(query,server,resolver.interface)}else{response=Self.exchange(query,server,resolver.interface,deadline:deadline)}
             if let response,Date()<deadline,DNSPacket.acceptable(response,query:query){
-                if plan.protects(name),let protectAnswers {
-                    do {try protectAnswers(name,DNSPacket.addresses(response),resolver,deadline)} catch {return DNSPacket.failure(query)}
+                guard validGeneration(generation,name:name,wasProtected:plan.protects(name)) else {return DNSPacket.failure(query)}
+                if plan.protects(name) {
+                    do {
+                        try protectSnapshotAnswers?(plan,generation,name,DNSPacket.addresses(response),resolver,deadline)
+                        try protectAnswers?(name,DNSPacket.addresses(response),resolver,deadline)
+                    } catch {return DNSPacket.failure(query)}
                 }
-                guard Date()<deadline,!isStopped else {return DNSPacket.failure(query)}
+                guard Date()<deadline,validGeneration(generation,name:name,wasProtected:plan.protects(name)) else {return DNSPacket.failure(query)}
                 return response
             }
         }}

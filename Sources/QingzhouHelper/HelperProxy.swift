@@ -75,8 +75,7 @@ extension Service {
         }
         try commitProxy(preferences);return issues
     }
-    func verifyProxy()->Bool {proxyOwnershipIssues().isEmpty}
-    func proxyOwnershipIssues()->[String] {
+    func proxyConfigurationIssues()->[String] {
         guard let records=journal?.proxies,!records.isEmpty else{return ["系统代理应用快照缺失"]}
         guard let preferences=SCPreferencesCreate(nil,"轻舟代理核对" as CFString,nil) else{return ["系统代理配置无法读取"]}
         var issues:[String]=[]
@@ -87,5 +86,9 @@ extension Service {
             if !changed.isEmpty {issues.append("系统代理服务 "+String(index+1)+" 字段变化："+changed.joined(separator:","))}
         }
         return issues
+    }
+    func proxyLiveSample()->ProxyLiveSample? {
+        guard let record=journal?.proxies?.first,let expected=try? plist(record.applied) else{return nil}
+        return ProxyLiveSample(expected:expected,current:SCDynamicStoreCopyProxies(nil) as? [String:Any])
     }
 }

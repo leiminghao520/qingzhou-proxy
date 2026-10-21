@@ -21,7 +21,13 @@ extension Service {
 
     func beginNetworkResume(_ request: TunRequest, fd: Int32) {
         cancelNetworkResume()
-        let session = NetworkResumeSession(request: request, owner: fd)
+        var resumed=request
+        if var state=resumed.state {
+            // 已学习到的企业域名只沿用当前连接，不写回用户配置；重建期间仍不能落入公网解析。
+            state.protectedDomains=Array(Set(state.protectedDomains).union(knownProtectedDomains)).sorted()
+            resumed.state=state
+        }
+        let session = NetworkResumeSession(request: resumed, owner: fd)
         networkResumeSession = session
         attemptNetworkResume(session)
     }

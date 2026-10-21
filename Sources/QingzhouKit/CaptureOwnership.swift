@@ -27,6 +27,41 @@ public enum CaptureOwnership {
         return routeIssues(expected:required+preserved,actual:actual)
     }
     // 所有权检查使用完整路由视图；规划时忽略缓存，不能表示缓存路由不存在。
+    // 仅供恢复记录中的旧版主机路由使用；非零目的地址却没有主机标志和有效掩码是旧写法的特征。
+    public static func legacyHostRouteMatches(_ expected:ProtectedRoute,info:String)->Bool {
+        guard expected.ipv6,expected.destination.hasSuffix("/128"),
+              let destination=NetworkInspection.routeField("destination",info),destination != "default",destination != "::",
+              NetworkInspection.samePrefix(destination.components(separatedBy:"%")[0]+"/128",expected.destination),
+              let flags=NetworkInspection.routeField("flags",info),flags.contains("STATIC"),!flags.contains("HOST"),
+              [nil,"::","default"].contains(NetworkInspection.routeField("mask",info)) else{return false}
+        return NetworkInspection.routeGateway(info)==expected.gateway && NetworkInspection.routeField("interface",info)==expected.interface && NetworkInspection.routeScopeMatches(expected.scope,flags:flags,interface:expected.interface)
+    }
+    // 保留原始零前缀异常项进行单独识别，不能把它解析成有效的主机保护路由。
+    public static func legacyHostRouteInTable(_ expected:ProtectedRoute,table:String)->Bool {
+        guard expected.ipv6,expected.destination.hasSuffix("/128"),!expected.destination.hasPrefix("::/") else{return false}
+        let rows=table.components(separatedBy:.newlines).map{$0.split(whereSeparator:{$0.isWhitespace}).map(String.init)}.filter {fields in
+            guard fields.count>=4,fields[0].hasSuffix("/0"),NetworkInspection.samePrefix(String(fields[0].dropLast(2))+"/128",expected.destination) else{return false}
+            return (fields[2].contains("I") ? fields[3]:nil)==expected.scope
+        }
+        guard rows.count==1,let row=rows.first else{return false}
+        return row[1]==expected.gateway && row[3]==expected.interface && row[2].contains("U") && row[2].contains("S") && !row[2].contains("H") && !row[2].contains("W") && !row[2].contains("L")
+    }
+    public static func legacyHostDeletionArguments(_ expected:ProtectedRoute)->[String] {
+        var args=["-n","delete","-inet6"]
+        if let scope=expected.scope {args += ["-ifscope",scope]}
+        args += ["-net",expected.destination]
+        return args+(expected.gateway.hasPrefix("link#") ? ["-interface",expected.interface]:[expected.gateway])
+    }
+    // macOS 路由命令可能在套接字写入失败时仍返回零，不能只依赖进程退出码。
+    public static func routeWriteFailed(_ output:String)->Bool {
+        output.contains("writing to routing socket:") || output.contains(": File exists") || output.contains(": not in table")
+    }
+    // 查询结果只有前缀、网关、接口和作用域全部一致时，才能确认同一条路由。
+    public static func matchesQuery(_ expected:ProtectedRoute,info:String)->Bool {
+        guard let current=NetworkInspection.routePrefix(destination:NetworkInspection.routeField("destination",info),mask:NetworkInspection.routeField("mask",info),host:NetworkInspection.routeField("flags",info)?.contains("HOST")==true),
+              NetworkInspection.samePrefix(current,expected.destination) else{return false}
+        return NetworkInspection.routeGateway(info)==expected.gateway && NetworkInspection.routeField("interface",info)==expected.interface && NetworkInspection.routeScopeMatches(expected.scope,flags:NetworkInspection.routeField("flags",info),interface:NetworkInspection.routeField("interface",info))
+    }
     public static func routeIssues(expected:[ProtectedRoute],actual:[ProtectedRoute])->[String] {
         var issues:[String]=[]
         for route in expected {

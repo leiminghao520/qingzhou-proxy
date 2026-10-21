@@ -19,6 +19,12 @@ final class Service {
     var captureGeneration=UUID()
     var domainRouteSummary:[String]=[]
     var capturePlan:CapturePlan?
+    var dynamicRules:DynamicCaptureRules?
+    var changeWindow=CaptureChangeWindow()
+    var protectedQueriesSuspended=false
+    var captureNodeAddresses:[String:[String]]=[:]
+    var captureNodeInterfaces:[String:String]=[:]
+    var knownProtectedDomains:Set<String>=[]
     var dnsForwarder:ScopedDNSForwarder?
     var activeRequest:TunRequest?
     var networkChecks: NetworkCheckScheduler?
@@ -37,8 +43,11 @@ final class Service {
     var performingNetworkResume = false
     var networkResumeSchedule: ((TimeInterval, @escaping () -> Void) -> Void)?
     var networkStatus:String {phase=="networkRetry" ? "网络变化，正在重新检查":lastFailure ?? HelperPaths.version}
-    var networkSummary:[String] {domainRouteSummary+(capturePlan?.summary ?? [])+(dnsForwarder.map{[$0.diagnostics]} ?? [])}
+    var networkSummary:[String] {(protectedQueriesSuspended ? ["企业网络更新中，普通代理继续运行，企业解析暂不可用"]:[])+domainRouteSummary+(capturePlan?.summary ?? [])+(dnsForwarder.map{[$0.diagnostics]} ?? [])}
     var lastFailure:String?
+    var proxyMismatchSince:TimeInterval?
+    var proxyVerificationClock:()->TimeInterval={ProcessInfo.processInfo.systemUptime}
+    var proxyVerificationWait:(TimeInterval)->Void={usleep(useconds_t($0*1_000_000))}
     var coreDiagnostics=CoreDiagnosticBuffer(secrets:[])
     var coreOutput:Pipe?
     var process:Process?
@@ -72,7 +81,7 @@ final class Service {
     func stop(preserveExternal:Bool=false) throws {
         if !performingNetworkResume {cancelNetworkResume()}
         coreOutput?.fileHandleForReading.readabilityHandler=nil;coreOutput=nil
-        captureGeneration=UUID();domainRouteSummary=[];activatePrepared=nil;activeRequest=nil;networkChecks?.cancel();networkChecks=nil;networkTimer?.cancel();networkTimer=nil;if let networkStore {SCDynamicStoreSetDispatchQueue(networkStore,nil)};networkStore=nil;routeEvents?.cancel();routeEvents=nil;pendingNetworkChange=nil;snapshotRetry.reset();dnsForwarder?.stop();dnsForwarder=nil;capturePlan=nil
+        captureGeneration=UUID();domainRouteSummary=[];activatePrepared=nil;activeRequest=nil;networkChecks?.cancel();networkChecks=nil;networkTimer?.cancel();networkTimer=nil;if let networkStore {SCDynamicStoreSetDispatchQueue(networkStore,nil)};networkStore=nil;routeEvents?.cancel();routeEvents=nil;pendingNetworkChange=nil;snapshotRetry.reset();dnsForwarder?.stop();dnsForwarder=nil;capturePlan=nil;proxyMismatchSince=nil;dynamicRules=nil;changeWindow.reset();protectedQueriesSuspended=false;captureNodeAddresses=[:];captureNodeInterfaces=[:];knownProtectedDomains=[]
         guard let record=journal else{        if let process,process.isRunning {process.terminate();for _ in 0..<40 {if !process.isRunning{break};usleep(50000)};if process.isRunning{kill(process.processIdentifier,SIGKILL)};process.waitUntilExit()};process=nil;owner=nil;try? FileManager.default.removeItem(at:root.appendingPathComponent("runtime.json"))
 return};var issues:[String]=[]
         // 用户显式恢复时也只清理仍属于轻舟的入口，不能覆盖后来接管的代理。
@@ -89,26 +98,38 @@ return};var issues:[String]=[]
             let old=try record.previousDNS.map{try PropertyListSerialization.propertyList(from:$0,format:nil) as! NSDictionary}
             if current != old && !preserveExternal {issues.append("本次补充 DNS 服务已有外部修改，保留当前值")}
         }
-        let recoveryRoutes=preserveExternal ? try NetworkSnapshot.parseRoutes(NetworkInspection.command("/usr/sbin/netstat",["-rn"]),includeTransient:true):[]
+        let recoveryTable=preserveExternal ? try NetworkInspection.command("/usr/sbin/netstat",["-rn"]):""
+        let recoveryRoutes=NetworkSnapshot.parseRoutes(recoveryTable,includeTransient:true)
         for route in record.routes.reversed() {
             if preserveExternal {
                 let expectedRoute=ProtectedRoute(destination:route.destination,gateway:route.gateway,interface:route.interface,scope:route.scope)
                 // 已消失或已被外部替换的路由不再认领，仍属于本次记录的路由继续核对后清理。
                 let state=CaptureOwnership.recoveryState(expected:expectedRoute,actual:recoveryRoutes)
                 if state == .ambiguous {issues.append("路由 "+route.destination+" 存在多个同前缀出口，拒绝自动处理");continue}
-                if state != .owned {continue}
+                if state != .owned {
+                    guard state == .absent,CaptureOwnership.legacyHostRouteInTable(expectedRoute,table:recoveryTable) else {continue}
+                }
             }
             let info:String
             do {info=try routeInfo(route.destination,ipv6:route.ipv6,scope:route.scope)}
             catch {issues.append("路由 "+route.destination+" 恢复查询失败："+error.localizedDescription);continue}
-            if !NetworkInspection.routeScopeMatches(route.scope,flags:field("flags",info),interface:field("interface",info)) {continue}
-            // 只有网关和接口都仍属于本次记录的路由才删除；外部修改时保留恢复记录。
-            if let current=prefix(info),NetworkInspection.samePrefix(current,route.destination),field("gateway",info)==route.gateway,field("interface",info)==route.interface {
+            do {
+            let expectedRoute=ProtectedRoute(destination:route.destination,gateway:route.gateway,interface:route.interface,scope:route.scope)
+            // 旧版错误路由只能凭当前恢复记录认领，不能根据历史归档推断外部路由所有权。
+            if route.ipv6 && route.destination.hasSuffix("/128"),CaptureOwnership.legacyHostRouteInTable(expectedRoute,table:try routeSample().table) {
+                let output=try NetworkInspection.command("/sbin/route",CaptureOwnership.legacyHostDeletionArguments(expectedRoute))
+                if CaptureOwnership.routeWriteFailed(output) {issues.append("旧版主机路由恢复失败："+route.destination)}
+                else if CaptureOwnership.legacyHostRouteInTable(expectedRoute,table:try routeSample().table) {issues.append("旧版主机路由仍存在："+route.destination)}
+                continue
+            }
+            // 查询可能命中接口缓存；全局路由仍须按完整表中的身份确认后删除。
+            if try verifiedRoute(expectedRoute,info:info) {
                 do{_ = try NetworkInspection.command("/sbin/route",NetworkInspection.routeArguments(.delete,destination:route.destination,gateway:route.gateway,ipv6:route.ipv6,scope:route.scope,interface:route.interface))}
                 catch{issues.append("路由 "+route.destination+" 移除失败："+error.localizedDescription)}
-            } else if let current=prefix(info),NetworkInspection.samePrefix(current,route.destination) {
+            } else if NetworkInspection.routeScopeMatches(route.scope,flags:field("flags",info),interface:field("interface",info)),let current=prefix(info),NetworkInspection.samePrefix(current,route.destination) {
                 if !preserveExternal {issues.append("路由 "+route.destination+" 已有外部修改，保留当前出口 "+(field("interface",info) ?? "未知")+"/"+(field("gateway",info) ?? "未知"))}
             }
+            } catch {issues.append("路由 "+route.destination+" 恢复核验失败："+error.localizedDescription)}
         }
         if let process,process.isRunning {process.terminate();for _ in 0..<40 {if !process.isRunning{break};usleep(50000)};if process.isRunning{kill(process.processIdentifier,SIGKILL)};process.waitUntilExit()};process=nil;owner=nil
         try? FileManager.default.removeItem(at:root.appendingPathComponent("runtime.json"))
@@ -176,10 +197,10 @@ return};var issues:[String]=[]
         let address4=addresses.address4,address6=addresses.address6
         phase="coreValidation"
         captureGeneration=UUID();let generation=captureGeneration
-        let forwarder=try ScopedDNSForwarder(plan:plan,protectAnswers:{[weak self] name,addresses,resolver,deadline in
+        let forwarder=try ScopedDNSForwarder(plan:plan,protectSnapshotAnswers:{[weak self] queryPlan,revision,name,addresses,resolver,deadline in
             guard let self else {throw ProxyError("保护会话已结束")}
             try self.queue.sync {
-                guard self.captureGeneration==generation,Date()<deadline else {throw ProxyError("企业 DNS 保护会话过期")}
+                guard self.captureGeneration==generation,self.dnsForwarder?.isCurrentRevision(revision)==true,Date()<deadline,!self.protectedQueriesSuspended,let plan=self.capturePlan,plan==queryPlan else {throw ProxyError("企业 DNS 保护会话过期")}
                 // 准备阶段尚未接管，先确认原路径；激活后才补充拥有的主机路由。
                 let existingProtection=self.activeRequest == nil ? [] : NetworkSnapshot.parseRoutes(try NetworkInspection.command("/usr/sbin/netstat",["-rn"],deadline:deadline),includeTransient:true)
                 for address in addresses {
@@ -204,16 +225,17 @@ return};var issues:[String]=[]
             }
         });dnsForwarder=forwarder;forwarder.start()
         phase="dnsBaseline"
-        let resolverChecks=try NetworkPreparationPool.shared.map(plan.snapshot.resolvers,operation:forwarder.probe)
-        let baseline=zip(plan.snapshot.resolvers,resolverChecks).filter{$0.1}.map{$0.0}
-        guard baseline.contains(where:{$0.interface==primary}) else {throw NetworkEnvironmentNotReady("原公网 DNS 不可用，未接管网络")}
-        for domain in plan.domains {
-            // 没有企业作用域时由转发器拒绝内网查询；已有作用域仍须通过可用性检查。
-            guard let resolver=plan.resolvers(for:domain).first else {continue}
-            guard baseline.contains(where:{$0.service==resolver.service}) else {throw ProxyError("企业 DNS 无法确认可用，未接管网络")}
-        }
+        // 企业解析器可能拒绝根域查询；可选能力不再成为普通代理的启动门槛。
+        knownProtectedDomains=Set(plan.domains)
+        captureNodeAddresses=nodeAddresses
+        captureNodeInterfaces=try plan.nodeInterfaces(nodeAddresses,family:state.effectiveAddressFamilyPolicy)
+        let dynamicRules=try DynamicCaptureRules(directory:root.appendingPathComponent("dynamic-rules"),plan:plan)
+        self.dynamicRules=dynamicRules
         phase="coreValidation"
-        let config=try TunConfigBuilder.build(state:state,credentials:memory,control:control,address4:address4,address6:address6,originalDNS:dns,bypass:bypass.map{$0+($0.contains(":") ? "/128":"/32")},httpCompatibilityPort:request.httpCompatibilityPort,plan:plan,dnsForwardPort:forwarder.port,nodeInterfaces:try plan.nodeInterfaces(nodeAddresses,family:state.effectiveAddressFamilyPolicy))
+        let baseConfig=try TunConfigBuilder.build(state:state,credentials:memory,control:control,address4:address4,address6:address6,originalDNS:dns,bypass:bypass.map{$0+($0.contains(":") ? "/128":"/32")},httpCompatibilityPort:request.httpCompatibilityPort,plan:plan,dnsForwardPort:forwarder.port,nodeInterfaces:captureNodeInterfaces)
+        var object=try JSONSerialization.jsonObject(with:baseConfig) as! [String:Any]
+        dynamicRules.apply(to:&object,plan:plan)
+        let config=try JSONSerialization.data(withJSONObject:object)
         let file=root.appendingPathComponent("runtime.json");try SecureFile.write(config,to:file)
         let check=Process();check.executableURL=root.appendingPathComponent("sing-box");check.arguments=["check","-c",file.path];check.standardOutput=FileHandle.nullDevice;check.standardError=FileHandle.nullDevice;try check.run();check.waitUntilExit();guard check.terminationStatus==0 else{try? FileManager.default.removeItem(at:file);throw ProxyError("固定核心校验 TUN 配置失败")}
         let expected=CaptureDNSPolicy.settings(server:addresses.gateway4)
@@ -241,6 +263,11 @@ return};var issues:[String]=[]
             try bypassPlan.validate(lookup:{try self.routeInfo($0,ipv6:$1)})
             for route in plan.protectedRoutes {try protect(route)}
             for route in bypassPlan.routes {try addRoute(route.destination,route.gateway,route.interface,ipv6:route.ipv6,preparationBypass:true)}
+            // 所有保护路径先完整核验，确认后才安装公网接管路由和启用 DNS。
+            for expected in bypassPlan.routes+plan.protectedRoutes.map({ProtectedRoute(destination:$0.destination,gateway:$0.gateway,interface:$0.interface)}) {
+                let info=try routeInfo(expected.destination,ipv6:expected.ipv6,scope:expected.scope)
+                guard try verifiedRoute(expected,info:info) else {throw ProxyError("接管前保护路径核验失败："+expected.destination)}
+            }
             // 出站绑定物理网卡后需要限定路由；否则全局 /1 接管使 macOS 返回网络不可达。
             for destination in ["0.0.0.0/1","128.0.0.0/1"] {try addRoute(destination,gw4,primary,ipv6:false,scope:primary)}
             if let gw6 {for destination in ["::/1","8000::/1"] {try addRoute(destination,gw6,primary,ipv6:true,scope:primary)}}
@@ -266,8 +293,8 @@ return};var issues:[String]=[]
             }
             for destination in ["8.8.8.8","2606:4700:4700::1111"] {guard field("interface",try routeInfo(destination,ipv6:destination.contains(":")))==tunnel else{throw ProxyError("TUN 路由接管验证失败")}}
             guard let current=SCDynamicStoreCopyValue(dynamic,dnsKey as CFString) as? NSDictionary,current==expected as NSDictionary else{throw ProxyError("TUN DNS 生效验证失败")}
-            guard verifyProtection() else{throw ProxyError("企业路由保护核对失败")};guard try NetworkPreparationPool.shared.map(baseline,operation:forwarder.probe).allSatisfy({$0}) else{throw ProxyError("启动前可用的原 DNS 在接管后不可达")}
-            if let port=request.systemProxyPort {phase="proxyActivation";try applyProxy(port:port,plan:plan);guard verifyProxy() else{throw ProxyError("兼容代理入口核对失败")}}
+            guard verifyProtection() else{throw ProxyError("企业路由保护核对失败")}
+            if let port=request.systemProxyPort {phase="proxyActivation";try applyProxy(port:port,plan:plan);try verifyProxyActivation()}
             activeRequest=request
             startNetworkMonitor()
             }

@@ -170,10 +170,16 @@ public enum NetworkInspection {
     public static func routeArguments(_ operation:RouteOperation,destination:String,gateway:String?=nil,ipv6:Bool=false,scope:String?=nil,interface:String?=nil)->[String] {
         var args=["-n",operation.rawValue]+(ipv6 ? ["-inet6"]:[])
         if let scope {args += ["-ifscope",scope]}
-        if operation != .get {args.append("-net")}
-        // 裸 IP 按目标主机查询；网络起始地址的隐式分类会漏掉可用的默认出口。
-        if operation == .get,destination != "default",!destination.contains("/") {args.append("-host")}
-        args.append(destination)
+        let parts=destination.split(separator:"/",omittingEmptySubsequences:false)
+        let hostBits=ipv6 ? 128:32
+        let isHost=destination != "default" && (parts.count==1 || (parts.count==2 && Int(parts[1])==hostBits))
+        // 主机路由必须显式使用主机标志，避免 IPv6 全一掩码被网络模式解释为零前缀。
+        if isHost {args += ["-host",String(parts[0])]}
+        else {
+            if operation != .get {args.append("-net")}
+            if ipv6,parts.count==2 {args += [String(parts[0]),"-prefixlen",String(parts[1])]}
+            else {args.append(destination)}
+        }
         if let gateway {
             if gateway.hasPrefix("link#"),let interface {args += ["-interface",interface]} else {args.append(gateway)}
         }

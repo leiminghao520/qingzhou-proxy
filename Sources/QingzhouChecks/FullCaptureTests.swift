@@ -3,6 +3,31 @@ import QingzhouKit
 
 final class FullCaptureTests:CheckCase {
     func testReclaimedCorporateHostRoute() throws {
+        let expected=ProtectedRoute(destination:"240e:1c:200::1/128",gateway:"fe80::1%en0",interface:"en0")
+        let info="destination: 240e:1c:200::1\ngateway: fe80::1%en0\ninterface: en0\nflags: <UP,GATEWAY,HOST,STATIC>"
+        expectTrue(CaptureOwnership.matchesQuery(expected,info:info))
+        let legacy=info.replacingOccurrences(of:"HOST,",with:"")
+        expectTrue(CaptureOwnership.legacyHostRouteMatches(expected,info:legacy))
+        expectFalse(CaptureOwnership.legacyHostRouteMatches(expected,info:info))
+        for changed in [legacy.replacingOccurrences(of:"240e:1c:200::1",with:"default"),legacy.replacingOccurrences(of:"fe80::1",with:"fe80::2"),legacy.replacingOccurrences(of:"STATIC",with:"STATIC,IFSCOPE"),legacy+"\nmask: ffff:ffff:ffff:ffff::"] {
+            expectFalse(CaptureOwnership.legacyHostRouteMatches(expected,info:changed))
+        }
+        let legacyTable="Internet6:\n240e:1c:200::1/0 fe80::1%en0 UGSc en0\n240e:1c:200::1 fe80::1%en0 UGHWI en0"
+        expectTrue(CaptureOwnership.legacyHostRouteInTable(expected,table:legacyTable))
+        for changed in [legacyTable.replacingOccurrences(of:"/0",with:"/64"),legacyTable.replacingOccurrences(of:"UGSc",with:"UGScI"),legacyTable.replacingOccurrences(of:"fe80::1",with:"fe80::2"),legacyTable+"\n240e:1c:200::1/0 fe80::2%en0 UGSc en0"] {
+            expectFalse(CaptureOwnership.legacyHostRouteInTable(expected,table:changed))
+        }
+        expectTrue(CaptureOwnership.routeWriteFailed("route: writing to routing socket: File exists"))
+        expectFalse(CaptureOwnership.routeWriteFailed("add host: gateway ::1"))
+
+        for changed in [info.replacingOccurrences(of:"HOST,",with:""), info.replacingOccurrences(of:"fe80::1",with:"fe80::2"),info.replacingOccurrences(of:"interface: en0",with:"interface: en1"),info.replacingOccurrences(of:"STATIC",with:"STATIC,IFSCOPE")] {
+            expectFalse(CaptureOwnership.matchesQuery(expected,info:changed))
+        }
+        expectFalse(CaptureOwnership.matchesQuery(expected,info:info.replacingOccurrences(of:"HOST,",with:"")+"\nmask: ::"))
+        for operation in [NetworkInspection.RouteOperation.add,.get,.delete] {
+            expectEqual(NetworkInspection.routeArguments(operation,destination:expected.destination,ipv6:true),["-n",operation.rawValue,"-inet6","-host","240e:1c:200::1"])
+            expectEqual(NetworkInspection.routeArguments(operation,destination:"192.0.2.1/32"),["-n",operation.rawValue,"-host","192.0.2.1"])
+        }
         let host=ProtectedRoute(destination:"198.19.0.37/32",gateway:"10.251.1.1",interface:"utun6")
         let parent=ProtectedRoute(destination:"198.19.0.0/16",gateway:host.gateway,interface:host.interface)
         let other=ProtectedRoute(destination:"198.19.0.0/24",gateway:"192.168.5.1",interface:"en0")

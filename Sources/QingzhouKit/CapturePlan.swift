@@ -31,8 +31,18 @@ public struct NetworkSnapshot:Codable,Equatable,Sendable {
     public var routes:[ProtectedRoute]
     public var resolvers:[DNSResolverScope]
     public var proxies:Data
+    public var unavailableDomains:[String]=[]
     public init(primaryInterface:String,routes:[ProtectedRoute],resolvers:[DNSResolverScope],proxies:Data=Data()) {
         self.primaryInterface=primaryInterface;self.routes=routes;self.resolvers=resolvers;self.proxies=proxies
+    }
+    private enum CodingKeys:String,CodingKey {case primaryInterface,routes,resolvers,proxies,unavailableDomains}
+    public init(from decoder:Decoder) throws {
+        let values=try decoder.container(keyedBy:CodingKeys.self)
+        primaryInterface=try values.decode(String.self,forKey:.primaryInterface)
+        routes=try values.decode([ProtectedRoute].self,forKey:.routes)
+        resolvers=try values.decode([DNSResolverScope].self,forKey:.resolvers)
+        proxies=try values.decode(Data.self,forKey:.proxies)
+        unavailableDomains=try values.decodeIfPresent([String].self,forKey:.unavailableDomains) ?? []
     }
     public static func parseRoutes(_ table:String,includeTransient:Bool=false)->[ProtectedRoute] {
         var ipv6=false
@@ -51,6 +61,7 @@ public struct NetworkSnapshot:Codable,Equatable,Sendable {
     public static func read(store:SCDynamicStore,primary:String,routes:String,ownedDNSKey:String?=nil,ownedTunnel:String?=nil) throws -> NetworkSnapshot {
         let keys=(SCDynamicStoreCopyKeyList(store,"State:/Network/Service/.*/DNS" as CFString) as? [String] ?? []).sorted()
         var resolvers:[DNSResolverScope]=[]
+        var unavailableDomains:[String]=[]
         for key in keys where key != ownedDNSKey {
             let parts=key.components(separatedBy:"/");guard parts.count>=5 else{continue};let service=parts[3]
             guard let dns=SCDynamicStoreCopyValue(store,key as CFString) as? [String:Any],let servers=dns["ServerAddresses"] as? [String],!servers.isEmpty else{continue}
@@ -59,28 +70,32 @@ public struct NetworkSnapshot:Codable,Equatable,Sendable {
             let ipv6=SCDynamicStoreCopyValue(store,(base+"/IPv6") as CFString) as? [String:Any]
             let index=(dns["InterfaceIndex"] as? NSNumber)?.uint32Value
             let indexed=index.flatMap {value -> String? in var buffer=[CChar](repeating:0,count:Int(IF_NAMESIZE));return if_indextoname(value,&buffer).map{String(cString:$0)}}
-            for server in servers {try ConfigBuilder.validate(RoutingRule(kind:.cidr,value:server.components(separatedBy:"%")[0],action:.direct))}
+            let rawDomains=(dns["SupplementalMatchDomains"] as? [String] ?? [])+(dns["SearchDomains"] as? [String] ?? [])+((dns["DomainName"] as? String).map{[$0]} ?? [])
+            let scopeDomains=rawDomains.filter{!$0.isEmpty && (try? ConfigBuilder.validate(RoutingRule(kind:.suffix,value:$0,action:.direct))) != nil}
+            guard servers.allSatisfy({(try? ConfigBuilder.validate(RoutingRule(kind:.cidr,value:$0.components(separatedBy:"%")[0],action:.direct))) != nil}) else {unavailableDomains += scopeDomains;continue}
             var inferred:String?
             if ipv4?["InterfaceName"] == nil && ipv6?["InterfaceName"] == nil && indexed == nil {
                 // 部分企业 VPN 只公布 DNS 服务；通过解析器实际路由确认接口，不猜测物理出口。
                 var interfaces=Set<String>()
                 for server in servers {
-                    let info=try NetworkInspection.command("/sbin/route",NetworkInspection.routeArguments(.get,destination:server,ipv6:server.contains(":")))
+                    guard let info=try? NetworkInspection.command("/sbin/route",NetworkInspection.routeArguments(.get,destination:server,ipv6:server.contains(":"))) else {continue}
                     if let row=info.components(separatedBy:.newlines).first(where:{$0.trimmingCharacters(in:.whitespaces).hasPrefix("interface:")}) {interfaces.insert(row.components(separatedBy:":").dropFirst().joined(separator:":").trimmingCharacters(in:.whitespaces))}
                 }
-                guard interfaces.count==1 else{throw ProxyError("DNS 服务接口无法确认，未接管网络")};inferred=interfaces.first
+                if interfaces.count==1 {inferred=interfaces.first}
             }
-            guard let interface=(ipv4?["InterfaceName"] as? String) ?? (ipv6?["InterfaceName"] as? String) ?? indexed ?? inferred else{throw ProxyError("DNS 服务接口无法确认，未接管网络")}
+            guard let interface=(ipv4?["InterfaceName"] as? String) ?? (ipv6?["InterfaceName"] as? String) ?? indexed ?? inferred else{unavailableDomains += scopeDomains;continue}
             if interface==ownedTunnel {continue}
             let domains=(dns["SupplementalMatchDomains"] as? [String] ?? []).filter{!$0.isEmpty}.map{$0.lowercased()}
             var search=(dns["SearchDomains"] as? [String] ?? []).map{$0.lowercased()}
             if let domain=dns["DomainName"] as? String,!domain.isEmpty {search.append(domain.lowercased())}
-            for domain in domains+search {try ConfigBuilder.validate(RoutingRule(kind:.suffix,value:domain,action:.direct))}
-            resolvers.append(DNSResolverScope(service:service,interface:interface,servers:servers,domains:domains,searchDomains:search,order:(dns["SearchOrder"] as? Int) ?? 200000,defaultResolver:(dns["SupplementalMatchDomains"] as? [String])?.contains("")==true || interface==primary))
+            let validScope=Set(scopeDomains.map{$0.lowercased()})
+            resolvers.append(DNSResolverScope(service:service,interface:interface,servers:servers,domains:domains.filter{validScope.contains($0)},searchDomains:search.filter{validScope.contains($0)},order:(dns["SearchOrder"] as? Int) ?? 200000,defaultResolver:(dns["SupplementalMatchDomains"] as? [String])?.contains("")==true || interface==primary))
         }
         guard resolvers.contains(where:{$0.interface==primary}) else{throw NetworkEnvironmentNotReady("原系统 DNS 无法完整读取，未接管网络")}
         let proxies=SCDynamicStoreCopyProxies(nil) as? [String:Any] ?? [:]
-        return NetworkSnapshot(primaryInterface:primary,routes:parseRoutes(routes).filter{$0.interface != ownedTunnel},resolvers:resolvers.sorted{$0.order == $1.order ? $0.service<$1.service:$0.order<$1.order},proxies:try PropertyListSerialization.data(fromPropertyList:proxies,format:.binary,options:0))
+        var snapshot=NetworkSnapshot(primaryInterface:primary,routes:parseRoutes(routes).filter{$0.interface != ownedTunnel},resolvers:resolvers.sorted{$0.order == $1.order ? $0.service<$1.service:$0.order<$1.order},proxies:try PropertyListSerialization.data(fromPropertyList:proxies,format:.binary,options:0))
+        snapshot.unavailableDomains=Array(Set(unavailableDomains)).sorted()
+        return snapshot
     }
 }
 public struct CapturePlan:Codable,Equatable,Sendable {
@@ -100,7 +115,7 @@ public struct CapturePlan:Codable,Equatable,Sendable {
         }
         for route in routes where Self.isVPN(route.interface) {
             let bits=Int(route.destination.split(separator:"/").last ?? "0") ?? 0
-            guard bits>(route.ipv6 ? 3:8) || (!route.ipv6 && route.destination.hasPrefix("10.")) else{throw ProxyError("企业隧道正在接管公网大范围路由，无法安全兼容")}
+            guard bits>(route.ipv6 ? 3:8) || (!route.ipv6 && route.destination.hasPrefix("10.")) else{throw NetworkCaptureConflict("企业隧道正在接管公网大范围路由，无法安全兼容")}
         }
         // 已被同接口企业网段覆盖的主机缓存不增加保护项，避免每次业务连接触发重连。
         let stableRoutes=routes.filter {route in
@@ -111,7 +126,7 @@ public struct CapturePlan:Codable,Equatable,Sendable {
                 other.interface==route.interface && other.scope==route.scope && (Int(other.destination.split(separator:"/").last ?? "0") ?? 0)<bits && RuleEvaluator.matches(RoutingRule(kind:.cidr,value:other.destination,action:.direct),host:address,ip:address)==true
             }
         }
-        let autoDomains=snapshot.resolvers.flatMap(\.protectedDomains)
+        let autoDomains=snapshot.resolvers.flatMap(\.protectedDomains)+snapshot.unavailableDomains
         return CapturePlan(snapshot:snapshot,protectedRoutes:stableRoutes.sorted{(Int($0.destination.split(separator:"/").last ?? "0") ?? 0)>(Int($1.destination.split(separator:"/").last ?? "0") ?? 0)},domains:Array(Set(autoDomains+extraDomains)).map{$0.lowercased()}.sorted(),exclusions:Array(Set(Self.localCIDRs+extraCIDRs)).sorted())
     }
     public func protects(_ domain:String)->Bool {

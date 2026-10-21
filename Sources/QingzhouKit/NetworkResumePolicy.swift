@@ -35,3 +35,10 @@ public struct NetworkResumeBackoff {
         }
     }
 }
+
+// 企业客户端强制接管公网时退出竞争，和短暂网络未就绪分开处理。
+public struct NetworkCaptureConflict:Error,LocalizedError,Sendable {
+    public let message:String
+    public init(_ message:String){self.message=message}
+    public var errorDescription:String? {message}
+}
