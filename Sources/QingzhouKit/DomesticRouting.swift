@@ -8,14 +8,37 @@ public enum DomesticRouting {
         guard let value=try? JSONDecoder().decode(Snapshot.self,from:data),value.version==1,!value.cidrs.isEmpty,!value.domains.isEmpty else {return nil}
         return value
     }()
+    // 固定资产只建一次索引；后缀按域名标签查找，不再逐条扫描整个规则集。
+    private struct DomainIndex {
+        let exact:Set<String>
+        let suffix:Set<String>
+        let regex:[NSRegularExpression]
+        init(_ domains:[String:[String]]) {
+            exact=Set(domains["domain"] ?? [])
+            suffix=Set(domains["domain_suffix"] ?? [])
+            regex=(domains["domain_regex"] ?? []).compactMap{try? NSRegularExpression(pattern:$0)}
+        }
+        func matches(_ value:String)->Bool {
+            if exact.contains(value) {return true}
+            var candidate=value[...]
+            while true {
+                if suffix.contains(String(candidate)) {return true}
+                guard let dot=candidate.firstIndex(of:".") else {break}
+                candidate=candidate[candidate.index(after:dot)...]
+            }
+            let range=NSRange(value.startIndex..<value.endIndex,in:value)
+            return regex.contains{$0.firstMatch(in:value,range:range) != nil}
+        }
+    }
+    private static let domainIndex=snapshot.map{DomainIndex($0.domains)}
     public static func validate() throws {guard snapshot != nil else {throw ProxyError("固定国内规则校验失败，拒绝完整接管")}}
     public static var version:String {"2026-10-15 / "+String(DomesticRuleData.sha256.prefix(12))}
     public static var domainCondition:[String:Any] {snapshot?.domains ?? [:]}
     public static var cidrs:[String] {snapshot?.cidrs ?? []}
     public static func isDomestic(_ host:String)->Bool {
-        guard let snapshot else {return false}
+        guard let domainIndex else {return false}
         let value=host.lowercased().trimmingCharacters(in:CharacterSet(charactersIn:"."))
-        return (snapshot.domains["domain"] ?? []).contains(value) || (snapshot.domains["domain_suffix"] ?? []).contains{value==$0 || value.hasSuffix("."+$0)} || (snapshot.domains["domain_regex"] ?? []).contains{value.range(of:$0,options:.regularExpression) != nil}
+        return domainIndex.matches(value)
     }
     // 规则模式在用户规则之后、最终策略之前追加国内分流，两种入站使用同一核心。
     public static func appendRules(to rules:inout [[String:Any]],state:AppState) throws {

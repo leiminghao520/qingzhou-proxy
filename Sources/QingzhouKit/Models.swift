@@ -68,7 +68,7 @@ public struct PolicyGroup: Codable,Identifiable,Sendable {
 public struct LatencyResult:Codable,Sendable {public var milliseconds:Int?;public var testedAt:Date;public init(milliseconds:Int?,testedAt:Date=Date()){self.milliseconds=milliseconds;self.testedAt=testedAt}}
 public enum RuleKind: String, Codable, CaseIterable, Sendable { case domain, suffix, keyword, cidr, match, geoip, asn, userAgent }
 public enum RuleAction: String, Codable, CaseIterable, Sendable { case direct, proxy, reject }
-public struct RoutingRule: Codable, Identifiable, Sendable {
+public struct RoutingRule: Codable, Identifiable, Equatable, Sendable {
     public var noResolve:Bool?;public var id = UUID();public var kind: RuleKind;public var value: String;public var action: RuleAction;public var target:PolicyReference?;public var subscriptionID:UUID?
     public init(kind: RuleKind, value: String, action: RuleAction,target:PolicyReference?=nil,subscriptionID:UUID?=nil) {self.kind=kind;self.value=value;self.action=action;self.target=target;self.subscriptionID=subscriptionID}
 }

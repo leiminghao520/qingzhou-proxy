@@ -344,6 +344,11 @@ run("OptimizationFeatures.history",t){try t.testHistoryCountersRetentionAndResta
 run("OptimizationFeatures.realityRoundtrip",t){try t.testRealityShareRoundtrip()}
 }
 
+do {let t=DomesticRoutingIndexTests()
+run("DomesticRouting.indexedSemantics",t){try t.testIndexedDomainsPreserveMatchingSemantics()}
+run("DomesticRouting.conflictOrder",t){t.testConflictOrderAndDirectRulesArePreserved()}
+}
+
 Task {
     do {try await runStartupOptimizationChecks()} catch {CheckHarness.failure("启动优化检查异常",file:#filePath,line:#line)}
     do {try await runQuitRecoveryChecks()} catch {CheckHarness.failure("退出恢复检查异常",file:#filePath,line:#line)}

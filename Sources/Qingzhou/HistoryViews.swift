@@ -2,7 +2,7 @@ import SwiftUI
 import QingzhouKit
 
 struct OptimizationSettings:View {
-    @ObservedObject var model:AppModel
+    let model:AppModel
     @AppStorage("clipboardRecognitionEnabled") private var clipboard=false
     @State private var showingHistory=false
     var body:some View {

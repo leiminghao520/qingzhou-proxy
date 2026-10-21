@@ -178,6 +178,8 @@ struct InterfaceChecks {
         try await component(SimpleLinesView(model: model, onImport: {}, onEdit: { _ in }, onProfessional: {}), "simple-lines")
         try await component(SimpleSubscriptionsView(model: model, onImport: {}), "simple-subscriptions")
         try await component(SimpleSettingsView(model: model, onAdvanced: {}, onDiagnose: {}).defaultAppStorage(preferences), "simple-settings")
+        try await component(SettingsView(model:model).defaultAppStorage(preferences),"professional-settings",width:1060,height:760)
+        try await component(SettingsView(model:model).defaultAppStorage(preferences),"professional-settings-dark",width:1060,height:760,appearance:.darkAqua)
         try check(!preferences.bool(forKey:"clipboardRecognitionEnabled"),"剪贴板识别默认关闭")
         let ruleText="DOMAIN,example.com,DIRECT\nIP-CIDR,192.0.2.0/24,PROXY,no-resolve\nMATCH,REJECT"
         let rules=RuleTextCodec.parse(ruleText,state:model.state).rules
@@ -203,7 +205,7 @@ struct InterfaceChecks {
         try check(!invalid.validating && invalid.result.issues.isEmpty,"规则文本修复后校验通过")
         try check(model.connection==connection,"新增界面未改变连接状态")
         try check(!FileManager.default.fileExists(atPath: model.directory.appendingPathComponent("proxy-recovery.json").path), "截图未创建代理接管记录")
-        print("INTERFACE_CHECKS_OK assertions=\(checks) screenshots=32")
+        print("INTERFACE_CHECKS_OK assertions=\(checks) screenshots=34")
         if CommandLine.arguments.contains("--interactive") {
             window.makeKeyAndOrderFront(nil)
             NSApplication.shared.activate(ignoringOtherApps: true)

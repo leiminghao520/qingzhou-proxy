@@ -5,6 +5,55 @@ import QingzhouKit
 
 struct SettingsView: View {
     @ObservedObject var model: AppModel
+    var body:some View {
+        SettingsContent(model:model,revision:SettingsRevision(model:model)).equatable()
+    }
+}
+
+// 只让设置实际依赖的数据穿过比较边界，速率和连接列表更新不使整个 Form 失效。
+private struct SettingsRevision:Equatable {
+    let profileID:UUID?
+    let locked:Bool
+    let connected:Bool
+    let loadingFailed:Bool
+    let recovering:Bool
+    let helperStatus:String
+    let protectionSummary:[String]
+    let captureMode:CaptureMode
+    let dns:DNSPreference
+    let family:AddressFamilyPolicy?
+    let http:Bool
+    let hasCompatibility:Bool
+    let port:Int
+    let exclusions:[String]
+    let protectedDomains:[String]
+    let rules:[RoutingRule]
+    let nodeLabels:[UUID:String]
+    let groupLabels:[UUID:String]
+    let autoConnect:Bool
+    let loginAtStartup:Bool
+    let shortcutEnabled:Bool
+    let shortcutKey:UInt32
+    let shortcutModifiers:UInt32
+    @MainActor init(model:AppModel) {
+        let state=model.state
+        profileID=model.currentProfileID;locked=model.locked;connected=model.connection == .connected
+        loadingFailed=model.loadingFailed;recovering=model.recovering;helperStatus=model.helperStatus
+        protectionSummary=model.protectionSummary;captureMode=state.captureMode;dns=state.dnsPreference
+        family=state.addressFamilyPolicy;http=state.httpCompatibilityEnabled;hasCompatibility=state.shadowrocket != nil
+        port=state.listenPort;exclusions=state.tunExcludedCIDRs;protectedDomains=state.protectedDomains
+        rules=state.rules;nodeLabels=Dictionary(state.nodes.map{($0.id,$0.name)},uniquingKeysWith:{$1})
+        groupLabels=Dictionary(state.groups.map{($0.id,$0.name)},uniquingKeysWith:{$1})
+        autoConnect=state.autoConnect;loginAtStartup=state.loginAtStartup
+        shortcutEnabled=state.shortcutEnabled;shortcutKey=state.shortcutKey;shortcutModifiers=state.shortcutModifiers
+    }
+}
+
+private struct SettingsContent:View,Equatable {
+    let model:AppModel
+    let revision:SettingsRevision
+    static func ==(lhs:Self,rhs:Self)->Bool {lhs.model === rhs.model && lhs.revision==rhs.revision}
+    @State private var showingDomesticConflicts=false
     @State private var port = "7890"
     @State private var exclusions = ""
     @State private var protectedDomains = ""
@@ -79,8 +128,8 @@ struct SettingsView: View {
                     Text("规则模式：本机 → 企业 VPN → 显式规则 → 国内域名/IP 直连 → 未知公网代理。保存时默认未命中策略改为当前代理选择。固定国内规则："+DomesticRouting.version).font(.caption)
                     Text("完整接管尚需管理员恢复和实网验收，不会自动启用。节点、原用户规则顺序不变。")
                         .font(.caption).foregroundStyle(.orange)
-                    DisclosureGroup("国内目标被显式规则覆盖（需人工确认）") {
-                        ForEach(DomesticRouting.conflictingRules(model.state)) {rule in Text(rule.value+" → "+model.state.label(rule.target ?? .selected)).font(.caption)}
+                    DisclosureGroup("国内目标被显式规则覆盖（需人工确认）",isExpanded:$showingDomesticConflicts) {
+                        if showingDomesticConflicts {ForEach(DomesticRouting.conflictingRules(model.state)) {rule in Text(rule.value+" → "+model.state.label(rule.target ?? .selected)).font(.caption)}}
                     }
                 }
                 Button(model.connection == .connected ? "应用网络设置（重新连接一次）":"保存网络设置") {
