@@ -335,6 +335,15 @@ do {let t=DynamicVPNTests();run("DynamicVPN.optionalDNSAndGeneration",t){try t.t
 do{let t=CapturePlanTests();run("CapturePlan.protection",t){try t.testProtectionAndResolverSelection()};run("CapturePlan.loopback",t){try t.testLoopbackRelay()};run("CapturePlan.dnsRetries",t){try t.testDNSRetriesAndNoPublicFallback()};run("CapturePlan.routesOwnership",t){try t.testRouteParsingAndOwnership()};run("CapturePlan.core",t){try t.testCoreConfigurationProtectionPrecedence()}}
 do{let t=KeychainUXTests();run("KeychainUX.authorization",t){try t.testAuthorizationRetryAndCache()};run("KeychainUX.errors",t){try t.testDistinctErrorsAndAtomicCache()}}
 do{let t=StabilityTests();run("Stability.snapshotRetryAndLatency",t){t.testSnapshotRetryAndLatency()};run("Stability.dnsQueueBoundsBudgetAndStop",t){t.testDNSQueueBoundsBudgetAndStop()};run("Stability.subscriptionClassificationAndRetry",t){t.testSubscriptionClassificationAndRetry()}}
+do {let t=OptimizationFeatureTests()
+run("OptimizationFeatures.rotatingLog",t){try t.testRotatingLogAndBounds()}
+run("OptimizationFeatures.subscriptionAmbiguity",t){try t.testMatchingAmbiguityAndMetadata()}
+run("OptimizationFeatures.ruleText",t){try t.testRuleTextRoundtripAndRejections()}
+run("OptimizationFeatures.clipboardPrivacy",t){t.testClipboardPrivacyAndDeduplication()}
+run("OptimizationFeatures.history",t){try t.testHistoryCountersRetentionAndRestart()}
+run("OptimizationFeatures.realityRoundtrip",t){try t.testRealityShareRoundtrip()}
+}
+
 Task {
     do {try await runStartupOptimizationChecks()} catch {CheckHarness.failure("启动优化检查异常",file:#filePath,line:#line)}
     do {try await runQuitRecoveryChecks()} catch {CheckHarness.failure("退出恢复检查异常",file:#filePath,line:#line)}
@@ -349,9 +358,12 @@ Task {
     await runConnectivityChecks()
     await runRepairHealthChecks()
     await runNetworkProbeChecks()
+    await runDownloadCancellationChecks()
+    do{try await runHistoryTransactionChecks()}catch{CheckHarness.failure("流量配置事务检查异常",file:#filePath,line:#line)}
+    await runPooledDownloadChecks()
     await runAsyncChecks()
     do{try await runTransactionChecks()}catch{CheckHarness.failure("事务场景异常",file:#filePath,line:#line)}
-    print("RESULT scenarios=\(scenarios + 47) assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
+    print("RESULT scenarios=\(scenarios + 50) assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
     exit(CheckHarness.failures == 0 ? 0 : 1)
 }
 dispatchMain()

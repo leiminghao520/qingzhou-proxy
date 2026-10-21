@@ -702,11 +702,11 @@ struct RateChart: View {
                 Spacer()
                 HStack(spacing: 12) {
                     HStack(spacing: 4) {
-                        Circle().fill(Theme.connectedGreen).frame(width: 7, height: 7)
+                        Circle().fill(Theme.trafficUpload).frame(width: 7, height: 7)
                         Text("上传").font(.caption2).foregroundStyle(.secondary)
                     }
                     HStack(spacing: 4) {
-                        Circle().fill(Theme.accentBlue).frame(width: 7, height: 7)
+                        Circle().fill(Theme.trafficDownload).frame(width: 7, height: 7)
                         Text("下载").font(.caption2).foregroundStyle(.secondary)
                     }
                 }
@@ -735,7 +735,7 @@ struct RateChart: View {
                         )
                         .foregroundStyle(
                             LinearGradient(
-                                colors: [Theme.accentBlue.opacity(0.28), Theme.accentBlue.opacity(0.02)],
+                                colors: [Theme.trafficDownload.opacity(0.28), Theme.trafficDownload.opacity(0.02)],
                                 startPoint: .top,
                                 endPoint: .bottom
                             )
@@ -747,7 +747,7 @@ struct RateChart: View {
                             y: .value("速率", sample.download),
                             series: .value("方向", "下载")
                         )
-                        .foregroundStyle(Theme.accentBlue)
+                        .foregroundStyle(Theme.trafficDownload)
                         .lineStyle(StrokeStyle(lineWidth: 2))
                         .interpolationMethod(.linear)
                         
@@ -759,7 +759,7 @@ struct RateChart: View {
                         )
                         .foregroundStyle(
                             LinearGradient(
-                                colors: [Theme.connectedGreen.opacity(0.25), Theme.connectedGreen.opacity(0.02)],
+                                colors: [Theme.trafficUpload.opacity(0.25), Theme.trafficUpload.opacity(0.02)],
                                 startPoint: .top,
                                 endPoint: .bottom
                             )
@@ -771,7 +771,7 @@ struct RateChart: View {
                             y: .value("速率", sample.upload),
                             series: .value("方向", "上传")
                         )
-                        .foregroundStyle(Theme.connectedGreen)
+                        .foregroundStyle(Theme.trafficUpload)
                         .lineStyle(StrokeStyle(lineWidth: 1.8))
                         .interpolationMethod(.linear)
                     }

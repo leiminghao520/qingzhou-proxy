@@ -114,6 +114,7 @@ struct PreviewSheet: View {
                             if !diff.changed.isEmpty {
                                 Text("更新节点：" + diff.changed.joined(separator: "、")).font(.caption)
                             }
+                            if !diff.ambiguousNodes.isEmpty {Text("节点身份有歧义，不继承个人信息："+diff.ambiguousNodes.joined(separator:"、")).font(.caption).foregroundStyle(Theme.amberAccent)}
                             if diff.ruleChanges {Text("规则行为发生变化（包含 no-resolve），将按新规则顺序生效。").font(.caption)}
                             if diff.strategyChanges {Text("策略组发生变化。").font(.caption)}
                             if diff.compatibilityChanges {Text("HTTP 重写、兼容配置或规则资产发生变化；兼容模式开关保留当前设置。").font(.caption).foregroundStyle(Theme.amberAccent)}

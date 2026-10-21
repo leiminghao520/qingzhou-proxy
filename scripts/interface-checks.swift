@@ -164,11 +164,11 @@ struct InterfaceChecks {
         let afterObject = try JSONSerialization.jsonObject(with: after) as! NSDictionary
         try check(beforeObject == afterObject && model.connection == connection, "双向切换保留全部业务状态与连接状态")
         try check(UserDefaults(suiteName: suite)?.string(forKey: "interfaceMode") == "simple", "重新读取偏好保留用户选择")
-        func component<V: View>(_ view: V, _ name: String, width: CGFloat = 550) async throws {
-            let view = NSHostingView(rootView: view.padding(24).frame(width: width, height: 620).background(Color(nsColor: .windowBackgroundColor)))
-            let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 620), styleMask: [.titled], backing: .buffered, defer: false)
+        func component<V: View>(_ view: V, _ name: String, width: CGFloat = 550, height:CGFloat = 620, appearance:NSAppearance.Name = .aqua) async throws {
+            let view = NSHostingView(rootView: view.padding(24).frame(width: width, height: height).background(Color(nsColor: .windowBackgroundColor)))
+            let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: height), styleMask: [.titled], backing: .buffered, defer: false)
             panel.contentView = view
-            panel.appearance = NSAppearance(named: .aqua)
+            panel.appearance = NSAppearance(named: appearance)
             panel.makeKeyAndOrderFront(nil)
             try? await Task.sleep(nanoseconds: 600_000_000)
             view.layoutSubtreeIfNeeded()
@@ -178,8 +178,32 @@ struct InterfaceChecks {
         try await component(SimpleLinesView(model: model, onImport: {}, onEdit: { _ in }, onProfessional: {}), "simple-lines")
         try await component(SimpleSubscriptionsView(model: model, onImport: {}), "simple-subscriptions")
         try await component(SimpleSettingsView(model: model, onAdvanced: {}, onDiagnose: {}).defaultAppStorage(preferences), "simple-settings")
+        try check(!preferences.bool(forKey:"clipboardRecognitionEnabled"),"剪贴板识别默认关闭")
+        let ruleText="DOMAIN,example.com,DIRECT\nIP-CIDR,192.0.2.0/24,PROXY,no-resolve\nMATCH,REJECT"
+        let rules=RuleTextCodec.parse(ruleText,state:model.state).rules
+        try await component(RuleTextEditor(app:model,text:ruleText,rules:rules,accept:{_ in}),"rule-text-editor",width:820,height:740)
+        try await component(RuleTextEditor(app:model,text:ruleText,rules:rules,accept:{_ in}),"rule-text-editor-dark",width:820,height:740,appearance:.darkAqua)
+        try await component(TrafficHistoryView(model:model,history:model.history),"traffic-history-empty",width:820)
+        try await component(TrafficHistoryView(model:model,history:model.history),"traffic-history-dark",width:820,appearance:.darkAqua)
+        let historySnapshot=try JSONDecoder().decode(ConnectionSnapshot.self,from:Data("{\"uploadTotal\":2500000,\"downloadTotal\":10000000,\"connections\":[]}".utf8))
+        if let profileID=model.currentProfileID {model.history.receive(historySnapshot,profileID:profileID)}
+        await model.history.drain()
+        try? await Task.sleep(nanoseconds:200_000_000)
+        try check(!model.history.rows.isEmpty,"历史汇总写入后可在界面读取")
+        try await component(TrafficHistoryView(model:model,history:model.history),"traffic-history-populated",width:820)
+        try await component(TrafficHistoryView(model:model,history:model.history),"traffic-history-populated-dark",width:820,appearance:.darkAqua)
+        model.history.clear();await model.history.drain()
+        try? await Task.sleep(nanoseconds:200_000_000)
+        try check(model.history.rows.isEmpty,"历史清空后界面同步为空")
+        let invalid=RuleTextEditorModel(text:"DOMAIN,x.example,不存在",state:model.state,previous:[])
+        try? await Task.sleep(nanoseconds:500_000_000)
+        try check(!invalid.validating && invalid.result.issues.first?.line==1,"规则文本异步校验定位到错误行")
+        invalid.text=ruleText;invalid.validate()
+        try? await Task.sleep(nanoseconds:500_000_000)
+        try check(!invalid.validating && invalid.result.issues.isEmpty,"规则文本修复后校验通过")
+        try check(model.connection==connection,"新增界面未改变连接状态")
         try check(!FileManager.default.fileExists(atPath: model.directory.appendingPathComponent("proxy-recovery.json").path), "截图未创建代理接管记录")
-        print("INTERFACE_CHECKS_OK assertions=\(checks) screenshots=26")
+        print("INTERFACE_CHECKS_OK assertions=\(checks) screenshots=32")
         if CommandLine.arguments.contains("--interactive") {
             window.makeKeyAndOrderFront(nil)
             NSApplication.shared.activate(ignoringOtherApps: true)

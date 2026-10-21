@@ -9,6 +9,7 @@ import QingzhouKit
     private var pending: [String] = []
     private var flushTask: Task<Void, Never>?
     private var writer: RuntimeLogWriter?
+    private var dropped=0
     private let formatter: DateFormatter = {let value=DateFormatter();value.dateFormat="HH:mm:ss";return value}()
     private static let ansi = try! NSRegularExpression(pattern: "\u{001B}\\[[0-?]*[ -/]*[@-~]")
 
@@ -17,17 +18,19 @@ import QingzhouKit
         let range=NSRange(input.startIndex..<input.endIndex,in:input)
         let plain=Self.ansi.stringByReplacingMatches(in:input,range:range,withTemplate:"")
         let timestamp=formatter.string(from:Date())
-        for line in plain.components(separatedBy:.newlines) where !line.isEmpty {
-            pending.append(timestamp+"  "+Redactor.redact(line,secrets:secrets))
+        let bounded=String(Redactor.redact(plain,secrets:secrets).prefix(65536))
+        for line in bounded.components(separatedBy:.newlines) where !line.isEmpty {
+            pending.append(timestamp+"  "+String(Redactor.redact(line,secrets:secrets).prefix(2048)))
         }
         // 高流量时限定单批容量，避免后台磁盘任务无限积压。
-        if pending.count > 1000 {pending.removeFirst(pending.count-1000)}
+        if pending.count > 1000 {dropped+=pending.count-1000;pending.removeFirst(pending.count-1000)}
         guard flushTask == nil else {return}
         flushTask=Task { [weak self] in
             try? await Task.sleep(nanoseconds:500_000_000)
             guard !Task.isCancelled,let self else {return}
             self.flushTask=nil
-            let batch=self.pending;self.pending=[]
+            var batch=self.pending;self.pending=[]
+            if self.dropped>0 {batch.append("高流量期间丢弃 \(self.dropped) 条日志");self.dropped=0}
             self.lines.append(contentsOf:batch)
             if self.lines.count>500 {self.lines.removeFirst(self.lines.count-500)}
             self.text=self.lines.joined(separator:"\n")
@@ -36,18 +39,31 @@ import QingzhouKit
             }
         }
     }
-    func clear() {flushTask?.cancel();flushTask=nil;pending=[];lines=[];text=""}
+    func clear() {flushTask?.cancel();flushTask=nil;pending=[];dropped=0;lines=[];text=""}
 }
 
-// 文件读写仅在串行后台队列执行，每批只读取和替换一次日志文件。
+// 文件仅在后台串行追加，队列只保留一个工作项和有界待写批次。
 private final class RuntimeLogWriter: @unchecked Sendable {
     private let queue=DispatchQueue(label:"cn.qingzhou.log-writer",qos:.utility)
     private let log: DiagnosticLog
     private var reported=false
+    private let lock=NSLock()
+    private var pending:[String]=[]
+    private var scheduled=false
+    private var dropped=0
     init(url:URL) {log=DiagnosticLog(url:url)}
     func append(_ lines:[String],failure:@escaping @Sendable ()->Void) {
+        lock.lock();pending.append(contentsOf:lines)
+        if pending.count>1000 {dropped+=pending.count-1000;pending.removeFirst(pending.count-1000)}
+        let start = !scheduled;scheduled=true;lock.unlock()
+        guard start else{return}
         queue.async { [self] in
-            do {try log.appendBatch(lines)} catch {if !reported {reported=true;failure()}}
+            while true {
+                lock.lock();var batch=pending;pending=[]
+                if dropped>0 {batch.append("磁盘日志队列丢弃 \(dropped) 条");dropped=0}
+                if batch.isEmpty {scheduled=false;lock.unlock();return};lock.unlock()
+                do {try log.appendBatch(batch)} catch {if !reported {reported=true;failure()}}
+            }
         }
     }
 }

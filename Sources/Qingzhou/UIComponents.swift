@@ -9,16 +9,19 @@ enum Theme {
     static let controlRadius: CGFloat = 8
     
     // Status Colors
-    static let connectedGreen = Color(red: 0.18, green: 0.78, blue: 0.44)
-    static let connectingYellow = Color(red: 0.95, green: 0.65, blue: 0.12)
+    static let connectedGreen = Color(nsColor: .systemGreen)
+    static let connectingYellow = Color(nsColor: .systemOrange)
     static let disconnectedGray = Color.secondary
-    static let dangerRed = Color(red: 0.92, green: 0.28, blue: 0.28)
-    static let accentBlue = Color(red: 0.12, green: 0.52, blue: 0.96)
-    static let purpleAccent = Color(red: 0.58, green: 0.35, blue: 0.92)
-    static let cyanAccent = Color(red: 0.08, green: 0.72, blue: 0.82)
-    static let amberAccent = Color(red: 0.95, green: 0.55, blue: 0.15)
+    static let dangerRed = Color(nsColor: .systemRed)
+    static let accentBlue = Color(nsColor: .systemBlue)
+    static let purpleAccent = Color(nsColor: .systemPurple)
+    static let cyanAccent = Color(nsColor: .systemTeal)
+    static let amberAccent = Color(nsColor: .systemOrange)
     
-    // Background Tints
+    static let trafficUpload = Color(nsColor: .systemOrange)
+    static let trafficDownload = Color(nsColor: .systemBlue)
+
+    // 背景颜色
     static var cardBackground: Color {
         Color(nsColor: .controlBackgroundColor)
     }

@@ -54,6 +54,7 @@ public final class NodeStore {
         guard !candidates.isEmpty else {throw ProxyError("没有可导入节点")}
         var next=state,created:[String]=[],retired:[String]=[];var mapping:[UUID:UUID]=[:];var seen:[String:Candidate]=[:]
         let oldNodes=subscription.map{sub in state.nodes.filter{$0.subscriptionID==sub.id}} ?? replacingID.map{id in state.nodes.filter{$0.id==id}} ?? []
+        let matching=SubscriptionMatching(old:oldNodes,incoming:candidates.map(\.node))
         if let sub=subscription {next.nodes.removeAll{$0.subscriptionID==sub.id}}
         if let id=replacingID {next.nodes.removeAll{$0.id==id}}
         retired=oldNodes.flatMap{[$0.credentialRef,$0.credentialRef+".obfs"]}
@@ -68,7 +69,7 @@ public final class NodeStore {
                 if subscription==nil && replacingID==nil,let existing=next.nodes.first(where:{$0.subscriptionID==nil && $0.fingerprint==fingerprint}),(try? credentials.get(existing.credentialRef))==candidate.secret,(try? credentials.get(existing.credentialRef+".obfs"))==candidate.obfsSecret {mapping[candidate.node.id]=existing.id;continue}
                 var node=candidate.node
                 node.id=replacingID ?? oldNodes.first{$0.fingerprint==fingerprint}?.id ?? node.id
-                if let old=oldNodes.first(where:{$0.kind==node.kind && $0.server==node.server && $0.port==node.port}),oldNodes.filter({$0.kind==node.kind && $0.server==node.server && $0.port==node.port}).count==1 {
+                if let old=matching.previousByIncomingID[candidate.node.id] {
                     if let note=state.notes[old.id.uuidString]{next.notes[node.id.uuidString]=note};if state.favorites.contains(old.id){next.favorites.insert(node.id)}
                     if let recent=state.recentUse[old.id.uuidString]{next.recentUse[node.id.uuidString]=recent}
                 }

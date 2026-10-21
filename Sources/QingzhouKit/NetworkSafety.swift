@@ -56,16 +56,47 @@ public struct HealthFailureCounter {
     }
 }
 
+// 串行追加和有界归档避免每批读取整份诊断日志。
 public final class DiagnosticLog {
     private let url:URL
+    private let lock=NSLock()
+    public static let maximumFileBytes=512*1024
+    public static let maximumLineBytes=8192
     public init(url:URL){self.url=url}
-    public func append(_ line:String) throws {
-        try appendBatch([line])
-    }
+    public func append(_ line:String) throws {try appendBatch([line])}
     public func appendBatch(_ lines:[String]) throws {
-        var data=(try? Data(contentsOf:url)) ?? Data()
-        for line in lines {data.append(Data((Redactor.redact(line)+"\n").utf8))}
-        if data.count>512*1024 {data=Data(data.suffix(256*1024));if let newline=data.firstIndex(of:10){data.removeSubrange(data.startIndex...newline)}}
-        try SecureFile.write(data,to:url)
+        lock.lock();defer{lock.unlock()}
+        let fm=FileManager.default
+        try fm.createDirectory(at:url.deletingLastPathComponent(),withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
+        var batch=Data()
+        for line in lines {
+            let safe=Redactor.redact(line).replacingOccurrences(of:"\n",with:" ").replacingOccurrences(of:"\r",with:" ")
+            var entry=String(safe.prefix(Self.maximumLineBytes))
+            while entry.utf8.count>Self.maximumLineBytes {entry.removeLast()}
+            if safe.utf8.count>Self.maximumLineBytes {entry+=" [日志已截断]"}
+            let data=Data((entry+"\n").utf8)
+            if batch.count+data.count>Self.maximumFileBytes {try write(batch);batch=Data()}
+            batch.append(data)
+        }
+        if !batch.isEmpty {try write(batch)}
+    }
+    private func write(_ data:Data) throws {
+        let fm=FileManager.default
+        let size=(try? fm.attributesOfItem(atPath:url.path)[.size] as? NSNumber)?.intValue ?? 0
+        if size+data.count>Self.maximumFileBytes {
+            let last=url.appendingPathExtension("3")
+            if fm.fileExists(atPath:last.path){try fm.removeItem(at:last)}
+            for index in stride(from:2,through:1,by:-1) {
+                let source=url.appendingPathExtension(String(index))
+                if fm.fileExists(atPath:source.path){try fm.moveItem(at:source,to:url.appendingPathExtension(String(index+1)))}
+            }
+            if fm.fileExists(atPath:url.path){try fm.moveItem(at:url,to:url.appendingPathExtension("1"))}
+        }
+        let fd=open(url.path,O_WRONLY|O_CREAT|O_APPEND|O_NOFOLLOW|O_CLOEXEC,0o600)
+        guard fd>=0 else {throw ProxyError("诊断日志无法打开")}
+        let handle=FileHandle(fileDescriptor:fd,closeOnDealloc:true)
+        defer {try? handle.close()}
+        guard fchmod(fd,0o600)==0 else {throw ProxyError("诊断日志权限无法设置")}
+        try handle.write(contentsOf:data)
     }
 }

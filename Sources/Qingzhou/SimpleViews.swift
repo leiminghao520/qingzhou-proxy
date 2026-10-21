@@ -366,6 +366,7 @@ struct SimpleSettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("设置").font(.largeTitle.bold())
             Form {
+                OptimizationSettings(model:model)
                 Section("启动") {
                     Toggle("启动应用后自动连接", isOn: Binding(get: { model.state.autoConnect }, set: { model.setAutoConnect($0) }))
                     Toggle("登录 macOS 时启动", isOn: Binding(get: { model.state.loginAtStartup }, set: { model.setLoginAtStartup($0) }))

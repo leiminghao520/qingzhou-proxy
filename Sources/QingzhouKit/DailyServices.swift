@@ -3,12 +3,21 @@ import Darwin
 
 public struct UpdateDiff:Sendable {
     public var added:[String]=[];public var removed:[String]=[];public var changed:[String]=[];public var certificateChanges:[String]=[];public var strategyChanges=false;public var ruleChanges=false;public var removesSelection=false
+    public var ambiguousNodes:[String]=[]
     public var compatibilityChanges=false
-    public var requiresReview:Bool {removesSelection || !certificateChanges.isEmpty || compatibilityChanges}
+    public var requiresReview:Bool {!ambiguousNodes.isEmpty || removesSelection || !certificateChanges.isEmpty || compatibilityChanges}
     public static func compare(old:AppState,preview:ImportPreview,subscriptionID:UUID?,credentials:CredentialStore?=nil) -> UpdateDiff {
         let oldNodes=old.nodes.filter{$0.subscriptionID==subscriptionID};let fresh=preview.candidates.map(\.node);var diff=UpdateDiff()
-        func identity(_ n:Node)->String{"\(n.kind)|\(n.server.lowercased())|\(n.port)"}
-        for node in fresh {if let previous=oldNodes.first(where:{$0.fingerprint==node.fingerprint}){if node.name != previous.name || preview.candidates.first(where:{$0.node.id==node.id}).map({candidate in credentials.map{(try? $0.get(previous.credentialRef)) != candidate.secret || (try? $0.get(previous.credentialRef+".obfs")) != candidate.obfsSecret} ?? false})==true{diff.changed.append(node.name)}}else if let previous=oldNodes.first(where:{identity($0)==identity(node)}){diff.changed.append(node.name);if node.insecure != previous.insecure{diff.certificateChanges.append(node.name)}}else{diff.added.append(node.name);if node.insecure{diff.certificateChanges.append(node.name)}}}
+        let matching=SubscriptionMatching(old:oldNodes,incoming:fresh)
+        diff.ambiguousNodes=fresh.filter{matching.ambiguousIncomingIDs.contains($0.id)}.map(\.name)
+        for candidate in preview.candidates {
+            let node=candidate.node
+            if let previous=matching.previousByIncomingID[node.id] {
+                let credentialsChanged=credentials.map{(try? $0.get(previous.credentialRef)) != candidate.secret || (try? $0.get(previous.credentialRef+".obfs")) != candidate.obfsSecret} ?? false
+                if node.fingerprint != previous.fingerprint || node.name != previous.name || credentialsChanged {diff.changed.append(node.name)}
+                if node.insecure != previous.insecure {diff.certificateChanges.append(node.name)}
+            } else {diff.added.append(node.name);if node.insecure {diff.certificateChanges.append(node.name)}}
+        }
         for node in oldNodes where !fresh.contains(where:{$0.fingerprint==node.fingerprint}) {diff.removed.append(node.name);var visiting=Set<UUID>()
             func uses(_ ref:PolicyReference?)->Bool {guard let ref else{return false};switch ref{case .node(let id):return id==node.id;case .automatic:return true;case .group(let id):guard visiting.insert(id).inserted,let group=old.groups.first(where:{$0.id==id}) else{return false};return group.members.contains{uses($0)};default:return false}}
             if uses(old.activePolicy){diff.removesSelection=true}}
@@ -73,10 +82,10 @@ public enum RuleEvaluator {
     }
 }
 @MainActor public enum RuntimeTransaction {
-    public static func apply(_ tx:StoreTransaction,connected:Bool,validate:() async throws -> Void,stop:() async throws -> Void,start:(AppState) async throws -> Void,commit:() throws -> Void,abort:() -> Void) async throws {
+    public static func apply(_ tx:StoreTransaction,connected:Bool,validate:() async throws -> Void,stop:() async throws -> Void,start:(AppState) async throws -> Void,commit:() throws -> Void,abort:() -> Void,restartPrevious:((AppState) async throws -> Void)?=nil) async throws {
         var changed=false
         do {try await validate();if connected {changed=true;try await stop();if tx.next.activePolicy != nil || tx.next.mode == .direct{try await start(tx.next)}};try commit()}
-        catch {let original=error;if changed {do{try await stop();if tx.previous.activePolicy != nil || tx.previous.mode == .direct{try await start(tx.previous)}}catch{abort();throw ProxyError("新配置失败，上一份运行配置恢复失败，请使用恢复入口")}};abort();throw original}
+        catch {let original=error;if changed {do{try await stop();if tx.previous.activePolicy != nil || tx.previous.mode == .direct{if let restartPrevious {try await restartPrevious(tx.previous)} else {try await start(tx.previous)}}}catch{abort();throw ProxyError("新配置失败，上一份运行配置恢复失败，请使用恢复入口")}};abort();throw original}
     }
 }
 public struct RateSample:Identifiable,Sendable {public var id=UUID();public var time=Date();public var upload:Int64;public var download:Int64;public init(upload:Int64,download:Int64){self.upload=upload;self.download=download}}

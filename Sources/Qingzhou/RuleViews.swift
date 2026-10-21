@@ -25,6 +25,8 @@ struct RuleView: View {
     @State private var value = ""
     @State private var target = PolicyReference.selected
     @State private var addingRemote = false
+    @State private var textDraft:String?
+    @State private var textError:String?
     @State private var draftRules:[RoutingRule]?
     @State private var draftFinal:PolicyReference?
     @State private var draftRevision:Data?
@@ -33,7 +35,7 @@ struct RuleView: View {
     private func beginDraft() {
         if draftRules==nil {draftRules=model.state.rules;draftFinal=model.state.ruleFinal ?? .selected;draftRevision=try? model.ruleRevision()}
     }
-    private func resetDraft() {draftRules=nil;draftFinal=nil;draftRevision=nil}
+    private func resetDraft() {draftRules=nil;draftFinal=nil;draftRevision=nil;textDraft=nil;textError=nil}
     private func previewMove(from source:IndexSet,to destination:Int) {
         guard source.allSatisfy({displayedRules.indices.contains($0)}),(0...displayedRules.count).contains(destination) else {return}
         beginDraft();draftRules!.move(fromOffsets:source,toOffset:destination)
@@ -52,7 +54,14 @@ struct RuleView: View {
             .pickerStyle(.segmented)
             
             if tab == "自定义规则" {
-                // Add New Rule Bar
+                HStack {
+                    Button("批量文本编辑…") {
+                        do {let text=try RuleTextCodec.encode(displayedRules);beginDraft();textDraft=text;textError=nil}
+                        catch {textError=error.localizedDescription}
+                    }.disabled(model.locked)
+                    if let textError {Text(textError).font(.caption).foregroundStyle(Theme.dangerRed)}
+                }
+                // 添加规则草稿
                 HStack(spacing: 10) {
                     Picker("规则类型", selection: $kind) {
                         Text("域名 (DOMAIN)").tag(RuleKind.domain)
@@ -207,6 +216,9 @@ struct RuleView: View {
             }
         }
         .onChange(of:model.currentProfileID) {_,_ in resetDraft()}
+        .sheet(isPresented:Binding(get:{textDraft != nil},set:{if !$0{textDraft=nil}})) {
+            if let textDraft {RuleTextEditor(app:model,text:textDraft,rules:displayedRules,final:draftFinal){rules in draftRules=rules}}
+        }
         .sheet(isPresented: $addingRemote) { RemoteEditor(model: model) }
     }
     
