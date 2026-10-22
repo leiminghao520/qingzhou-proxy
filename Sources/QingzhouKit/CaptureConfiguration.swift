@@ -9,6 +9,7 @@ public enum CaptureConfiguration {
         dns["servers"]=servers
         var dnsRules=dns["rules"] as! [[String:Any]]
         if !plan.domains.isEmpty {dnsRules.insert(["domain_suffix":plan.domains,"action":"route","server":"local","strategy":""],at:0)}
+        if let exact=plan.exactDomains,!exact.isEmpty {dnsRules.insert(["domain":exact,"action":"route","server":"local","strategy":""],at:0)}
         dns["rules"]=dnsRules;object["dns"]=dns
         var outbounds=object["outbounds"] as! [[String:Any]]
         for index in outbounds.indices where outbounds[index]["server"] != nil || outbounds[index]["type"] as? String == "direct" {outbounds[index]["bind_interface"]=(outbounds[index]["server"] as? String).flatMap{nodeInterfaces[$0]} ?? plan.snapshot.primaryInterface}
@@ -23,11 +24,14 @@ public enum CaptureConfiguration {
         protected.append(["domain_regex":["^[^.]+$"],"action":"resolve","server":"local","strategy":""])
         // 先解析内网域名，再按目标地址选择原接口；保护规则优先于 IPv6 拒绝和普通分流。
         if !plan.domains.isEmpty {protected.append(["domain_suffix":plan.domains,"action":"resolve","server":"local","strategy":""])}
+        if let exact=plan.exactDomains,!exact.isEmpty {protected.append(["domain":exact,"action":"resolve","server":"local","strategy":""])}
         for item in plan.protectedRoutes {protected.append(["ip_cidr":[item.destination],"action":"route","outbound":"protected-"+item.interface])}
+        for (key,values) in [("domain_suffix",plan.userDomainSuffixes ?? []),("domain",plan.exactDomains ?? [])] where !values.isEmpty {protected.append([key:values,"action":"route","outbound":"protected-"+plan.snapshot.primaryInterface])}
         if !plan.domains.isEmpty {
             // 不能确认原 VPN 出口的企业请求明确拒绝，避免重建到物理出口泄漏。
             protected.append(["domain_suffix":plan.domains,"action":"reject"])
         }
+        if let exact=plan.exactDomains,!exact.isEmpty {protected.append(["domain":exact,"action":"reject"])}
         protected.append(["ip_cidr":plan.exclusions,"action":"route","outbound":"protected-"+plan.snapshot.primaryInterface])
         route["rules"]=leading+protected+rules;object["route"]=route
     }

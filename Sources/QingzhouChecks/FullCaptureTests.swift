@@ -252,6 +252,22 @@ final class FullCaptureTests:CheckCase {
         let nodeLocal=NetworkSnapshot.parseRoutes("Internet6:\nff01::%lo0/32 ::1 UmCI lo0",includeTransient:true)
         let local=try BypassRoutePlan.capture(destinations:["ff01::1/128"],existingPrefixes:[],hasIPv6:true,existingRoutes:nodeLocal,lookup:{_,_ in ""})
         expectEqual(local.preservedRoutes.count,1);expectTrue(local.routes.isEmpty)
+
+        // 启动前仍严格确认原路径，运行中不冻结系统组播接口的生命周期。
+        expectTrue(CaptureOwnership.protectionIssues(owned:[],preserved:plan.preservedRoutes+local.preservedRoutes,actual:[]).isEmpty)
+        let protected=[
+            ProtectedRoute(destination:"ff02::/32",gateway:"link#11",interface:"en0"),
+            ProtectedRoute(destination:"ff05::/32",gateway:"link#14",interface:"awdl0",scope:"awdl0"),
+            ProtectedRoute(destination:"ff02::fb/128",gateway:"link#14",interface:"awdl0",scope:"awdl0"),
+            ProtectedRoute(destination:"10.0.0.0/8",gateway:"10.0.0.1",interface:"utun6",scope:"utun6")
+        ]
+        for route in protected {
+            expectFalse(CaptureOwnership.protectionIssues(owned:[],preserved:[route],actual:[]).isEmpty)
+        }
+        for route in plan.preservedRoutes+local.preservedRoutes {
+            expectFalse(CaptureOwnership.protectionIssues(owned:[route],preserved:[],actual:[]).isEmpty)
+            expectFalse(CaptureOwnership.routeIssues(expected:[route],actual:[]).isEmpty)
+        }
     }
 
 }

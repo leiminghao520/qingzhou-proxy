@@ -12,10 +12,11 @@ extension MonitorChecks {
         var corporateInterface="utun6"
         var corporateDNS=ports["initialCorporate"]==1,corporateRoute=ports["initialCorporate"]==1,tick=100.0
         var dnsUnavailable=false
+        var secondaryNIC=false
         service.networkUptime={tick}
         service.journal=Journal(expectedDNS:dnsData,routes:[OwnedRoute(destination:"0.0.0.0/1",gateway:"link#42",interface:"utun42")])
         service.networkDNSRead={_ in dns}
-        service.routeSample={try NetworkRouteSample(read:{table+"\n"+(corporateRoute ? "10.20/16 10.20.0.1 UGSc "+corporateInterface+"\n":"")})}
+        service.routeSample={try NetworkRouteSample(read:{table+"\n169.254 link#1 UCS lo0\n"+(secondaryNIC ? "169.254 link#23 UCSI en6\n":"")+(corporateRoute ? "10.20/16 10.20.0.1 UGSc "+corporateInterface+"\n":"")})}
         service.networkSnapshotRead={sample in
             let routes=NetworkSnapshot.parseRoutes(sample.table)
             return NetworkSnapshot(primaryInterface:"lo0",routes:routes,resolvers:[publicDNS]+(corporateDNS ? [DNSResolverScope(service:"corp",interface:corporateInterface,servers:["10.20.0.53"],domains:["corp.test"])]:[]))
@@ -68,6 +69,8 @@ extension MonitorChecks {
                 case "interface":corporateInterface="utun7";corporateDNS=true;corporateRoute=true
                 case "refuse":queryLock.lock();dnsUnavailable=true;queryLock.unlock()
                 case "recover":queryLock.lock();dnsUnavailable=false;queryLock.unlock()
+                case "nic-up":secondaryNIC=true
+                case "nic-down":secondaryNIC=false
                 case "tick":break
                 case "stop":try? service.stop()
                 default:return "UNKNOWN"

@@ -12,10 +12,10 @@ public enum PolicyValidator {
         }
         guard !state.rules.contains(where:{$0.kind == .userAgent}) || state.shadowrocket != nil else{throw ProxyError("User-Agent 缺少 HTTP 兼容配置")}
         guard Set(state.nodes.map(\.id)).count==state.nodes.count,Set(state.groups.map(\.id)).count==state.groups.count else {throw ProxyError("节点或策略 ID 重复")}
-        guard state.nodes.count<=2000,state.groups.count<=2000,state.rules.count<=50000,state.remoteRules.reduce(0,{$0+$1.rules.count})<=50000,state.tunExcludedCIDRs.count<=100 else{throw ProxyError("配置数量超过限制")}
-        _ = try ProtectedDomainPolicy.normalize(state.protectedDomains)
+        guard state.nodes.count<=2000,state.groups.count<=2000,state.rules.count<=50000,state.remoteRules.reduce(0,{$0+$1.rules.count})<=50000,state.effectiveBypasses.count<=5000 else{throw ProxyError("配置数量超过限制")}
+        _ = try NetworkBypassPolicy.normalize(state.effectiveBypasses)
         if state.captureMode == .compatible {try DomesticRouting.validate()}
-        for cidr in state.tunExcludedCIDRs{try ConfigBuilder.validate(RoutingRule(kind:.cidr,value:cidr,action:.direct))}
+        for cidr in state.bypassCIDRs{try ConfigBuilder.validate(RoutingRule(kind:.cidr,value:cidr,action:.direct))}
         for source in state.remoteRules{for rule in source.rules{try ConfigBuilder.validate(rule)}}
         var visiting=Set<UUID>(),finished=Set<UUID>()
         func visit(_ id:UUID) throws {

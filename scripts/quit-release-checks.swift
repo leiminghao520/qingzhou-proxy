@@ -5,12 +5,14 @@ import QingzhouKit
 // 链接正式退出核验，只注入快照和代理核验；夹具禁止写入真实网络。
 struct HelperProxyRecord {}
 struct Journal {
+    var firewall:String?=nil
     var expectedDNS:Data
     var dnsKey="fixture"
     var proxies:[HelperProxyRecord]?=[]
     var routes:[ProtectedRoute]
 }
 final class Service {
+    var routeSample:() throws -> NetworkRouteSample = {throw ProxyError("必须注入快照")}
     var process:Process?
     var activeRequest:TunRequest?
     var networkResumeSession:NSObject?

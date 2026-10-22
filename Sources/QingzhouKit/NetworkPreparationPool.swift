@@ -11,11 +11,12 @@ public final class NetworkPreparationPool {
     public func map<Input, Output>(_ inputs: [Input], itemTimeout: TimeInterval? = nil,
                                    totalTimeout: TimeInterval? = nil,
                                    cancelled: @escaping () -> Bool = { false },
+                                   prepare: () throws -> Void = {},
                                    operation: @escaping (Input) throws -> Output) throws -> [Output] {
         if cancelled() {throw CancellationError()}
         guard itemTimeout.map({$0>0 && $0.isFinite}) ?? true,
               totalTimeout.map({$0>0 && $0.isFinite}) ?? true else {throw ProxyError("网络准备时间预算无效")}
-        guard !inputs.isEmpty else { return [] }
+        guard !inputs.isEmpty else {try prepare();return []}
         let batch = PreparationBatch<Output>(itemTimeout: itemTimeout, totalTimeout: totalTimeout)
         let operations = inputs.enumerated().map { index, input in
             BlockOperation {
@@ -29,14 +30,16 @@ public final class NetworkPreparationPool {
             for operation in operations { operation.cancel() }
         }
         queue.addOperations(operations, waitUntilFinished: false)
+        try prepare()
         return try batch.wait(count: inputs.count, cancelled: cancelled)
     }
     public func addresses(_ hosts: [String], itemTimeout: TimeInterval = 3, totalTimeout: TimeInterval = 6,
                           cancelled: @escaping () -> Bool = { false },
+                          prepare: () throws -> Void = {},
                           resolver: @escaping (String) throws -> [String] = NetworkInspection.addresses) throws -> [String: [String]] {
         let unique = Array(Set(hosts)).sorted()
         let values = try map(unique, itemTimeout: itemTimeout, totalTimeout: totalTimeout,
-                             cancelled: cancelled, operation: resolver)
+                             cancelled: cancelled, prepare: prepare, operation: resolver)
         return Dictionary(uniqueKeysWithValues: zip(unique, values))
     }
 }

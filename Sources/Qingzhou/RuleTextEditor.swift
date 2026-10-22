@@ -30,15 +30,22 @@ struct RuleTextEditor:View {
     @StateObject private var editor:RuleTextEditorModel
     let accept:([RoutingRule])->Void
     let final:PolicyReference?
+    let initialText:String
+    let onTextChange:(String)->Void
+    let onDiscard:()->Void
+    private func cancel() {
+        guard editor.text==initialText || app.drafts.confirm("关闭规则文本编辑器") else{return}
+        onDiscard();dismiss()
+    }
     @Environment(\.dismiss) private var dismiss
     @State private var fileError:String?
     @State private var selectedLine:Int?
     @State private var simulationInput=""
     @State private var simulationResult:String?
-    init(app:AppModel,text:String,rules:[RoutingRule],final:PolicyReference?=nil,accept:@escaping ([RoutingRule])->Void){self.app=app;self.accept=accept;self.final=final;_editor=StateObject(wrappedValue:RuleTextEditorModel(text:text,state:app.state,previous:rules))}
+    init(app:AppModel,text:String,rules:[RoutingRule],final:PolicyReference?=nil,baselineText:String?=nil,onTextChange:@escaping (String)->Void={_ in},onDiscard:@escaping ()->Void={},accept:@escaping ([RoutingRule])->Void){self.app=app;self.accept=accept;self.final=final;self.initialText=baselineText ?? text;self.onTextChange=onTextChange;self.onDiscard=onDiscard;_editor=StateObject(wrappedValue:RuleTextEditorModel(text:text,state:app.state,previous:rules))}
     var body:some View {
         VStack(alignment:.leading,spacing:12){
-            HStack{Text("批量规则草稿").font(.title2.bold());Spacer();Button("取消"){dismiss()}}
+            HStack{Text("批量规则草稿").font(.title2.bold());Spacer();Button("取消"){cancel()}}
             Text("类型,匹配内容,目标；MATCH,目标。支持 # 注释。补全使用 PROXY / DIRECT / REJECT / AUTO 或节点、组的唯一标识。")
                 .font(.caption).foregroundStyle(.secondary)
             codeEditor
@@ -60,7 +67,13 @@ struct RuleTextEditor:View {
                     .buttonStyle(.borderedProminent).disabled(editor.validating || !editor.result.issues.isEmpty || app.locked)
             }
             Text("此处只更新草稿；返回后点击应用才会保存，连接中最多重连一次。").font(.caption).foregroundStyle(.secondary)
-        }.padding(24).frame(minWidth:760,minHeight:560).onChange(of:editor.text){_,_ in editor.validate()}
+        }.padding(24).frame(minWidth:760,minHeight:560).onChange(of:editor.text){_,value in onTextChange(value);editor.validate()}
+        .interactiveDismissDisabled(editor.text != initialText)
+        .onExitCommand {cancel()}
+        .background(EditorCloseGuard {
+            guard editor.text==initialText || app.drafts.confirm("关闭规则文本编辑器") else{return false}
+            onDiscard();return true
+        })
     }
     private var completions:[String] {
         var values=RuleTextCodec.kinds+["PROXY","DIRECT","REJECT","AUTO","no-resolve"]

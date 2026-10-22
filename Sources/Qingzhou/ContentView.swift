@@ -19,6 +19,12 @@ struct ContentView: View {
     @State private var importing = false
     @State private var editing: EditorRequest?
 
+    private func allowClosingSettings()->Bool {
+        let draft=model.drafts.settings(profile:model.currentProfileID,state:model.state)
+        guard !draft.dirty || model.drafts.confirm("关闭高级设置") else{return false}
+        draft.discard();return true
+    }
+
     private var navSections: [(title: String, items: [AppPage])] {
         if interfaceMode == .simple {
             return [("日常使用", [.home, .lines, .subscriptions, .vps, .settings])]
@@ -115,6 +121,10 @@ struct ContentView: View {
                 Divider().opacity(0.6)
 
                 if interfaceMode == .professional {
+                    if model.connection == .connecting,let stage=model.startupStage {
+                        ConnectionProgressView(stage:stage,startedAt:model.startupStartedAt)
+                            .lineLimit(2).frame(maxWidth:.infinity,alignment:.leading).padding(.horizontal,10)
+                    }
                     VStack(spacing: 8) {
                         HStack(spacing: 8) {
                             Circle()
@@ -238,13 +248,18 @@ struct ContentView: View {
                 HStack {
                     Text(destination.title).font(.headline)
                     Spacer()
-                    Button("完成") { utility = nil }.keyboardShortcut(.cancelAction)
+                    Button("完成") {
+                        if destination != .settings || allowClosingSettings() {utility=nil}
+                    }.keyboardShortcut(.cancelAction)
                 }.padding(20)
                 Divider()
                 if destination == .settings { SettingsView(model: model) }
                 else { DiagnosticsView(model: model).padding(24) }
             }
             .frame(minWidth: 1000, minHeight: 680)
+            .interactiveDismissDisabled(destination == .settings)
+            .onExitCommand {if destination != .settings || allowClosingSettings() {utility=nil}}
+            .background(EditorCloseGuard {destination != .settings || allowClosingSettings()})
         }
         .confirmationDialog("应用运行模式并重新连接一次？",isPresented:Binding(get:{model.pendingMode != nil},set:{if !$0 {model.pendingMode=nil}})) {
             if let mode=model.pendingMode {
@@ -291,7 +306,7 @@ struct ContentView: View {
                 SimpleSubscriptionsView(model: model, onImport: { importing = true })
             } else { SubscriptionsView(model: model) }
         case .vps: VPSView(model:model,center:vpsCenter)
-        case .rules: RuleView(model: model)
+        case .rules: RuleView(model: model).id(model.currentProfileID)
         case .connections: ConnectionsView(model: model)
         case .logs: RuntimeLogView(buffer: model.logBuffer)
         case .settings:

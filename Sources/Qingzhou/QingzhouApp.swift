@@ -159,7 +159,7 @@ func formatRate(_ value: Int64) -> String {
 }
 
 @MainActor func latency(_ node: Node, _ model: AppModel) -> String {
-    LatencyPresentation.label(model.state.latency[node.id.uuidString],invalidatedAt:model.latencyInvalidatedAt,now:model.latencyClock)
+    LatencyPresentation.label(model.state.latency[node.id.uuidString],invalidatedAt:model.latencyInvalidatedAt,now:max(model.latencyClock,Date()))
 }
 
 // MARK: - 主内容视图

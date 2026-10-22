@@ -23,8 +23,11 @@ public final class DynamicCaptureRules {
         if contents[name]==data {return}
         try SecureFile.write(data,to:directory.appendingPathComponent(name+".json"));contents[name]=data
     }
-    public func stageDomains(_ domains:[String]) throws {
-        try write("domains",rules:domains.isEmpty ? []:[["domain_suffix":domains]])
+    public func stageDomains(_ domains:[String],exact:[String]=[]) throws {
+        var rules:[[String:Any]]=[]
+        if !domains.isEmpty {rules.append(["domain_suffix":domains])}
+        if !exact.isEmpty {rules.append(["domain":exact])}
+        try write("domains",rules:rules)
     }
     public func update(_ plan:CapturePlan) throws {
         guard supports(plan) else {throw NetworkEnvironmentNotReady("新接口需要重新配置核心")}
@@ -34,7 +37,7 @@ public final class DynamicCaptureRules {
             let cidrs=partition[interface] ?? []
             try write("interface-"+interface,rules:cidrs.isEmpty ? []:[["ip_cidr":cidrs]])
         }
-        try stageDomains(plan.domains)
+        try stageDomains(plan.domains,exact:plan.exactDomains ?? [])
     }
     // 按最长前缀将不同接口的网段切成互不重叠集合，规则集排列顺序不改变出口。
     public static func partitionRoutes(_ routes:[ProtectedRoute]) throws -> [String:[String]] {
@@ -86,13 +89,14 @@ public final class DynamicCaptureRules {
         var rules=route["rules"] as! [[String:Any]]
         // 用动态规则集替换静态保护规则，普通分流和现有连接不重建。
         rules.removeAll {item in
-            if item["domain_suffix"] as? [String] == plan.domains,let action=item["action"] as? String,["resolve","reject"].contains(action) {return true}
+            if (item["domain_suffix"] as? [String] == plan.domains || (plan.exactDomains != nil && item["domain"] as? [String] == plan.exactDomains)),let action=item["action"] as? String,["resolve","reject"].contains(action) {return true}
             if let outbound=item["outbound"] as? String,outbound.hasPrefix("protected-"),outbound != "protected-lo0",item["ip_cidr"] as? [String] != plan.exclusions {return true}
             return false
         }
         let leading=rules.prefix{["sniff","hijack-dns"].contains($0["action"] as? String ?? "")}.count
         var dynamic:[[String:Any]]=[["rule_set":["qingzhou-domains"],"action":"resolve","server":"local","strategy":"","disable_cache":true]]
         dynamic += interfaces.map{["rule_set":["qingzhou-interface-"+$0],"action":"route","outbound":"protected-"+$0]}
+        for (key,values) in [("domain_suffix",plan.userDomainSuffixes ?? []),("domain",plan.exactDomains ?? [])] where !values.isEmpty {dynamic.append([key:values,"action":"route","outbound":"protected-"+plan.snapshot.primaryInterface])}
         dynamic.append(["rule_set":["qingzhou-domains"],"action":"reject"])
         rules.insert(contentsOf:dynamic,at:leading);route["rules"]=rules;object["route"]=route
         var outbounds=object["outbounds"] as! [[String:Any]]

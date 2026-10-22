@@ -6,14 +6,14 @@ import Darwin
 extension Service {
     func protect(_ route:ProtectedRoute) throws {
         // 接口限定路由不能保护未绑定的应用；补充同出口的全局路由并记录所有权。
-        if route.scope != nil {try addRoute(route.destination,route.gateway,route.interface,ipv6:route.ipv6)}
+        if route.scope != nil || route.source == "用户网络绕过" {try addRoute(route.destination,route.gateway,route.interface,ipv6:route.ipv6)}
     }
-    func verifyProtection()->Bool {
+    func verifyProtection(sample:NetworkRouteSample?=nil)->Bool {
         guard let plan=capturePlan else{return false}
-        guard let table=try? NetworkInspection.command("/usr/sbin/netstat",["-rn"]) else{return false}
-        let routes=NetworkSnapshot.parseRoutes(table,includeTransient:true)
+        guard let actual=try? (sample ?? routeSample()) else{return false}
+        let routes=actual.ownershipRoutes
         return plan.protectedRoutes.allSatisfy {expected in
-            routes.contains{actual in NetworkInspection.samePrefix(actual.destination,expected.destination) && actual.interface==expected.interface && actual.scope==nil}
+            routes.contains{actual in NetworkInspection.samePrefix(actual.destination,expected.destination) && actual.interface==expected.interface && actual.gateway==expected.gateway && actual.scope==nil}
         }
     }
     func verifyOwnedNetwork()->Bool {(try? inspectOwnedNetwork()) == true}
@@ -28,7 +28,7 @@ extension Service {
         if currentDNS != expected {issues.append("本次补充 DNS 服务与应用值不一致")}
         let expectedRoutes=record.routes.filter{!excluding.contains($0.destination)}.map{ProtectedRoute(destination:$0.destination,gateway:$0.gateway,interface:$0.interface,scope:$0.scope)}
         var confirmed=routes
-        let required=expectedRoutes.filter{!CaptureOwnership.hasEquivalentHostPath($0,actual:routes)}+(record.preservedRoutes ?? [])
+        let required=expectedRoutes.filter{!CaptureOwnership.hasEquivalentHostPath($0,actual:routes)}+CaptureOwnership.monitoredPreservedRoutes(record.preservedRoutes ?? [])
         let verificationDeadline=Date().addingTimeInterval(1)
         for expected in required {
             // 表采样遗漏时再做目标查询；同作用域的同前缀冲突不能被查询掩盖。
@@ -47,7 +47,7 @@ extension Service {
         if let networkSnapshotRead { snapshot=try networkSnapshotRead(sample) }
         else {
             guard let global=SCDynamicStoreCopyValue(dynamic,"State:/Network/Global/IPv4" as CFString) as? [String:Any],let primary=global["PrimaryInterface"] as? String else{throw NetworkEnvironmentNotReady("网络快照无法更新")}
-            snapshot=try NetworkSnapshot.read(store:dynamic,primary:primary,routes:sample.table,ownedDNSKey:record.dnsKey,ownedTunnel:record.interface)
+            snapshot=try NetworkSnapshot.read(store:dynamic,primary:primary,routes:sample.table,ownedDNSKey:record.dnsKey,ownedTunnel:record.interface,structuredRoutes:sample.planningRoutes,lookup:{try self.routeInfo($0,ipv6:$1)})
         }
         snapshot.routes.removeAll {route in record.routes.contains{owned in NetworkInspection.samePrefix(route.destination,owned.destination) && route.interface==owned.interface && route.gateway==owned.gateway && route.scope==owned.scope}}
         return snapshot
@@ -78,6 +78,7 @@ extension Service {
         // 每轮重新采样；所有权和重规划共享本轮路由，退避期间也核对外部改写。
         let sample: NetworkRouteSample
         do {
+            try verifyBypassFirewall()
             sample=try routeSample()
             var issues=try essentialNetworkIssues(sample: sample)
             if request.systemProxyPort != nil {issues += proxyOwnershipIssues()}
@@ -85,11 +86,20 @@ extension Service {
                 failNetworkChange("网络保护核验未通过："+issues.prefix(8).joined(separator:"；"));return
             }
         } catch {retrySnapshot(error);return}
+        // 指定出口掉线时保留内核拒绝保护，不进入会撤销防火墙的通用重建流程。
+        if let state=request.state,!state.pinnedBypasses.isEmpty {
+            let services=bypassServicesRead()
+            if state.pinnedBypasses.contains(where:{item in !services.contains{$0.id==item.serviceID && $0.active}}) {
+                suspendCorporateQueries();phase="networkRetry"
+                lastFailure="指定网卡未就绪，拒绝其他出口；等待原网络恢复"
+                return
+            }
+        }
         guard snapshotRetry.ready(now:networkUptime()) else{return}
         var fresh:CapturePlan
         do {
             var snapshot=try currentSnapshot(sample: sample);snapshot.proxies=previous.snapshot.proxies
-            fresh=try CapturePlan.make(snapshot:snapshot,extraCIDRs:request.state?.tunExcludedCIDRs ?? [],extraDomains:request.state?.protectedDomains ?? [])
+            fresh=try CapturePlan.make(snapshot:snapshot,state:request.state ?? AppState(),pinned:try PinnedBypassPolicy.routes(request.state?.pinnedBypasses ?? [],services:bypassServicesRead()))
         } catch let error as NetworkCaptureConflict {failNetworkChange(error.localizedDescription);return}
         catch {suspendCorporateQueries();retrySnapshot(error);return}
         snapshotRetry.reset();phase="active"
@@ -100,10 +110,17 @@ extension Service {
         knownProtectedDomains.formUnion(fresh.domains)
         fresh.domains=Array(knownProtectedDomains).sorted()
         let defaultsChanged=fresh.snapshot.routes.filter{$0.destination.hasSuffix("/0")} != previous.snapshot.routes.filter{$0.destination.hasSuffix("/0")}
-        let changed=fresh.snapshot.primaryInterface != previous.snapshot.primaryInterface || fresh.snapshot.resolvers != previous.snapshot.resolvers || fresh.domains != previous.domains || fresh.protectedRoutes != previous.protectedRoutes || defaultsChanged
+        let bootstrapTargets=Set(captureNodeAddresses.values.flatMap{$0}+fresh.snapshot.resolvers.flatMap(\.servers).map{$0.components(separatedBy:"%")[0]}+["1.1.1.1"])
+        let originalPathsChanged=bootstrapTargets.contains {target in
+            (try? CaptureRoutePlan.systemPath(target,routes:fresh.snapshot.routes)) != (try? CaptureRoutePlan.systemPath(target,routes:previous.snapshot.routes))
+        }
+        let changed=originalPathsChanged || fresh.snapshot.primaryInterface != previous.snapshot.primaryInterface || fresh.snapshot.resolvers != previous.snapshot.resolvers || fresh.domains != previous.domains || fresh.protectedRoutes != previous.protectedRoutes || defaultsChanged
         if !changed {
             pendingNetworkChange=nil;changeWindow.reset()
-            if protectedQueriesSuspended {protectedQueriesSuspended=false;dnsForwarder?.updatePlan(fresh)}
+            if protectedQueriesSuspended {
+                // 恢复同一路径时同步权威计划，避免转发器的新快照被旧计划身份拒绝。
+                capturePlan=fresh;protectedQueriesSuspended=false;dnsForwarder?.updatePlan(fresh)
+            }
             return
         }
         do {try stageCorporateQueries(fresh)} catch {lastFailure="企业域名更新暂不可用："+error.localizedDescription;return}
@@ -117,7 +134,7 @@ extension Service {
             lastFailure=error.localizedDescription
             if changeWindow.expired(now:networkUptime()) {changeWindow.reset()}
             return
-        } catch {failNetworkChange("网络保护更新失败："+error.localizedDescription);return}
+        } catch {suspendCorporateQueries();lastFailure="网络保护更新暂不可用，保留当前保护："+error.localizedDescription;return}
         changeWindow.reset()
         beginNetworkResume(request,fd:fd)
     }

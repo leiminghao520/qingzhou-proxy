@@ -115,7 +115,7 @@ struct SimpleConnectionView: View {
                         .accessibilityHidden(true)
                         Text(status).font(.title2.bold()).multilineTextAlignment(.center)
                         if model.connection == .connecting,let stage=model.startupStage {
-                            Text(stage).font(.callout).foregroundStyle(.secondary).accessibilityIdentifier("connectionStage")
+                            ConnectionProgressView(stage:stage,startedAt:model.startupStartedAt)
                         }
                         if needsImport && model.connection != .connected {
                             Text("添加订阅或节点，开始使用轻舟。")
@@ -212,21 +212,12 @@ struct SimpleLinesView: View {
     var onImport: () -> Void
     var onEdit: (Node) -> Void
     var onProfessional: () -> Void
-    @State private var query = ""
-    @State private var favoritesOnly = false
+    @StateObject private var page=NodeListViewModel()
     @State private var detail: Node?
     @State private var pendingEdit: Node?
 
-    private var nodes: [Node] {
-        model.state.nodes.filter {
-            (!favoritesOnly || model.state.favorites.contains($0.id)) &&
-            (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query) || (model.state.notes[$0.id.uuidString] ?? "").localizedCaseInsensitiveContains(query))
-        }.sorted {
-            let a = model.state.favorites.contains($0.id), b = model.state.favorites.contains($1.id)
-            return a != b ? a : $0.name.localizedStandardCompare($1.name) == .orderedAscending
-        }
-    }
     var body: some View {
+        let nodes=page.nodes(state:model.state,invalidatedAt:model.latencyInvalidatedAt,now:Date(),profile:model.currentProfileID,simple:true)
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Text("线路").font(.largeTitle.bold())
@@ -240,8 +231,8 @@ struct SimpleLinesView: View {
                 }
             }
             HStack {
-                TextField("搜索线路或备注", text: $query).textFieldStyle(.roundedBorder)
-                Toggle("收藏", isOn: $favoritesOnly).toggleStyle(.button)
+                TextField("搜索线路或备注", text: $page.query).textFieldStyle(.roundedBorder)
+                Toggle("收藏", isOn: $page.favoriteOnly).toggleStyle(.button)
             }
             Button { Task { await model.selectPolicy(.automatic) } } label: {
                 HStack {
@@ -259,7 +250,10 @@ struct SimpleLinesView: View {
                 } description: { Text("添加订阅或节点后，线路会出现在这里。") }
                 actions: { Button("添加订阅或节点", action: onImport).disabled(model.locked) }
             } else if nodes.isEmpty {
-                ContentUnavailableView("没有匹配的线路", systemImage: "magnifyingglass", description: Text("试试其他关键词，或关闭收藏筛选。"))
+                ContentUnavailableView {
+                    Label("没有匹配的线路",systemImage:"magnifyingglass")
+                } description: {Text("试试其他关键词，或关闭收藏筛选。")}
+                actions: {Button("清除筛选") {page.clearFilters()}}
             } else {
                 ScrollView {
                     LazyVStack(spacing: 8) {

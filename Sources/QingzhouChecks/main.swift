@@ -293,6 +293,11 @@ func run(_ name:String,_ instance:CheckCase,_ body:() throws -> Void) {
     do {try instance.tearDownWithError()} catch {CheckHarness.failure("测试清理失败",file:#filePath,line:#line)}
     scenarios += 1;print("\(CheckHarness.failures == before ? "PASS" : "FAIL") \(name)")
 }
+runNetworkBypassChecks()
+if args.count==2 && args[1]=="bypass-checks" {
+    print("RESULT bypass_scenarios=\(scenarios) assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
+    exit(CheckHarness.failures==0 ? 0:1)
+}
 do {let t=RepairTests();run("Repair.compatibilityMigration",t){try t.testCompatibilityMigrationAndImport()};run("Repair.importTypes",t){try t.testImportTypesAndNoResolve()};run("Repair.orderedDNS",t){try t.testOrderedDNSAndMode()};run("Repair.unknownFallback",t){t.testUnknownFallbackAndHealth()};run("Repair.dnsCompression",t){t.testDNSPacketCompression()};run("Repair.searchDomainIsolation",t){try t.testSearchDomainIsolation()}}
 do { let instance = ConfigTests(); run("ConfigTests.testHysteriaPreservesUserpassAndObfs",instance) { try instance.testHysteriaPreservesUserpassAndObfs() } }
 do { let instance = ConfigTests(); run("ConfigTests.testProtocolConfigurations",instance) { try instance.testProtocolConfigurations() } }
@@ -339,7 +344,7 @@ do {let instance=DailyTests();run("DailyTests.testTunModelAndConflictDetection",
 do{let tests=FullSubscriptionTests();run("FullSubscriptionTests.localRulesAndRollback",tests){try tests.testFullSyncPreservesLocalRulesAndRollback()};run("FullSubscriptionTests.invalidDocuments",tests){try tests.testInvalidDocumentsPreserveOldData()}}
 do{let t=NetworkSafetyTests();run("NetworkSafety.proxyOwnership",t){t.testPersistentProxyOwnership()};run("NetworkSafety.conflicts",t){t.testConflictDetection()};run("NetworkSafety.deadProxyOwnership",t){t.testDeadProxyRestorationAndOwnership()};run("NetworkSafety.unknownHealth",t){t.testUnknownHealthDoesNotMeanNodeFailure()};run("NetworkSafety.privateLog",t){try t.testBoundedPrivateLogAndRedaction()}}
 do{let t=NetworkPolicyTests();run("NetworkPolicy.preparationRace",t){try t.testPreparationRaceAndDNSBudget()};run("NetworkPolicy.tunAddresses",t){try t.testTunAddressAllocation()};run("NetworkPolicy.corporateRoutes",t){t.testSpecificCorporateRoutesAndSystemTunnels()};run("NetworkPolicy.migration",t){try t.testMigrationAndImport()};run("NetworkPolicy.coreMatrix",t){try t.testCoreNetworkMatrix()}}
-do {let t=DynamicVPNTests();run("DynamicVPN.optionalDNSAndGeneration",t){try t.testOptionalDNSAndGeneration()};run("DynamicVPN.stableWindowAndPartitions",t){try t.testStableWindowAndPartitions()}}
+do {let t=DynamicVPNTests();run("DynamicVPN.optionalDNSAndGeneration",t){try t.testOptionalDNSAndGeneration()};run("DynamicVPN.stableWindowAndPartitions",t){try t.testStableWindowAndPartitions()};run("DynamicVPN.multiInterfaceRoutes",t){try t.testMultiInterfaceRoutes()}}
 do{let t=CapturePlanTests();run("CapturePlan.protection",t){try t.testProtectionAndResolverSelection()};run("CapturePlan.loopback",t){try t.testLoopbackRelay()};run("CapturePlan.dnsRetries",t){try t.testDNSRetriesAndNoPublicFallback()};run("CapturePlan.routesOwnership",t){try t.testRouteParsingAndOwnership()};run("CapturePlan.core",t){try t.testCoreConfigurationProtectionPrecedence()}}
 do{let t=KeychainUXTests();run("KeychainUX.authorization",t){try t.testAuthorizationRetryAndCache()};run("KeychainUX.errors",t){try t.testDistinctErrorsAndAtomicCache()}}
 do{let t=StabilityTests();run("Stability.snapshotRetryAndLatency",t){t.testSnapshotRetryAndLatency()};run("Stability.dnsQueueBoundsBudgetAndStop",t){t.testDNSQueueBoundsBudgetAndStop()};run("Stability.subscriptionClassificationAndRetry",t){t.testSubscriptionClassificationAndRetry()}}
@@ -363,6 +368,7 @@ Task {
     do {try await runQuitRecoveryChecks()} catch {CheckHarness.failure("退出恢复检查异常",file:#filePath,line:#line)}
     await runRuntimeOptimizationChecks()
     await runStabilityAsyncChecks()
+    do {try await runBypassProtocolChecks()} catch {CheckHarness.failure("绕过辅助协议检查异常："+error.localizedDescription,file:#filePath,line:#line)}
     await runCaptureActivationChecks()
     await runRecoveryContinuationChecks()
     await runHelperRecoveryPolicyChecks()

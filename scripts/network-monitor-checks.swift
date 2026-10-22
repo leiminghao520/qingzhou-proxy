@@ -4,8 +4,12 @@ import QingzhouKit
 
 // 此夹具链接正式 NetworkMonitor.swift，只替换管理员服务的外部输入和写操作。
 struct OwnedRoute { var destination: String; var gateway: String; var interface: String; var ipv6: Bool = false; var scope: String? = nil }
-struct Journal { var expectedDNS: Data; var dnsKey = "fixture"; var routes: [OwnedRoute]; var preservedRoutes: [ProtectedRoute]? = []; var interface: String? = "utun42" }
+struct Journal { var captureRoutes:[String]?=nil; var address4="100.64.1.1/30"; var address6="fd71:717a::1/126"; var expectedDNS: Data; var dnsKey = "fixture"; var routes: [OwnedRoute]; var preservedRoutes: [ProtectedRoute]? = []; var interface: String? = "utun42" }
 final class Service {
+    var routeBackend:RouteBackend=LegacyRouteBackend(command:{_,_,_ in throw ProxyError("夹具禁止真实命令")})
+    func checkRouteOwner() throws {}
+    func sampledRoutes() throws -> NetworkRouteSample {try routeSample()}
+    func verifyBypassFirewall() throws {}
     let queue = DispatchQueue(label: "cn.qingzhou.monitor.fixture")
     let dynamic = SCDynamicStoreCreate(nil, "只读监控夹具" as CFString, nil, nil)!
     var capturePlan: CapturePlan?
@@ -28,6 +32,7 @@ final class Service {
     var routeSample: () throws -> NetworkRouteSample = { throw ProxyError("必须注入采样") }
     var networkDNSRead: ((String) -> NSDictionary?)?
     var networkSnapshotRead: ((NetworkRouteSample) throws -> NetworkSnapshot)?
+    var bypassServicesRead:()->[BypassNetworkService]={[]}
     var networkClock: () -> Date = { Date(timeIntervalSince1970: 100) }
     var networkUptime: () -> TimeInterval = { 100 }
     var pendingNetworkChange: Date?
@@ -48,10 +53,12 @@ final class Service {
     var proxyVerificationClock:()->TimeInterval={100}
     var proxyVerificationWait:(TimeInterval)->Void={_ in fatalError("监控夹具禁止阻塞等待")}
     func proxyLiveSample()->ProxyLiveSample? {ProxyLiveSample(expected:[:],current:[:])}
+    var routeLookupHook:((String,Bool,String?) throws -> String)?
     var routeInfoHook: (() throws -> String)?
     var writeRouteHook: (([String]) throws -> String)?
     var routeWrites = 0
     func routeInfo(_ destination:String,ipv6:Bool,scope:String?=nil,deadline:Date?=nil) throws -> String {
+        if let routeLookupHook {return try routeLookupHook(destination,ipv6,scope)}
         guard let routeInfoHook else {throw ProxyError("夹具必须注入路由查询")}
         return try routeInfoHook()
     }
@@ -88,6 +95,15 @@ final class Service {
             service.capturePlan = try CapturePlan.make(snapshot: service.currentSnapshot(), extraCIDRs: [], extraDomains: [])
             return service
         }
+        let pinned=try fixture()
+        var pinState=AppState()
+        try pinState.setBypasses([NetworkBypass(kind:.cidr,value:"203.0.113.9",exit:.pinned,serviceID:"isolated",gateway:"192.0.2.1")])
+        pinned.activeRequest?.state=pinState
+        pinned.checkNetworkChange()
+        check(pinned.stops==0 && pinned.starts==0 && pinned.phase=="networkRetry","指定网卡掉线保留拒绝保护，不自动撤销会话")
+        pinned.beginNetworkResume(pinned.activeRequest!,fd:1)
+        check(pinned.stops==0 && pinned.starts==0 && pinned.lastFailure?.contains("保护仍保留")==true,"指定出口主网络变化不进入存在放行间隙的重建")
+
         let stable = try fixture()
         var samples = 0, dnsReads = 0, snapshots = 0
         stable.routeSample = { samples += 1; return try NetworkRouteSample(read: { table }) }
@@ -99,6 +115,33 @@ final class Service {
         check(samples == 2 && snapshots == 2 && dnsReads == 4 && stable.proxyReads == 2, "每轮只采一次路由，重新读取 DNS 和代理所有权")
         check(stable.stops == 0 && stable.starts == 0, "稳定网络不重启")
         check(stable.capturePlan == original, "采样复用不改变保护计划")
+
+        let dualNIC=try fixture()
+        var secondary=""
+        dualNIC.routeSample={try NetworkRouteSample(read:{table+"169.254 link#11 UCS en0\n"+secondary})}
+        dualNIC.capturePlan=try CapturePlan.make(snapshot:dualNIC.currentSnapshot(),extraCIDRs:[],extraDomains:[])
+        for row in ["169.254 link#23 UCSI en6\n","169.254 link#99 UCSI en6\n",""] {
+            secondary=row;dualNIC.checkNetworkChange()
+            check(dualNIC.stops == 0 && dualNIC.starts == 0 && dualNIC.routeWrites == 0,"次网卡同前缀接入、编号变化和退出不提升全局保护、不重启核心")
+            check(dualNIC.capturePlan!.protectedRoutes.filter{$0.destination=="169.254.0.0/16"}.map(\.interface)==["en0"],"核心保持唯一全局出口")
+        }
+
+        // 复现系统撤回、重建组播路由及接口编号变化；整个监控周期不能停掉普通代理。
+        let multicast=try fixture()
+        multicast.journal!.preservedRoutes=[ProtectedRoute(destination:"ff02::/32",gateway:"link#14",interface:"awdl0",scope:"awdl0")]
+        var multicastTable="Internet6:\nff02::%awdl0/32 link#14 UmCI awdl0\nff02::%en0/32 link#11 UmCI en0\n"
+        multicast.routeSample={try NetworkRouteSample(read:{table+multicastTable})}
+        var multicastQueries=0
+        multicast.routeInfoHook={multicastQueries += 1;throw ProxyError("系统组播不应补查旧接口")}
+        for current in [multicastTable,"Internet6:\nff02::%en0/32 link#11 UmCI en0\n","Internet6:\nff02::%awdl0/32 link#27 UmCI awdl0\n",multicastTable] {
+            multicastTable=current
+            multicast.checkNetworkChange()
+            check(multicast.stops == 0 && multicast.starts == 0 && multicast.phase == "active","系统组播变化不能停止或重启核心")
+        }
+        check(multicastQueries == 0 && multicast.routeWrites == 0,"动态组播不补查旧快照，也不写系统路由")
+        multicast.routeSample={try NetworkRouteSample(read:{table.replacingOccurrences(of:"link#42",with:"link#99")+multicastTable})}
+        multicast.checkNetworkChange()
+        check(multicast.stops == 1 && multicast.preservedExternal,"组播变化不能掩盖真实接管冲突")
 
         let ipv6Info="destination: 240e:1c:200::1\ngateway: fe80::1%en0\ninterface: en0\nflags: <UP,GATEWAY,HOST,STATIC>"
         let omitted = try fixture()
@@ -349,6 +392,24 @@ final class Service {
         withdrawn.journal!.routes.append(OwnedRoute(destination:"10.22.0.0/16",gateway:"10.22.0.1",interface:"utun6"))
         withdrawn.routeSample={try NetworkRouteSample(read:{table})}
         let withdrawalPlan=withdrawn.capturePlan!
+        let retired=ProtectedRoute(destination:"192.168.66.0/24",gateway:"link#23",interface:"en6",scope:"en6")
+        for state in ["owned","absent","replaced"] {
+            let physical=try fixture()
+            let folder=directory.appendingPathComponent("retire-"+state)
+            physical.dynamicRules=try DynamicCaptureRules(directory:folder,plan:physical.capturePlan!)
+            physical.capturePlan!.protectedRoutes.append(retired)
+            physical.journal!.routes.append(OwnedRoute(destination:retired.destination,gateway:retired.gateway,interface:retired.interface))
+            var row=state=="absent" ? "":("192.168.66/24 "+(state=="owned" ? "link#23":"link#99")+" UGS en6\n")
+            physical.routeSample={try NetworkRouteSample(read:{table+row})}
+            physical.writeRouteHook={args in check(args.contains("delete") && args.contains("en6"),"撤回仅删除轻舟拥有的旧物理保护项");row="";return "已删除"}
+            if state=="replaced" {
+                let issues=try physical.reconciledNetworkIssues(withdrawalPlan,sample:physical.routeSample())
+                check(!issues.isEmpty,"外部改写不能伪装为正常旧出口撤回")
+            }
+            let applied=try physical.applyCorporatePlan(withdrawalPlan,sample:physical.routeSample())
+            check(applied && physical.routeWrites==(state=="owned" ? 1:0),"旧出口消失或被替换时不删除外部路径")
+            check(!physical.journal!.routes.contains{$0.interface=="en6"},"成功撤回后清理轻舟旧记录")
+        }
         let withdrawnOK=try withdrawn.applyCorporatePlan(withdrawalPlan,sample:withdrawn.routeSample())
         check(withdrawnOK && !withdrawn.journal!.routes.contains{$0.interface == "utun6"} && withdrawn.routeWrites == 0,"企业退出且原保护项已消失时直接撤销记录，不删除外部路由")
         withdrawn.journal!.routes.append(OwnedRoute(destination:"10.22.0.0/16",gateway:"10.22.0.1",interface:"utun6"))
@@ -361,6 +422,50 @@ final class Service {
         let beforeUnstable=withdrawn.capturePlan
         do {_=try withdrawn.applyCorporatePlan(unstable,sample:withdrawn.routeSample());check(false,"发布企业计划前必须复核实际路径")}
         catch {check(error is NetworkEnvironmentNotReady && withdrawn.capturePlan == beforeUnstable && withdrawn.stops == 0,"路径尚未到达只保持企业暂停，不能发布不可用计划或重启公网核心")}
+
+        // 新记录启用动态捕获差集；夹具将正式写入调用映射为内存表，并核验先增后删。
+        for refuseNew in [false,true] {
+            let live=try fixture()
+            let initial=live.capturePlan!
+            live.dynamicRules=try DynamicCaptureRules(directory:directory.appendingPathComponent("capture-\(refuseNew)"),plan:initial)
+            let prefixes=CaptureRoutePlan.legacyPrefixes
+            live.journal!.captureRoutes=prefixes
+            live.journal!.routes=prefixes.map{OwnedRoute(destination:$0,gateway:$0.contains(":") ? "fd71:717a::1":"100.64.1.1",interface:"utun42",ipv6:$0.contains(":"))}
+            let physical=ProtectedRoute(destination:"0.0.0.0/0",gateway:"192.168.1.1",interface:"en0")
+            var actual=[physical]+live.journal!.routes.map{ProtectedRoute(destination:$0.destination,gateway:$0.gateway,interface:$0.interface)}
+            live.routeSample={NetworkRouteSample(routes:actual)}
+            live.routeLookupHook={target,ipv6,scope in
+                let path=try CaptureRoutePlan.systemPath(target=="default" ? (ipv6 ? "::/0":"0.0.0.0/0"):target,routes:actual.filter{$0.scope==scope})
+                return RouteRecord(route:path,flags:3).queryText
+            }
+            var operations:[String]=[]
+            live.writeRouteHook={args in
+                guard let route=live.journal!.routes.last(where:{route in
+                    let parts=route.destination.split(separator:"/").map(String.init)
+                    let prefixIndex=args.firstIndex(of:"-prefixlen")
+                    let matches=args.contains(route.destination) || (parts.count==2 && args.contains(parts[0]) && ((args.contains("-host") && parts[1]==(route.ipv6 ? "128":"32")) || prefixIndex.map{$0+1<args.count && args[$0+1]==parts[1]}==true))
+                    return matches && (args.contains(route.gateway) || args.contains(route.interface))
+                }) else {throw ProxyError("夹具没有写前恢复意图："+args.joined(separator:" "))}
+                let deleting=args.contains("delete")
+                operations.append(deleting ? "delete":"add")
+                if refuseNew && !deleting {return "writing to routing socket: Permission denied"}
+                if deleting {actual.removeAll{$0.destination==route.destination && $0.gateway==route.gateway && $0.interface==route.interface && $0.scope==route.scope}}
+                else {actual.append(ProtectedRoute(destination:route.destination,gateway:route.gateway,interface:route.interface,scope:route.scope))}
+                return ""
+            }
+            var next=initial;next.snapshot.routes=[physical];next.protectedRoutes=[];next.exclusions=["198.51.100.7/32"]
+            do {
+                let result=try live.applyCorporatePlan(next,sample:live.routeSample())
+                check(!refuseNew && result,"动态捕获重规划成功")
+                if let firstDelete=operations.firstIndex(of:"delete") {check(!operations.dropFirst(firstDelete).contains("add"),"新捕获全部核验后才撤回旧项")}
+                check(live.journal!.captureRoutes != prefixes && !live.journal!.captureRoutes!.contains("0.0.0.0/1"),"捕获列表按实际差集提交")
+                check(!live.journal!.routes.contains{$0.destination=="0.0.0.0/1"},"旧捕获拥有记录仅在删除后撤回")
+            } catch {
+                if !refuseNew {FileHandle.standardError.write(Data("动态夹具失败：\(error)\n".utf8))}
+                check(refuseNew && !operations.contains("delete"),"新捕获写入失败不撤回旧保护")
+                check(live.journal!.captureRoutes==prefixes && actual.contains{$0.destination=="0.0.0.0/1"},"失败保留旧捕获与恢复意图")
+            }
+        }
 
         var queued: [() -> Void] = [], cycles = 0
         let burst = try fixture()

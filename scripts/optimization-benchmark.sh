@@ -16,8 +16,8 @@ download=subprocess.check_output(['git','show','HEAD:Sources/QingzhouKit/ImportS
 download=download[download.index('public final class BoundedDownload'):].replace('BoundedDownload','BaselineBoundedDownload')
 (stage/'Baseline.swift').write_text('import Foundation\nimport Darwin\nimport QingzhouKit\n'+log+'\n'+download)
 PY
-sources=(.build/debug/QingzhouKit.build/*.o .build/debug/Yams.build/*.o .build/debug/CYaml.build/src/*.o)
-swiftc -parse-as-library -Onone -g -I .build/debug/Modules -I Vendor/Yams/Sources/CYaml/include \
+sources=(.build/debug/QingzhouKit.build/*.o .build/debug/CQingzhouRoute.build/*.o .build/debug/Yams.build/*.o .build/debug/CYaml.build/src/*.o)
+swiftc -parse-as-library -Onone -g -I .build/debug/Modules -I Vendor/Yams/Sources/CYaml/include -Xcc -fmodule-map-file=.build/debug/CQingzhouRoute.build/module.modulemap \
     -module-cache-path .build/module-cache "$stage/Baseline.swift" scripts/optimization-benchmark.swift \
     "${sources[@]}" -o "$stage/check"
 "$stage/check" "${1:-$stage/result.json}"

@@ -14,7 +14,7 @@ import Foundation
         if let helperRequestOverride {return try await helperRequestOverride(request)}
         return try await helper.request(request)
     }
-    public var running:Bool{(helperRunning || core.isRunning) && (httpCompatibility == nil || httpCompatibility!.isRunning)}
+    public var running:Bool{(activeMode == .systemProxy ? core.isRunning:(helperRunning || core.isRunning)) && (httpCompatibility == nil || httpCompatibility!.isRunning)}
     public func start(_ state:AppState,credentials:CredentialStore,control:CoreControlContext) async throws {
         guard activeMode==nil else{throw ProxyError("必须先恢复上一种接管方式")}
         if state.captureMode.usesTunnel {
@@ -29,7 +29,7 @@ import Foundation
             }
             try await CaptureActivationTransaction.run(prepare:{
                 let status=try await self.requestHelper(TunRequest(operation:"status"))
-                guard status.protocolVersion==4 else{throw ProxyError("辅助服务协议过旧，请更新后再开启组合接管")}
+                guard status.protocolVersion==5 else{throw ProxyError("辅助服务协议过旧，请更新后再开启组合接管")}
                 let reply=try await self.requestHelper(TunRequest(operation:"prepare",state:runtime,credentials:values,control:control,httpCompatibilityPort:compatibilityPort,systemProxyPort:state.captureMode == .compatible ? state.listenPort:nil))
                 self.ownedTunDNS=reply.dnsServer;self.helperRunning=reply.running;self.activeMode = state.captureMode
             },compatibility:{
@@ -44,6 +44,11 @@ import Foundation
                 await self.helper.closeChannel()
             })
         }else{
+            if !state.pinnedBypasses.isEmpty {
+                let status=try await requestHelper(TunRequest(operation:"status"))
+                guard status.protocolVersion==5 else {throw ProxyError("指定出口需要更新辅助服务")}
+                _=try await requestHelper(TunRequest(operation:"pinBypasses",state:state));helperRunning=true
+            }
             if let shadow=state.shadowrocket,state.usesHTTPCompatibility {
                 var used:Set<Int>=[state.listenPort,control.port]
                 func port() throws -> Int {for _ in 0..<20 {let value=try CoreControlContext.make().port;if used.insert(value).inserted{return value}};throw ProxyError("不能分配兼容端口")}
@@ -60,7 +65,7 @@ import Foundation
         guard activeMode?.usesTunnel == true else {return}
         _=try await requestHelper(TunRequest(operation:"activate"))
     }
-    public func activateSystemProxy(port:Int,protectedDomains:[String]=[]) throws{guard activeMode == .systemProxy || (activeMode == .tun && httpCompatibility != nil) else{return};try proxy.apply(port:port,ownedTunDNS:activeMode == .tun ? ownedTunDNS:nil,protectedDomains:activeMode == .systemProxy ? protectedDomains:[])}
+    public func activateSystemProxy(port:Int,protectedDomains:[String]=[],exceptions:[String]=[]) throws{guard activeMode == .systemProxy || (activeMode == .tun && httpCompatibility != nil) else{return};try proxy.apply(port:port,ownedTunDNS:activeMode == .tun ? ownedTunDNS:nil,protectedDomains:activeMode == .systemProxy ? protectedDomains:[],exceptions:activeMode == .systemProxy ? exceptions:[])}
     public func stop() async throws {
         let needsHelper=activeMode?.usesTunnel == true || helperRunning
         try await restoreAll(includeHelper:needsHelper)

@@ -25,6 +25,24 @@ public struct BypassRoutePlan:Sendable {
                 }
                 continue
             }
+            // 链路本地地址由每个接口的作用域定义，不能把某次无作用域查询选中的接口扩成全局 /10。
+            if let target=IPPrefix(destination),IPPrefix("fe80::/10")!.contains(target) {
+                guard hasIPv6 else {continue}
+                let candidates=existingRoutes.filter {route in
+                    guard route.scope==route.interface,let prefix=IPPrefix(route.destination),IPPrefix("fe80::/10")!.contains(prefix) else {return false}
+                    return prefix.overlaps(target)
+                }
+                guard !candidates.isEmpty else {throw ProxyError("链路本地绕过项 "+destination+" 缺少原接口作用域路由，未接管网络")}
+                for route in candidates {
+                    let prefix=IPPrefix(route.destination)!
+                    let covered=candidates.contains {other in
+                        guard other.interface==route.interface,let parent=IPPrefix(other.destination) else {return false}
+                        return parent.bits<prefix.bits && parent.contains(prefix)
+                    }
+                    if !covered && !preserved.contains(route) {preserved.append(route)}
+                }
+                continue
+            }
             if TunAddressPlan.containsRoute(destination,prefixes:existingPrefixes) {continue}
             let ipv6=destination.contains(":")
             if ipv6 && !hasIPv6 {continue}
@@ -46,7 +64,7 @@ public struct BypassRoutePlan:Sendable {
     }
     public func validatePreservedRoutes(_ actual:[ProtectedRoute]) throws {
         let issues=CaptureOwnership.routeIssues(expected:preservedRoutes,actual:actual)
-        guard issues.isEmpty else {throw ProxyError("本地组播原路径变化："+issues.joined(separator:"；"))}
+        guard issues.isEmpty else {throw ProxyError("接口作用域原路径变化："+issues.joined(separator:"；"))}
     }
     private static func summary(_ info:String)->String {
         let fields=["interface","gateway","flags"].map{$0+"="+(NetworkInspection.routeField($0,info) ?? "缺失")}.joined(separator:"，")

@@ -20,6 +20,9 @@ extension ConfigBuilder {
     public static let secondaryTestURL="https://www.gstatic.com/generate_204"
     public static let testURL="https://www.apple.com/library/test/success.html"
     public static func build(state:AppState,credentials:CredentialStore,control:CoreControlContext,httpCompatibilityPort:Int?=nil) throws -> Data {
+        try JSONSerialization.data(withJSONObject:object(state:state,credentials:credentials,control:control,httpCompatibilityPort:httpCompatibilityPort),options:[.prettyPrinted,.sortedKeys])
+    }
+    public static func object(state:AppState,credentials:CredentialStore,control:CoreControlContext,httpCompatibilityPort:Int?=nil) throws -> [String:Any] {
         guard (1024...65535).contains(state.listenPort),(1024...65535).contains(control.port),state.listenPort != control.port,control.secret.count>=32 else {throw ProxyError("代理或控制端口、密钥无效")}
         try PolicyValidator.validate(state)
         var outbounds:[[String:Any]]=[]
@@ -76,6 +79,6 @@ extension ConfigBuilder {
             var route=config["route"] as! [String:Any];route["rules"]=forced+(route["rules"] as! [[String:Any]]);config["route"]=route
         }
         NetworkPolicy.apply(&config,state:state)
-        return try JSONSerialization.data(withJSONObject:config,options:[.prettyPrinted,.sortedKeys])
+        return config
     }
 }

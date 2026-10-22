@@ -9,10 +9,13 @@ import QingzhouKit
 
 @MainActor final class AppModel:ObservableObject {
     enum Connection:String {case disconnected="未连接",connecting="连接中",connected="已连接",disconnecting="断开中",error="错误"}
+    @Published var activeBypasses:[NetworkBypass]?
+    @Published var bypassApplyFailure:String?
     @Published var pendingMode:ProxyMode?
     @Published var state=AppState()
     @Published var connection=Connection.disconnected
     @Published var startupStage:String?
+    @Published var startupStartedAt:TimeInterval?
     private(set) var startupGeneration=UUID()
     private var startupClient:CoreAPIClient?
     private var startupProbeTask:Task<[ConnectivityResult],Never>?
@@ -40,6 +43,7 @@ import QingzhouKit
     @Published var measuring=false {didSet{if !measuring{drainPendingDisconnect()}}}
     @Published var measurementProgress=""
     @Published var errorMessage:String?
+    let drafts=SessionDraftStore()
     let logBuffer = RuntimeLogBuffer()
     @Published var preview:ImportPreview?
     @Published var previewDiff:UpdateDiff?
@@ -182,10 +186,11 @@ import QingzhouKit
     private func startService(_ next:AppState,profileID:UUID?=nil) async throws {
         let generation=UUID();startupGeneration=generation
         let total=DispatchTime.now().uptimeNanoseconds
+        startupStartedAt=ProcessInfo.processInfo.systemUptime
         var attempts=0
         var succeeded=false
         defer {
-            networkReconnecting=false;startupStage=nil
+            networkReconnecting=false;startupStage=nil;startupStartedAt=nil
             log(ConnectionStageTiming(stage:"connectionTotal",milliseconds:Int((DispatchTime.now().uptimeNanoseconds-total)/1_000_000),succeeded:succeeded).summary+" attempts=\(attempts)")
         }
         try await NetworkPreparationRetry.run(operation:{
@@ -208,17 +213,23 @@ import QingzhouKit
         succeeded=true
     }
     private func startServiceAttempt(_ next:AppState,generation:UUID,profileID:UUID?) async throws {
-        let timing=ConnectionTiming()
+        let timing=ConnectionTiming(),attemptBegan=ProcessInfo.processInfo.systemUptime
         timing.begin("corePreparation");startupStage="准备网络与核心"
         defer {timing.finish(succeeded:false);for sample in timing.samples {log(sample.summary)}}
         if next.captureMode == .systemProxy {try NetworkSafety.check()}
         NSApplication.shared.activate(ignoringOtherApps:true)
-        let control=try CoreControlContext.make();_=try ConfigBuilder.build(state:next,credentials:credentials,control:control)
+        let control=try CoreControlContext.make();try PolicyValidator.validate(next)
         core.secrets=secrets(next,control);networkChanged=false;coreFailed=false;helperFailureReason=nil
         await capture.helper.setTimingObserver { [weak self] samples in
             Task {@MainActor in
                 guard let self,self.startupGeneration==generation else {return}
                 for sample in samples {self.log(sample.summary)}
+            }
+        }
+        await capture.helper.setProgressObserver { [weak self] phase in
+            Task { @MainActor in
+                guard let self,self.startupGeneration==generation,!self.stopRequested else {return}
+                self.startupStage=HelperProgress.label(phase)
             }
         }
         let client=CoreAPIClient(context:control)
@@ -242,6 +253,7 @@ import QingzhouKit
             guard !networkChanged,!coreFailed else {throw ProxyError("启动期间核心或网络发生变化")}
             timing.begin("captureActivation");startupStage="应用接管"
             try await capture.activateTunnel()
+            log("连接里程碑 captureApplied elapsedMs=\(Int((ProcessInfo.processInfo.systemUptime-attemptBegan)*1000))")
             try self.checkStartup(generation)
             if next.captureMode.usesTunnel {
                 timing.begin("postCaptureProbe");startupStage="验证实际网络"
@@ -255,24 +267,24 @@ import QingzhouKit
                 guard ConnectivityHealth.evaluate(captured) == .healthy else {throw ProxyError("TUN 实际接管路径检查失败："+reachability)}
             }
             timing.begin("systemProxyActivation")
-            try capture.activateSystemProxy(port:next.listenPort,protectedDomains:next.protectedDomains)
+            try capture.activateSystemProxy(port:next.listenPort,exceptions:next.bypassProxyExceptions)
             if next.captureMode == .systemProxy {try await proxy.verifyApplied()}
             try self.checkStartup(generation)
             guard capture.running else {throw ProxyError("核心已经退出")}
             timing.finish()
             dependencies.downloader.networkEnvironmentChanged()
-            connection = .connected;recoveryPending=proxy.hasRecovery
+            log("连接里程碑 businessVerified elapsedMs=\(Int((ProcessInfo.processInfo.systemUptime-attemptBegan)*1000))")
+            connection = .connected;activeBypasses=next.effectiveBypasses;bypassApplyFailure=nil;recoveryPending=proxy.hasRecovery
             startTelemetry(client,profileID:profileID)
         } catch {
             timing.finish(succeeded:false)
-            await client.shutdown()
             let original=error
-            if next.captureMode.usesTunnel,let status=try? await capture.helperStatus() {
-                log("辅助服务失败阶段："+(status.phase ?? "未知")+"；原因："+status.message)
-                for line in status.coreDiagnostics ?? [] {log("TUN 核心："+line)}
-            }
+            log("启动失败阶段："+(startupStage ?? "未知")+"；原因："+original.localizedDescription)
+            startupStage="连接失败，正在恢复自有接管并保留外部网络"
             timing.begin("recovery")
-            do{try await capture.emergencyRecover();timing.finish()}catch{timing.finish(succeeded:false);recoveryPending=true;throw ProxyError("启动失败："+original.localizedDescription+"；"+error.localizedDescription)}
+            await client.shutdown()
+            // 失败后直接进入恢复，不在恢复前追加一次可能等待整份预算的诊断请求。
+            do{try await capture.emergencyRecover(preserveExternal:true);timing.finish()}catch{timing.finish(succeeded:false);recoveryPending=true;throw ProxyError("启动失败："+original.localizedDescription+"；"+error.localizedDescription)}
             throw original
         }
     }
@@ -325,22 +337,24 @@ import QingzhouKit
         guard !locked,state.activePolicy != nil || state.mode == .direct else{return};busy=true;connection = .connecting;reachability="尚未检测";connectivityResults=ConnectivityResult.pending;defer{busy=false}
         do {guard !recoveryPending,!proxy.hasRecovery else {throw ProxyError("请先恢复原代理")};try await startService(state);guard capture.running,!networkChanged else {throw ProxyError("连接期间核心退出或网络变化")};if state.captureMode.usesTunnel && !reachability.contains("正常"){try await disconnectInternal();throw ProxyError("公网接管 HTTPS 验收失败，原网络已恢复；请查看诊断中的具体检测结果")};log(reachability)}catch {
             let original=error
-            do{try await capture.emergencyRecover();recoveryPending=false}catch{recoveryPending=true;report(error)}
+            do{try await capture.emergencyRecover(preserveExternal:true);recoveryPending=false}catch{recoveryPending=true;report(error)}
             stopTelemetry();connection = .error;report(original)
         }
     }
-    private func disconnectInternal() async throws {startupGeneration=UUID();startupStage=nil;stopTelemetry();connection = .disconnecting;do{try await capture.stop();dependencies.downloader.networkEnvironmentChanged()}catch{recoveryPending=true;connection = .error;throw error};recoveryPending=proxy.hasRecovery;connection = .disconnected;connectivityResults=[];reachability="尚未检测";log("本次连接已停止；本地代理恢复完成，辅助服务是否恢复取决于本次接管状态")}
+    private func disconnectInternal() async throws {activeBypasses=nil;startupGeneration=UUID();startupStage=nil;stopTelemetry();connection = .disconnecting;do{try await capture.stop();dependencies.downloader.networkEnvironmentChanged()}catch{recoveryPending=true;connection = .error;throw error};recoveryPending=proxy.hasRecovery;connection = .disconnected;connectivityResults=[];reachability="尚未检测";log("本次连接已停止；本地代理恢复完成，辅助服务是否恢复取决于本次接管状态")}
     func disconnect() async {
         guard canStop else{return}
         startupGeneration=UUID();startupStage=nil;startupProbeTask?.cancel()
         if let startupClient {Task {await startupClient.shutdown()}}
         log("用户请求断开连接");stopTelemetry();cancelMeasurement();stopRequested=true
+        if connection == .connecting {await capture.helper.closeChannel()}
         drainPendingDisconnect()
     }
     func recover() async {
         guard !loadingFailed,!recovering else{return}
         startupGeneration=UUID();startupStage=nil;startupProbeTask?.cancel()
         if let startupClient {Task {await startupClient.shutdown()}}
+        if connection == .connecting {await capture.helper.closeChannel()}
         recovering=true;pendingRecovery=true;stopRequested=false
         stopTelemetry();cancelMeasurement();drainPendingDisconnect()
     }
@@ -412,19 +426,16 @@ import QingzhouKit
     func copyTerminalProxy(){let p=state.listenPort;let value="export http_proxy=http://127.0.0.1:\(p) https_proxy=http://127.0.0.1:\(p) all_proxy=socks5h://127.0.0.1:\(p) HTTP_PROXY=http://127.0.0.1:\(p) HTTPS_PROXY=http://127.0.0.1:\(p) ALL_PROXY=socks5h://127.0.0.1:\(p)";NSPasteboard.general.clearContents();NSPasteboard.general.setString(value,forType:.string);log("已复制本地终端代理命令，不包含节点凭据")}
     private func synchronizeShortcut(){do{try shortcuts.configure(enabled:state.shortcutEnabled,key:state.shortcutKey,modifiers:state.shortcutModifiers)}catch{log("快捷键冲突，未注册全局快捷键")}}
     func setShortcut(enabled:Bool,key:UInt32,modifiers:UInt32){guard !locked else{return};let old=state;do{guard [UInt32(35),2,15].contains(key),[UInt32(2304),4352,6144,6400].contains(modifiers) else{throw ProxyError("不支持的快捷键组合")};try shortcuts.configure(enabled:enabled,key:key,modifiers:modifiers);var next=state;next.shortcutEnabled=enabled;next.shortcutKey=key;next.shortcutModifiers=modifiers;do{try persist(next)}catch{try? shortcuts.configure(enabled:old.shortcutEnabled,key:old.shortcutKey,modifiers:old.shortcutModifiers);throw error}}catch{report(error)}}
-    func saveTunExclusions(_ input:String) async {guard !locked,let store else{return};busy=true;defer{busy=false};do{var next=state;next.tunExcludedCIDRs=input.components(separatedBy:CharacterSet(charactersIn:",\n")).map{$0.trimmingCharacters(in:.whitespaces)}.filter{!$0.isEmpty};try PolicyValidator.validate(next);try await apply(store.prepareChange(next))}catch{report(error)}}
-    func applyCaptureSettings(mode:CaptureMode,dns:DNSPreference,family:AddressFamilyPolicy,httpCompatibility:Bool,domains:String,exclusions:String) async -> Bool {
+    func applyCaptureSettings(mode:CaptureMode,dns:DNSPreference,family:AddressFamilyPolicy,httpCompatibility:Bool) async -> Bool {
         guard !locked,let store else {return false}
         busy=true;defer{busy=false}
         do {
             var next=state;next.captureMode=mode;next.dnsPreference=dns;next.addressFamilyPolicy=family;next.httpCompatibilityEnabled=httpCompatibility
-            next.tunExcludedCIDRs=exclusions.components(separatedBy:CharacterSet(charactersIn:",\n")).map{$0.trimmingCharacters(in:.whitespacesAndNewlines)}.filter{!$0.isEmpty}
-            next.protectedDomains=try ProtectedDomainPolicy.normalize(domains.components(separatedBy:CharacterSet(charactersIn:",\n")).filter{!$0.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty})
+            // 网络绕过统一由分流页管理，此处仅提交接管和 DNS 设置。
             if mode == .compatible {next.ruleFinal = .selected;try DomesticRouting.validate()}
             try await apply(store.prepareChange(next));return true
         } catch {report(error);return false}
     }
-    func saveProtectedDomains(_ input:String) async {guard !locked,let store else{return};busy=true;defer{busy=false};do{var next=state;next.protectedDomains=try ProtectedDomainPolicy.normalize(input.components(separatedBy:CharacterSet(charactersIn:",\n")).filter{!$0.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty});try PolicyValidator.validate(next);try await apply(store.prepareChange(next))}catch{report(error)}}
     func setCaptureMode(_ mode:CaptureMode) async {guard !locked,let store,state.captureMode != mode else{return};busy=true;defer{busy=false};do{var next=state;next.captureMode=mode;try await apply(store.prepareChange(next))}catch{report(error)}}
     func setAddressFamily(_ policy:AddressFamilyPolicy) async {guard !locked,let store else{return};busy=true;defer{busy=false};do{var next=state;next.addressFamilyPolicy=policy;try await apply(store.prepareChange(next))}catch{report(error)}}
     func setDNS(_ mode:DNSPreference) async {guard !locked,let store,state.dnsPreference != mode else{return};busy=true;defer{busy=false};do{var next=state;next.dnsPreference=mode;try await apply(store.prepareChange(next))}catch{report(error)}}
@@ -435,7 +446,7 @@ import QingzhouKit
             try await HelperInstaller.install(app:Bundle.main.bundleURL)
             await capture.helper.closeChannel()
             let status=try await HelperReadiness.wait {try await self.capture.helperStatus()}
-            guard status.protocolVersion==4 else{throw ProxyError("安装后辅助服务协议仍不匹配")}
+            guard status.protocolVersion==5 else{throw ProxyError("安装后辅助服务协议仍不匹配")}
             try await capture.emergencyRecover();recoveryPending=false;connection = .disconnected;helperStatus="辅助服务更新完成并已核对";log(helperStatus)
         }catch {helperStatus="辅助服务安装/核对未完成";report(error)}
     }
@@ -443,7 +454,8 @@ import QingzhouKit
     var profiles:[ClientProfile]{store?.catalog.profiles ?? []}
     var currentProfileID:UUID?{store?.catalog.currentProfileID}
     func changeProfile(_ id:UUID) async {
-        guard !locked,let store,id != currentProfileID else{return};busy=true;defer{busy=false}
+        guard !locked,let store,id != currentProfileID else{return}
+        guard drafts.allowLeaving("切换配置",profile:currentProfileID) else{return};busy=true;defer{busy=false}
         do{try await apply(store.prepareCatalog(ProfileStore.switchTo(id,in:store.catalog)));log("配置切换完成")}catch{report(error)}
     }
     func createProfile(name:String,copy:Bool,officeDomains:[String]=[]) async {
@@ -455,13 +467,15 @@ import QingzhouKit
         do{try await apply(store.prepareCatalog(ProfileStore.rename(id,to:name,in:store.catalog)),reconfigure:false)}catch{report(error)}
     }
     func deleteProfile(_ id:UUID) async {
-        guard !locked,let store else{return};busy=true;defer{busy=false}
+        guard !locked,let store else{return}
+        guard drafts.allowLeaving("删除配置",profile:id) else{return};busy=true;defer{busy=false}
         do{try await apply(store.prepareCatalog(ProfileStore.remove(id,in:store.catalog)),reconfigure:false)}catch{report(error)}
     }
     func recordBackup(_ url:URL) {guard let store else{return};do{var root=store.catalog;root.backupIndex.append(BackupIndex(fileName:url.lastPathComponent));if root.backupIndex.count>100{root.backupIndex.removeFirst(root.backupIndex.count-100)};try store.commit(store.prepareCatalog(root));state=store.state}catch{report(error)}}
     func migrationSnapshot() throws -> BackupSnapshot {let ref=try String(contentsOf:directory.appendingPathComponent("migration-v3.keyref"),encoding:.utf8);return try BackupService.decrypt(Data(contentsOf:directory.appendingPathComponent("migration-v3.qzb")),password:credentials.get(ref))}
     func restoreBackup(_ snapshot:BackupSnapshot) async {
-        guard !locked,let store else{return};busy=true;defer{busy=false}
+        guard !locked,let store else{return}
+        guard drafts.allowLeaving("恢复备份",all:true) else{return};busy=true;defer{busy=false}
         do{try await apply(store.prepareRestore(snapshot));log("加密备份恢复完成")}catch{report(error)}
     }
     func saveNote(_ id:UUID,note:String){guard !locked else{return};do{guard note.utf8.count<=4096 else{throw ProxyError("备注不能超过 4096 字节")};var next=state;next.notes[id.uuidString]=note;try persist(next)}catch{report(error)}}
@@ -575,11 +589,11 @@ import QingzhouKit
         guard !locked,!diagnosing else{return};diagnosing=true;defer{diagnosing=false}
         diagnosticRows=DiagnosticService.local(state:state,corePath:core.binary.path,connected:connection == .connected)
         let effective=(SCDynamicStoreCopyProxies(nil) as? [String:Any])?["ExceptionsList"] as? [String] ?? []
-        let expected=(try? ProtectedDomainPolicy.exceptions(state.protectedDomains)) ?? []
+        let expected=state.bypassProxyExceptions
         let bypassStatus:String
         if state.captureMode != .systemProxy || connection != .connected {bypassStatus="未验证"}
         else {bypassStatus=expected.allSatisfy{effective.contains($0)} ? "通过":"失败"}
-        let configuredDomains=state.protectedDomains.joined(separator:",")
+        let configuredDomains=(state.bypassDomains+state.bypassExactDomains).joined(separator:",")
         let effectiveExceptions=effective.joined(separator:",")
         let explanation="配置："+configuredDomains+"；系统例外："+effectiveExceptions
         diagnosticRows.append(DiagnosticResult("企业域名系统代理绕过",bypassStatus,explanation+"。核心 DIRECT 仍经过 sing-box；显式指定代理的命令可能不遵循系统例外。"))
@@ -589,6 +603,8 @@ import QingzhouKit
         if connection == .connected {await checkConnectivity();diagnosticRows += connectivityResults.map{DiagnosticResult($0.title,$0.status.rawValue,$0.category)}}else{diagnosticRows.append(DiagnosticResult("TLS / HTTPS","未验证","请连接后检测真实代理路径；诊断不会自动接管网络"))}
     }
     func quit() async -> Bool {
+        guard !busy else {errorMessage="正在更新配置，请稍后退出";return false}
+        guard drafts.allowLeaving("退出轻舟",all:true) else{return false}
         if loadingFailed{return true}
         cancelHealthRefresh()
         if measuring {cancelMeasurement();await measurementTask?.value}

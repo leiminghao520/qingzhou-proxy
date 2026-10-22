@@ -46,6 +46,7 @@ try:
                 def command(value):
                     fixture.stdin.write(value+'\n');fixture.stdin.flush();state=read()
                     assert 'starts=0 stops=0' in state,state
+                    if os.environ.get('QZ_DYNAMIC_DEBUG')=='1':print(value,state,flush=True)
                     return state
                 def request(name):
                     return subprocess.run(['/usr/bin/curl','--silent','--show-error','--fail','--max-time','2','--noproxy','','--proxy',f'http://127.0.0.1:{ports["core"]}',f'http://{name}:{origin.server_port}/'],capture_output=True)
@@ -90,11 +91,15 @@ try:
                         r=request(f'up{retry}.corp.test')
                         if r.returncode==0:break
                         time.sleep(.05)
-                    assert r.returncode==0 and r.stdout==b'DYNAMIC_VPN_OK',(r.stderr,(path/'core.log').read_text()[-2000:])
+                    assert r.returncode==0 and r.stdout==b'DYNAMIC_VPN_OK',(r.stderr,state,(path/'fixture.log').read_text()[-3000:],(path/'queries.log').read_text()[-2000:],(path/'core.log').read_text()[-2000:])
                     stream_request();print('PASS hot_vpn_attach_'+order[0],flush=True)
                     command('down');command('tick');time.sleep(.15)
                     assert request('gone.corp.test').returncode!=0
                     stream_request();print('PASS hot_vpn_detach_preserves_stream',flush=True)
+                for change in ['nic-up','nic-down','nic-up']:
+                    command(change);command('tick');stream_request()
+                    assert request('public.test').stdout==b'DYNAMIC_VPN_OK'
+                print('PASS secondary_nic_same_prefix_preserves_stream',flush=True)
                 command('interface');command('tick');time.sleep(.15)
                 assert request('renumbered.corp.test').stdout==b'DYNAMIC_VPN_OK'
                 stream_request();print('PASS interface_number_changes_without_restart',flush=True)

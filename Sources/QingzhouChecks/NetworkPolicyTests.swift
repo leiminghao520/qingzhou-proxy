@@ -123,7 +123,7 @@ final class NetworkPolicyTests:CheckCase {
         expectTrue(legacyReply.protocolVersion==nil)
         let request=TunRequest(operation:"prepare",httpCompatibilityPort:27900)
         let decoded=try JSONDecoder().decode(TunRequest.self,from:JSONEncoder().encode(request))
-        expectEqual(decoded.protocolVersion,4);expectEqual(decoded.httpCompatibilityPort,27900)
+        expectEqual(decoded.protocolVersion,5);expectEqual(decoded.httpCompatibilityPort,27900)
         let resource=URL(fileURLWithPath:FileManager.default.currentDirectoryPath+"/Resources/shadowrocket-default.json")
         var imported=try JSONDecoder().decode(ShadowrocketConfiguration.self,from:Data(contentsOf:resource))
         imported.general["ipv6"]="false"

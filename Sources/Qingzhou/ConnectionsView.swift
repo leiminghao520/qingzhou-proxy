@@ -5,28 +5,13 @@ import QingzhouKit
 
 struct ConnectionsView: View {
     @ObservedObject var model: AppModel
-    @State private var query = ""
+    @StateObject private var page=ConnectionListModel()
     @State private var detail: CoreConnection?
     @State private var ruleDraft: RoutingRule?
-    @State private var order = "流量"
-    @State private var network = "全部"
-
-    private var rows: [CoreConnection] {
-        model.connections.filter { row in
-            (network == "全部" || row.metadata.network?.uppercased() == network) &&
-            (query.isEmpty ||
-             row.target.localizedCaseInsensitiveContains(query) ||
-             (row.metadata.processPath ?? "").localizedCaseInsensitiveContains(query) ||
-             row.chains.contains { model.label($0).localizedCaseInsensitiveContains(query) })
-        }
-        .sorted { a, b in
-            if order == "目标" { return a.target.localizedStandardCompare(b.target) == .orderedAscending }
-            if order == "持续时间" { return a.start < b.start }
-            return a.upload + a.download > b.upload + b.download
-        }
-    }
-
     var body: some View {
+        let labels=Dictionary(Set(model.connections.flatMap(\.chains)).map{($0,model.label($0))},uniquingKeysWith:{$1})
+        let rows=page.rows(model.connections,labels:labels)
+        let visible=Array(rows.prefix(page.limit))
         VStack(alignment: .leading, spacing: 16) {
             // 页面标题
             HStack {
@@ -54,7 +39,7 @@ struct ConnectionsView: View {
             HStack(spacing: 12) {
                 HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    TextField("搜索目标、应用路径或出站节点...", text: $query)
+                    TextField("搜索目标、应用路径或出站节点...", text: $page.query)
                         .textFieldStyle(.plain)
                 }
                 .padding(.horizontal, 10)
@@ -63,12 +48,12 @@ struct ConnectionsView: View {
                 .background(Color.secondary.opacity(0.08))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
 
-                Picker("协议", selection: $network) {
+                Picker("协议", selection: $page.network) {
                     ForEach(["全部", "TCP", "UDP"], id: \.self) { Text($0) }
                 }
                 .frame(width: 120)
 
-                Picker("排序", selection: $order) {
+                Picker("排序", selection: $page.order) {
                     ForEach(["流量", "目标", "持续时间"], id: \.self) { Text($0) }
                 }
                 .frame(width: 130)
@@ -80,19 +65,21 @@ struct ConnectionsView: View {
             }
 
             if rows.isEmpty {
-                ContentUnavailableView(
-                    "暂无活动连接",
-                    systemImage: "network",
-                    description: Text("当代理运行并处理网络请求时，此处将实时展示各连接的流量与路由链路。")
-                )
+                ContentUnavailableView {
+                    Label(model.connections.isEmpty ? "暂无活动连接":"没有匹配的连接",systemImage:"network")
+                } description: {
+                    Text(model.connections.isEmpty ? "代理处理网络请求后，此处将展示连接与路由链路。":"试试其他关键词或协议。")
+                } actions: {
+                    if !page.query.isEmpty || page.network != "全部" {Button("清除筛选") {page.clearFilters()}}
+                }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(Array(rows.prefix(1000))) { row in
+                List(visible) { row in
                     HStack(spacing: 14) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(row.target)
                                 .font(.headline)
-                                .lineLimit(1)
+                                .lineLimit(1).help(row.target)
 
                             HStack(spacing: 6) {
                                 Text(row.metadata.network?.uppercased() ?? "未知")
@@ -132,6 +119,11 @@ struct ConnectionsView: View {
                     .padding(.vertical, 4)
                 }
                 .clipShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
+            }
+            HStack {
+                Text("已显示 \(visible.count) / 匹配 \(rows.count) / 全部 \(model.connections.count) 条").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                if visible.count<rows.count {Button("再显示 1,000 条") {page.loadMore()}}
             }
         }
         .sheet(item: $detail) { row in

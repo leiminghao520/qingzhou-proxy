@@ -95,7 +95,8 @@ public final class NodeStore {
                     }
                     let merged=try configuration.applying(to:next)
                     // 订阅提供规则与节点，不能覆盖用户选择的 DNS 或接管模式。
-                    next.shadowrocket=configuration;next.tunExcludedCIDRs=merged.tunExcludedCIDRs
+                    next.shadowrocket=configuration
+                    try next.setBypasses(next.effectiveBypasses+NetworkBypassPolicy.migrate(domains:[],cidrs:merged.tunExcludedCIDRs).filter{item in !next.effectiveBypasses.contains{$0.kind==item.kind && $0.value==item.value}})
                 }
                 guard profile.unsupported.isEmpty else {throw ProxyError("完整导入包含不支持内容，请选择仅节点")}
                 let oldGroups=subscription.map{sub in state.groups.filter{$0.subscriptionID==sub.id}} ?? []

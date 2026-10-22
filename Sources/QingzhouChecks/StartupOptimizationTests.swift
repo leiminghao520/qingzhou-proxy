@@ -121,7 +121,7 @@ func runStartupOptimizationChecks() async throws {
     expectTrue(timing.samples[0].milliseconds>=1)
     let encoded=try JSONEncoder().encode(TunReply(ok:false,message:"synthetic",stageTimings:timing.samples))
     let decoded=try JSONDecoder().decode(TunReply.self,from:encoded)
-    expectEqual(decoded.stageTimings,timing.samples);expectEqual(decoded.protocolVersion,4)
+    expectEqual(decoded.stageTimings,timing.samples);expectEqual(decoded.protocolVersion,5)
     let legacy=try JSONDecoder().decode(TunReply.self,from:Data("{\"ok\":true,\"message\":\"legacy\",\"running\":false,\"protocolVersion\":4}".utf8))
     expectNil(legacy.stageTimings)
     print("PASS Startup.firstSuccessCancellationBoundedDNSAndTiming")

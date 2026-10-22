@@ -31,10 +31,35 @@ public final class NetworkCheckScheduler {
 
 // 同一轮所有权核验和重规划共用原始采样，各自保留原有的瞬态路由过滤规则。
 public struct NetworkRouteSample {
-    public let table: String
+    private let tableValue:RouteTableText
+    public var table:String {tableValue.value}
     public let ownershipRoutes: [ProtectedRoute]
-    public init(read: () throws -> String = { try NetworkInspection.command("/usr/sbin/netstat", ["-rn"]) }) throws {
-        table = try read()
-        ownershipRoutes = NetworkSnapshot.parseRoutes(table, includeTransient: true)
+    public let planningRoutes: [ProtectedRoute]
+    public init(routes:[ProtectedRoute]) {
+        self.init(records:routes.map{RouteRecord(route:$0,flags:UInt32(1 | ($0.gateway.hasPrefix("link#") ? 0:2) | ($0.scope==nil ? 0:0x1000000)))})
     }
+    public init(records:[RouteRecord]) {
+        tableValue=RouteTableText {
+            let v4=records.filter{!$0.route.ipv6},v6=records.filter{$0.route.ipv6}
+            return "Internet:\n"+v4.map(\.tableLine).joined(separator:"\n")+"\nInternet6:\n"+v6.map(\.tableLine).joined(separator:"\n")
+        }
+        // 旧版异常零掩码主机保留在原始表中用于恢复，不伪装成有效默认路由。
+        let valid=records.filter{!$0.route.destination.hasSuffix("/0") || ["0.0.0.0/0","::/0"].contains($0.route.destination)}
+        ownershipRoutes=valid.map(\.route)
+        planningRoutes=valid.filter{!$0.isTransient || CapturePlan.isVPN($0.route.interface)}.map(\.route)
+    }
+    public init(read: () throws -> String = { try NetworkInspection.command("/usr/sbin/netstat", ["-rn"]) }) throws {
+        let table=try read();tableValue=RouteTableText{table}
+        ownershipRoutes = NetworkSnapshot.parseRoutes(table, includeTransient: true)
+        planningRoutes = NetworkSnapshot.parseRoutes(table)
+    }
+}
+
+// 结构化写前、写后采样无需构建兼容文本；旧异常识别需要时才生成，快照内容仍保持不可变。
+private final class RouteTableText {
+    private let build:()->String
+    private let lock=NSLock()
+    private var cached:String?
+    init(_ build:@escaping ()->String){self.build=build}
+    var value:String {lock.lock();defer{lock.unlock()};if let cached {return cached};let text=build();cached=text;return text}
 }

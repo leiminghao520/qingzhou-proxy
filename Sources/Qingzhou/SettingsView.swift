@@ -6,7 +6,7 @@ import QingzhouKit
 struct SettingsView: View {
     @ObservedObject var model: AppModel
     var body:some View {
-        SettingsContent(model:model,revision:SettingsRevision(model:model)).equatable()
+        SettingsContent(model:model,revision:SettingsRevision(model:model)).equatable().id(model.currentProfileID)
     }
 }
 
@@ -27,6 +27,7 @@ private struct SettingsRevision:Equatable {
     let port:Int
     let exclusions:[String]
     let protectedDomains:[String]
+    let bypasses:[NetworkBypass]
     let rules:[RoutingRule]
     let nodeLabels:[UUID:String]
     let groupLabels:[UUID:String]
@@ -42,7 +43,7 @@ private struct SettingsRevision:Equatable {
         protectionSummary=model.protectionSummary;captureMode=state.captureMode;dns=state.dnsPreference
         family=state.addressFamilyPolicy;http=state.httpCompatibilityEnabled;hasCompatibility=state.shadowrocket != nil
         port=state.listenPort;exclusions=state.tunExcludedCIDRs;protectedDomains=state.protectedDomains
-        rules=state.rules;nodeLabels=Dictionary(state.nodes.map{($0.id,$0.name)},uniquingKeysWith:{$1})
+        bypasses=state.effectiveBypasses;rules=state.rules;nodeLabels=Dictionary(state.nodes.map{($0.id,$0.name)},uniquingKeysWith:{$1})
         groupLabels=Dictionary(state.groups.map{($0.id,$0.name)},uniquingKeysWith:{$1})
         autoConnect=state.autoConnect;loginAtStartup=state.loginAtStartup
         shortcutEnabled=state.shortcutEnabled;shortcutKey=state.shortcutKey;shortcutModifiers=state.shortcutModifiers
@@ -54,31 +55,22 @@ private struct SettingsContent:View,Equatable {
     let revision:SettingsRevision
     static func ==(lhs:Self,rhs:Self)->Bool {lhs.model === rhs.model && lhs.revision==rhs.revision}
     @State private var showingDomesticConflicts=false
-    @State private var port = "7890"
-    @State private var exclusions = ""
-    @State private var protectedDomains = ""
-    @State private var draftCapture = CaptureMode.systemProxy
-    @State private var draftDNS = DNSPreference.httpsProxy
-    @State private var draftFamily = AddressFamilyPolicy.ipv4Only
-    @State private var draftHTTP = false
-    @State private var shortcutKey: UInt32 = 35
-    @State private var shortcutModifiers: UInt32 = 2304
+    @State private var showingBypasses=false
+    @ObservedObject private var draft:SettingsDraft
+    init(model:AppModel,revision:SettingsRevision) {
+        self.model=model;self.revision=revision
+        draft=model.drafts.settings(profile:revision.profileID,state:model.state)
+    }
 
-    private var domainDraft:String {
-        model.state.protectedDomains.joined(separator:",")
-    }
-    private var draftDomainItems:[String] {
-        protectedDomains.components(separatedBy:CharacterSet(charactersIn:",\n")).filter{!$0.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty}
-    }
-    private var missingDraftDomains:[String] {
-        (try? ProtectedDomainPolicy.missingTongdunDomains(in:draftDomainItems)) ?? []
-    }
-    private func completeDomainDraft() {
-        do {protectedDomains=try ProtectedDomainPolicy.completingTongdunDomains(draftDomainItems).joined(separator:",")}
-        catch {model.errorMessage=error.localizedDescription}
-    }
     var body: some View {
         Form {
+            if draft.dirty {
+                Section("未应用的设置草稿") {
+                    Text("切换页面会保留草稿；点击各项保存按钮才会生效。")
+                    if draft.networkConflict || draft.portConflict || draft.shortcutConflict {Text("配置已在其他位置变化，请撤销冲突草稿后重新编辑。").foregroundStyle(.orange)}
+                    Button("撤销设置草稿") {draft.sync(model.state);draft.discard()}.disabled(model.locked)
+                }
+            }
             OptimizationSettings(model:model)
             Section("界面外观") {
                 AppearanceSetting()
@@ -87,44 +79,36 @@ private struct SettingsContent:View,Equatable {
             }
 
             Section {
-                Picker("接管方式", selection: $draftCapture) {
+                Picker("接管方式", selection: $draft.network.capture) {
                     Text("系统代理（默认）").tag(CaptureMode.systemProxy)
                     Text("TUN 虚拟网卡（管理员辅助服务）").tag(CaptureMode.tun)
                     Text("完整接管（TUN＋系统代理，需管理员权限）").tag(CaptureMode.compatible)
                 }
                 .disabled(model.locked)
 
-                Picker("目的地址协议",selection:$draftFamily) {
+                Picker("目的地址协议",selection:$draft.network.family) {
                     ForEach(AddressFamilyPolicy.allCases,id:\.self){policy in Text(policy.label).tag(policy)}
                 }.disabled(model.locked)
                 if model.state.addressFamilyPolicy == nil {Text("旧配置已使用仅 IPv4，避免节点 IPv6 不可达；可在此调整。").font(.caption).foregroundStyle(.secondary)}
-                Toggle("HTTP 兼容模式（User-Agent / URL 重写）",isOn:$draftHTTP).disabled(model.locked || model.state.shadowrocket == nil)
+                Toggle("HTTP 兼容模式（User-Agent / URL 重写）",isOn:$draft.network.http).disabled(model.locked || model.state.shadowrocket == nil)
                 if model.state.shadowrocket != nil && !model.state.httpCompatibilityEnabled {Text("当前由核心直接代理；User-Agent 和 URL 重写已保留但未启用。兼容模式仅处理明文 HTTP，不能读取 HTTPS/SOCKS 的加密内容。").font(.caption).foregroundStyle(.orange)}
                 Text("TUN 与兼容接管仍需独立验收；开启 HTTP 兼容模式后才使用兼容入口。").font(.caption).foregroundStyle(.secondary)
-                Picker("DNS 解析策略", selection: $draftDNS) {
+                Picker("DNS 解析策略", selection: $draft.network.dns) {
                     Text("经代理的 HTTPS DNS").tag(DNSPreference.httpsProxy)
                     Text("原系统原生解析").tag(DNSPreference.system)
                 }
                 .disabled(model.locked)
 
-                TextField("额外直连网段（用逗号分隔）", text: $exclusions)
-                Text("排除网段与下方网络设置一起保存并应用。").font(.caption).foregroundStyle(.secondary)
-
-                TextField("企业网络保护域名（域名及其子域，用逗号分隔）",text:$protectedDomains)
-                Text("已保存的企业保护域名："+(model.state.protectedDomains.isEmpty ? "无":model.state.protectedDomains.joined(separator:"、")))
-                    .font(.caption).foregroundStyle(.secondary)
-                if protectedDomains != domainDraft {
-                    Text("企业保护域名草稿尚未应用，当前连接仍使用原设置。")
-                        .font(.caption).foregroundStyle(.orange)
+                HStack {
+                    Text("网络绕过：已启用 \(model.state.enabledBypasses.count) / \(model.state.effectiveBypasses.count) 项")
+                    Spacer()
+                    Button("管理网络绕过…") {showingBypasses=true}.disabled(model.locked)
                 }
-                if !missingDraftDomains.isEmpty {
-                    Text("同盾企业保护草稿缺少："+missingDraftDomains.joined(separator:"、")+"；登录跳转可能经过这些域名。")
-                        .font(.caption).foregroundStyle(.orange)
-                    Button("补齐到草稿") {completeDomainDraft()}.disabled(model.locked)
-                }
-                Text("上述接管、DNS、地址族、HTTP 兼容和企业域名只编辑草稿，点击应用才生效。")
+                Text("域名、IP 和网段统一在分流规则页维护，支持批量导入及指定网络出口。")
                     .font(.caption).foregroundStyle(.secondary)
-                if draftCapture == .compatible {
+                Text("上述接管、DNS、地址族和 HTTP 兼容只编辑草稿，点击应用才生效。")
+                    .font(.caption).foregroundStyle(.secondary)
+                if draft.network.capture == .compatible {
                     Text("规则模式：本机 → 企业 VPN → 显式规则 → 国内域名/IP 直连 → 未知公网代理。保存时默认未命中策略改为当前代理选择。固定国内规则："+DomesticRouting.version).font(.caption)
                     Text("完整接管尚需管理员恢复和实网验收，不会自动启用。节点、原用户规则顺序不变。")
                         .font(.caption).foregroundStyle(.orange)
@@ -133,15 +117,14 @@ private struct SettingsContent:View,Equatable {
                     }
                 }
                 Button(model.connection == .connected ? "应用网络设置（重新连接一次）":"保存网络设置") {
-                    Task { _ = await model.applyCaptureSettings(mode:draftCapture,dns:draftDNS,family:draftFamily,httpCompatibility:draftHTTP,domains:protectedDomains,exclusions:exclusions) }
+                    Task {
+                        draft.sync(model.state)
+                        guard !draft.networkConflict else {model.errorMessage="网络设置已被其他操作修改，请撤销草稿后重新编辑";return}
+                        if await model.applyCaptureSettings(mode:draft.network.capture,dns:draft.network.dns,family:draft.network.family,httpCompatibility:draft.network.http) {draft.acceptNetwork(model.state)}
+                    }
                 }.disabled(model.locked)
                 Text("系统代理模式下，保护域名绕过轻舟，交给系统网络及企业 VPN；所有运行模式均优先保护。核心 DIRECT 仍经过本地核心，与系统代理绕过不同。显式指定 HTTP/SOCKS 代理的命令不一定遵循此清单；TUN 仍使用原有内网保护逻辑。")
                     .font(.caption).foregroundStyle(.secondary)
-                if (try? ProtectedDomainPolicy.normalize(draftDomainItems))?.contains(where:{ProtectedDomainPolicy.tongdunDomains.contains($0)}) == false {
-                    Button("填入同盾企业域名草稿") {completeDomainDraft()}.disabled(model.locked)
-                    Text("建议草稿：tongdun.me、tongdun.cn、tongdun.net；点击保存才会生效。")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
                 if !model.protectionSummary.isEmpty {DisclosureGroup("生效的内网绕过项") {ForEach(model.protectionSummary,id:\.self){Text($0).font(.caption)}}}
                 HStack {
                     Text("辅助服务状态：")
@@ -164,8 +147,14 @@ private struct SettingsContent:View,Equatable {
             }
 
             Section {
-                TextField("本地回环监听端口", text: $port)
-                Button("保存端口") { Task { await model.savePort(Int(port) ?? 0) } }
+                TextField("本地回环监听端口", text: $draft.port).disabled(model.locked)
+                Button("保存端口") { Task {
+                    draft.sync(model.state)
+                    guard !draft.portConflict else {model.errorMessage="端口已被其他操作修改，请撤销草稿后重新编辑";return}
+                    let value=Int(draft.port) ?? 0
+                    await model.savePort(value)
+                    if model.state.listenPort==value {draft.acceptPort(model.state)}
+                } }
                     .disabled(model.locked)
 
                 Toggle("启动应用后自动连接", isOn: Binding(get: { model.state.autoConnect }, set: { model.setAutoConnect($0) }))
@@ -177,21 +166,24 @@ private struct SettingsContent:View,Equatable {
             }
 
             Section {
-                Picker("快捷键主按键", selection: $shortcutKey) {
+                Picker("快捷键主按键", selection: $draft.shortcut.key) {
                     Text("P").tag(UInt32(35))
                     Text("D").tag(UInt32(2))
                     Text("R").tag(UInt32(15))
                 }
-                Picker("修饰键组合", selection: $shortcutModifiers) {
+                Picker("修饰键组合", selection: $draft.shortcut.modifiers) {
                     Text("⌘⌥ (Command + Option)").tag(UInt32(2304))
                     Text("⌘⌃ (Command + Control)").tag(UInt32(4352))
                     Text("⌃⌥ (Control + Option)").tag(UInt32(6144))
                     Text("⌘⌃⌥ (Command + Control + Option)").tag(UInt32(6400))
                 }
-                Toggle("启用全局连接开关快捷键", isOn: Binding(get: { model.state.shortcutEnabled }, set: { model.setShortcut(enabled: $0, key: shortcutKey, modifiers: shortcutModifiers) }))
+                Toggle("启用全局连接开关快捷键", isOn: Binding(get: { model.state.shortcutEnabled }, set: { model.setShortcut(enabled: $0, key: model.state.shortcutKey, modifiers: model.state.shortcutModifiers) }))
                     .disabled(model.locked)
                 Button("应用快捷键设置") {
-                    model.setShortcut(enabled: model.state.shortcutEnabled, key: shortcutKey, modifiers: shortcutModifiers)
+                    draft.sync(model.state)
+                    guard !draft.shortcutConflict else {model.errorMessage="快捷键已被其他操作修改，请撤销草稿后重新编辑";return}
+                    model.setShortcut(enabled: model.state.shortcutEnabled, key: draft.shortcut.key, modifiers: draft.shortcut.modifiers)
+                    if model.state.shortcutKey==draft.shortcut.key && model.state.shortcutModifiers==draft.shortcut.modifiers {draft.acceptShortcut(model.state)}
                 }
                 .disabled(model.locked)
             } header: {
@@ -207,20 +199,14 @@ private struct SettingsContent:View,Equatable {
                 Text("关闭窗口后菜单栏仍常驻运行。正常退出时将自动清理系统代理。")
             }
         }
+        .sheet(isPresented:$showingBypasses) {
+            DraftEditorSheet(draft:model.drafts.bypass(profile:model.currentProfileID,items:model.state.effectiveBypasses,revision:try? model.bypassRevision()),store:model.drafts,title:"网络绕过") {
+                NetworkBypassView(model:model)
+            }.padding(20).frame(minWidth:850,minHeight:650)
+        }
         .formStyle(.grouped)
-        .onAppear {
-            draftCapture=model.state.captureMode;draftDNS=model.state.dnsPreference;draftFamily=model.state.effectiveAddressFamilyPolicy;draftHTTP=model.state.httpCompatibilityEnabled
-            port = String(model.state.listenPort)
-            exclusions = model.state.tunExcludedCIDRs.joined(separator: ",")
-            protectedDomains = domainDraft
-            shortcutKey = model.state.shortcutKey
-            shortcutModifiers = model.state.shortcutModifiers
-        }
-        .onChange(of:model.currentProfileID) {_,_ in
-            draftCapture=model.state.captureMode;draftDNS=model.state.dnsPreference;draftFamily=model.state.effectiveAddressFamilyPolicy;draftHTTP=model.state.httpCompatibilityEnabled
-            port=String(model.state.listenPort);exclusions=model.state.tunExcludedCIDRs.joined(separator:",")
-            protectedDomains=domainDraft;shortcutKey=model.state.shortcutKey;shortcutModifiers=model.state.shortcutModifiers
-        }
+        .onAppear {draft.sync(model.state)}
+        .onChange(of:revision) {_,_ in draft.sync(model.state)}
     }
 
     private func copyHelperCommand(_ script: String) {

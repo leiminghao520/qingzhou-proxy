@@ -15,9 +15,10 @@ struct NodesView: View {
     @State private var deleting = false
 
     @StateObject private var page=NodeListViewModel()
-    private var filteredNodes:[Node] {page.nodes(state:model.state,invalidatedAt:model.latencyInvalidatedAt,now:model.latencyClock)}
+    private var filteredNodes:[Node] {page.nodes(state:model.state,invalidatedAt:model.latencyInvalidatedAt,now:max(model.latencyClock,Date()),profile:model.currentProfileID)}
 
     var body: some View {
+        let filteredNodes=filteredNodes
         VStack(alignment: .leading, spacing: 16) {
             // 标题和主要操作
             HStack(alignment: .center) {
@@ -159,11 +160,13 @@ struct NodesView: View {
 
             // 节点网格或列表
             if filteredNodes.isEmpty {
-                ContentUnavailableView(
-                    model.state.nodes.isEmpty ? "还没有任何节点" : "没有找到符合条件的节点",
-                    systemImage: "network.slash",
-                    description: Text("点击右上角「添加节点」导入节点链接或订阅配置。")
-                )
+                ContentUnavailableView {
+                    Label(model.state.nodes.isEmpty ? "还没有任何节点":"没有找到符合条件的节点",systemImage:"network.slash")
+                } description: {
+                    Text(model.state.nodes.isEmpty ? "点击右上角添加节点或订阅。":"试试其他关键词、协议，或关闭收藏筛选。")
+                } actions: {
+                    if !model.state.nodes.isEmpty {Button("清除筛选") {page.clearFilters()}}
+                }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if !model.state.compactNodes {
                 // 节点卡片网格

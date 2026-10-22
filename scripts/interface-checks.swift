@@ -80,6 +80,26 @@ struct InterfaceChecks {
             try screenshot(window, to: output.appendingPathComponent(name + ".png"))
             screenshotCount += 1
         }
+        if CommandLine.arguments.contains("--protection-only") {
+            model.state.captureMode = .compatible
+            model.state.nodes=[Node(name:"隔离连接进度",kind:.shadowsocks,server:"fixture.invalid",port:443)]
+            model.state.selectedPolicy = .node(model.state.nodes[0].id)
+            model.connection = .connecting;model.busy=true
+            model.startupStartedAt=ProcessInfo.processInfo.systemUptime-38
+            model.startupStage=HelperProgress.label("protection")
+            try await capture("protection-simple-light")
+            try await capture("protection-simple-dark",.darkAqua)
+            host.rootView=AnyView(OverviewView(model:model).padding(24))
+            try await capture("protection-overview-light")
+            try await capture("protection-overview-dark",.darkAqua)
+            model.startupStage=HelperProgress.label("dnsActivation")
+            try await capture("protection-dns-progress")
+            try check(model.startupStage=="应用并核验 DNS","辅助服务阶段映射正确")
+            model.connection = .disconnected;model.busy=false;model.startupStage=nil;model.startupStartedAt=nil
+            try await capture("protection-finished")
+            print("PROTECTION_INTERFACE_CHECKS_OK checks=\(checks) screenshots=\(screenshotCount)")
+            return
+        }
         let vps=VPSCenter(directory:output.appendingPathComponent("isolated-vps"),refreshEnabled:false)
         vps.binding=VPSCenter.Binding(endpoint:"https://fixture.invalid/api/client/v1",subscription:UUID(),tokenRef:"fixture")
         vps.owner=true

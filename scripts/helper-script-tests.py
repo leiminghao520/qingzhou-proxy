@@ -9,7 +9,7 @@ with tempfile.TemporaryDirectory(prefix='qz-helper-scripts-') as folder:
     for file in ['sing-box','QingzhouHelper']:
         p=resources/file;p.write_text('#!/bin/bash\nexit 0\n');p.chmod(0o755)
     log=stage/'launch.log';mock=stage/'launchctl'
-    mock.write_text("#!/usr/bin/env python3\nimport os,pathlib,sys\nroot=pathlib.Path(os.environ['TEST_ROOT']);log=pathlib.Path(os.environ['TEST_LOG'])\nwith log.open('a') as output:output.write(sys.argv[1]+'\\n')\nif sys.argv[1]=='bootstrap':\n    if os.environ.get('TEST_BOOTSTRAP_FAIL')=='1':sys.exit(1)\n    if os.environ.get('TEST_NO_SOCKET')=='1':sys.exit(0)\n    import socket\n    sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);sock.bind(str(root/'control.sock'));sock.close()\nif sys.argv[1]=='bootout':\n    p=root/'control.sock'\n    if p.exists():p.unlink()\n    if os.environ.get('TEST_RECOVERY_ON_STOP')=='1':(root/'recovery.json').write_text('{}')\n");mock.chmod(0o755)
+    mock.write_text('#!/usr/bin/env python3\nimport os,pathlib,sys\nroot=pathlib.Path(os.environ[\'TEST_ROOT\']);log=pathlib.Path(os.environ[\'TEST_LOG\'])\nstate=root/\'test-launch-state\'\nloaded=state.exists() if os.environ.get(\'TEST_LOADED\')==\'0\' else not (root/\'test-unloaded\').exists()\noperation=sys.argv[1]\nif operation==\'print-disabled\':\n    if os.environ.get(\'TEST_DISABLED_QUERY_FAIL\')==\'1\':sys.exit(5)\n    disabled=os.environ.get(\'TEST_DISABLED\')==\'1\' and not (root/\'test-enabled\').exists()\n    print(\'"cn.qingzhou.proxy.helper" => \'+(\'disabled\' if disabled else \'enabled\'))\n    sys.exit(0)\nif operation==\'print\':\n    if os.environ.get(\'TEST_PRINT_FAIL\')==\'1\':print(\'Operation not permitted\',file=sys.stderr);sys.exit(1)\n    if loaded:print(\'system/cn.qingzhou.proxy.helper = {}\');sys.exit(0)\n    print(\'Could not find service "cn.qingzhou.proxy.helper" in domain for system\',file=sys.stderr);sys.exit(113)\nwith log.open(\'a\') as output:output.write(operation+\'\\n\')\nif operation==\'enable\':\n    if os.environ.get(\'TEST_ENABLE_FAIL\')==\'1\':sys.exit(5)\n    (root/\'test-enabled\').touch()\nif operation==\'disable\':\n    (root/\'test-enabled\').unlink(missing_ok=True)\nif operation==\'bootstrap\':\n    if os.environ.get(\'TEST_BOOTSTRAP_FAIL_ONCE\')==\'1\' and not (root/\'test-first-bootstrap-failed\').exists():\n        (root/\'test-first-bootstrap-failed\').touch();sys.exit(5)\n    if os.environ.get(\'TEST_BOOTSTRAP_FAIL\')==\'1\':sys.exit(1)\n    if os.environ.get(\'TEST_DISABLED\')==\'1\' and not (root/\'test-enabled\').exists():sys.exit(5)\n    state.touch();(root/\'test-unloaded\').unlink(missing_ok=True)\n    if os.environ.get(\'TEST_NO_SOCKET\')==\'1\':sys.exit(0)\n    import socket\n    sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);sock.bind(str(root/\'control.sock\'));sock.close()\nif operation==\'bootout\':\n    if os.environ.get(\'TEST_BOOTOUT_FAIL\')==\'1\':\n        if os.environ.get(\'TEST_STOP_RACE\')==\'1\':(root/\'test-unloaded\').touch();state.unlink(missing_ok=True)\n        sys.exit(5)\n    if not loaded:sys.exit(5)\n    (root/\'test-unloaded\').touch();state.unlink(missing_ok=True)\n    p=root/\'control.sock\'\n    if p.exists():p.unlink()\n    if os.environ.get(\'TEST_RECOVERY_ON_STOP\')==\'1\':(root/\'recovery.json\').write_text(\'{}\')\n');mock.chmod(0o755)
     signer=stage/'codesign';signer.write_text('#!/bin/bash\nif [ "$1" = "-d" ]; then echo CDHash=abcdef >&2; fi\n');signer.chmod(0o755)
     installer=stage/'install';installer.write_text("#!/usr/bin/env python3\nimport os,pathlib,shutil,sys\nargs=sys.argv[1:];mode=0o755;directory=False;paths=[]\nwhile args:\n    item=args.pop(0)\n    if item in ['-o','-g']:args.pop(0)\n    elif item=='-m':mode=int(args.pop(0),8)\n    elif item=='-d':directory=True\n    else:paths.append(item)\nif directory:\n    for path in paths:pathlib.Path(path).mkdir(parents=True,exist_ok=True);os.chmod(path,mode)\nelse:shutil.copyfile(paths[0],paths[1]);os.chmod(paths[1],mode)\n");installer.chmod(0o755)
     def run(name,**options):
@@ -47,4 +47,40 @@ with tempfile.TemporaryDirectory(prefix='qz-helper-scripts-') as folder:
     result=run('install-helper.sh',TEST_NO_SOCKET='1')
     assert result.returncode!=0 and (root/'QingzhouHelper').read_text()=='old-QingzhouHelper' and not (root/'control.sock').exists()
     passed('staleSocketDoesNotProveNewServiceReady')
+    for disabled in ['0','1']:
+        reset();plist.write_text('old-plist');(root/'QingzhouHelper').write_text('old')
+        result=run('install-helper.sh',TEST_LOADED='0',TEST_DISABLED=disabled)
+        assert result.returncode==0,(result.stdout,result.stderr)
+        assert log.read_text().splitlines()==(['enable','bootstrap'] if disabled=='1' else ['bootstrap'])
+        passed('unloadedServiceInstallDisabled'+disabled)
+    reset();plist.write_text('old-plist');(root/'QingzhouHelper').write_text('old')
+    result=run('install-helper.sh',TEST_LOADED='0',TEST_DISABLED='1',TEST_BOOTSTRAP_FAIL='1')
+    assert result.returncode!=0 and (root/'QingzhouHelper').read_text()=='old' and plist.read_text()=='old-plist'
+    assert log.read_text().splitlines()==['enable','bootstrap','bootout','disable'] and not (root/'test-enabled').exists()
+    passed('failedDisabledInstallRestoresDisabledState')
+    reset();plist.write_text('old-plist');(root/'QingzhouHelper').write_text('old')
+    result=run('install-helper.sh',TEST_LOADED='0',TEST_DISABLED='1',TEST_ENABLE_FAIL='1')
+    assert result.returncode!=0 and (root/'QingzhouHelper').read_text()=='old' and not (root/'test-enabled').exists()
+    assert log.read_text().splitlines()==['enable','bootout','disable']
+    passed('enableFailureRestoresComponents')
+    for flag in ['TEST_PRINT_FAIL','TEST_DISABLED_QUERY_FAIL']:
+        reset();plist.write_text('old-plist');(root/'QingzhouHelper').write_text('old')
+        result=run('install-helper.sh',**{flag:'1'})
+        assert result.returncode!=0 and log.read_text()=='' and (root/'QingzhouHelper').read_text()=='old'
+        assert not list(stage.glob('install.*'))
+        passed('statusFailureAborts'+flag)
+    reset();plist.write_text('old-plist');(root/'QingzhouHelper').write_text('old')
+    result=run('install-helper.sh',TEST_BOOTOUT_FAIL='1')
+    assert result.returncode!=0 and log.read_text().splitlines()==['bootout'] and (root/'QingzhouHelper').read_text()=='old'
+    passed('loadedBootoutFailureDoesNotOverwrite')
+    reset();plist.write_text('old-plist')
+    result=run('install-helper.sh',TEST_BOOTOUT_FAIL='1',TEST_STOP_RACE='1')
+    assert result.returncode==0 and log.read_text().splitlines()==['bootout','bootstrap']
+    passed('confirmedConcurrentExitAllowsInstall')
+    reset();plist.write_text('old-plist');(root/'QingzhouHelper').write_text('old')
+    result=run('install-helper.sh',TEST_DISABLED='1',TEST_BOOTSTRAP_FAIL_ONCE='1')
+    assert result.returncode!=0 and (root/'QingzhouHelper').read_text()=='old'
+    assert log.read_text().splitlines()==['bootout','enable','bootstrap','bootout','enable','bootstrap','disable']
+    assert (root/'test-launch-state').exists() and not (root/'test-enabled').exists()
+    passed('loadedDisabledRollbackRestoresBothStates')
 print('RESULT helper_script_scenarios='+str(scenarios)+' failures=0')

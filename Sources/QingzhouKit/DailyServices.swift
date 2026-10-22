@@ -66,7 +66,7 @@ public enum RuleEvaluator {
         var bytes=[UInt8](repeating:0,count:16);let ip=host.withCString{inet_pton(AF_INET,$0,&bytes)==1 || inet_pton(AF_INET6,$0,&bytes)==1} ? host:nil
         var steps=["模拟分析：不读取真实连接，也不发起 DNS 查询"]
         if host=="localhost" || host=="::1" || host.hasPrefix("127.") {return RuleExplanation(steps:steps+["本机回环保护，不进入隧道"],target:.direct)}
-        if state.protectedDomains.contains(where:{host==$0 || host.hasSuffix("."+$0)}) {return RuleExplanation(steps:steps+["企业网络保护：系统代理绕过；完整接管需同时核验原 VPN 路由", "显式指定 HTTP/SOCKS 代理的请求可能不遵循系统例外"],target:.direct,uncertainty:"此处是配置模拟，实际接口请核对诊断中的保护计划")}
+        if state.enabledBypasses.contains(where:{$0.matches(host:host,ip:ip)}) {return RuleExplanation(steps:steps+["企业网络保护：系统代理绕过；完整接管需同时核验原 VPN 路由", "显式指定 HTTP/SOCKS 代理的请求可能不遵循系统例外"],target:.direct,uncertainty:"此处是配置模拟，实际接口请核对诊断中的保护计划")}
         if state.mode == .direct{return RuleExplanation(steps:steps+["全部直连模式"],target:.direct)}
         if state.mode == .global{return RuleExplanation(steps:steps+["全部代理模式"],target:state.activePolicy)}
         if host=="localhost" || ["127.0.0.0/8","10.0.0.0/8","172.16.0.0/12","192.168.0.0/16","169.254.0.0/16","::1/128","fc00::/7","fe80::/10"].contains(where:{matches(RoutingRule(kind:.cidr,value:$0,action:.direct),host:host,ip:ip)==true}){return RuleExplanation(steps:steps+["本机/私网优先直连"],target:.direct)}

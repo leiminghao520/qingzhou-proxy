@@ -11,10 +11,10 @@ public struct ProxyInfo:Decodable,Sendable {
     public var type:String;public var name:String;public var now:String?;public var all:[String]?;public var history:[History]?
 }
 public struct TransferRate:Decodable,Sendable {public var up:Int64;public var down:Int64}
-public struct ConnectionMetadata:Decodable,Sendable {
+public struct ConnectionMetadata:Decodable,Sendable,Equatable {
     public var network:String?;public var host:String?;public var destinationIP:String?;public var destinationPort:String?;public var processPath:String?;public var type:String?
 }
-public struct CoreConnection:Decodable,Identifiable,Sendable {
+public struct CoreConnection:Decodable,Identifiable,Sendable,Equatable {
     public var id:String;public var metadata:ConnectionMetadata;public var upload:Int64;public var download:Int64;public var start:String;public var chains:[String];public var rule:String?;public var rulePayload:String?
     public var target:String {(metadata.host?.isEmpty==false ? metadata.host! : metadata.destinationIP ?? "未知")+":"+(metadata.destinationPort ?? "")}
     public var duration:String {let f=ISO8601DateFormatter();f.formatOptions=[.withInternetDateTime,.withFractionalSeconds];let date=f.date(from:start) ?? ISO8601DateFormatter().date(from:start);guard let date else{return "未知"};return "\(max(0,Int(Date().timeIntervalSince(date)))) 秒"}

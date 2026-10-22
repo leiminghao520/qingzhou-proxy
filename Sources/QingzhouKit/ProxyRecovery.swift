@@ -39,9 +39,9 @@ public enum ProxyRecovery {
         value["ProxyAutoConfigEnable"]=0;value["ProxyAutoDiscoveryEnable"]=0
         return value
     }
-    public static func applied(to original: [String:Any], port: Int, protectedDomains:[String]) throws -> [String:Any] {
+    public static func applied(to original: [String:Any], port: Int, protectedDomains:[String],exceptions:[String]=[]) throws -> [String:Any] {
         var value=applied(to:original,port:port)
-        let additions=try ProtectedDomainPolicy.exceptions(protectedDomains)
+        let additions=try ProtectedDomainPolicy.exceptions(protectedDomains)+exceptions
         if !additions.isEmpty {
             guard value["ExceptionsList"] == nil || value["ExceptionsList"] is [String] else {throw ProxyError("原系统代理例外列表格式异常，未覆盖原配置")}
             var exceptions=value["ExceptionsList"] as? [String] ?? []

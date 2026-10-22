@@ -21,10 +21,17 @@ extension Service {
 
     func beginNetworkResume(_ request: TunRequest, fd: Int32) {
         cancelNetworkResume()
+        // 指定出口拒绝保护不能在网络重建间隙被撤销；无法原位更新时等待用户重新连接。
+        if request.state?.pinnedBypasses.isEmpty == false {
+            suspendCorporateQueries();phase="networkRetry"
+            lastFailure="指定出口保护仍保留；主网络变化需要重新连接以核验新路径"
+            return
+        }
         var resumed=request
         if var state=resumed.state {
             // 已学习到的企业域名只沿用当前连接，不写回用户配置；重建期间仍不能落入公网解析。
-            state.protectedDomains=Array(Set(state.protectedDomains).union(knownProtectedDomains)).sorted()
+            do {try state.setBypasses(state.effectiveBypasses+NetworkBypassPolicy.migrate(domains:Array(knownProtectedDomains.subtracting(state.bypassDomains)),cidrs:[]))}
+            catch {lastFailure="网络重建保护配置无效："+error.localizedDescription;phase="networkProtectionFailed";return}
             resumed.state=state
         }
         let session = NetworkResumeSession(request: resumed, owner: fd)

@@ -11,6 +11,18 @@ struct OverviewView: View {
             VStack(alignment: .leading, spacing: 20) {
                 // 首页连接控制区域
                 connectionHeroCard
+                if model.connection == .connecting,let stage=model.startupStage {
+                    ConnectionProgressView(stage:stage,startedAt:model.startupStartedAt)
+                }
+
+                if !model.protectionSummary.isEmpty || !model.connectivityResults.isEmpty {
+                    DisclosureGroup("保护与连通性详情") {
+                        VStack(alignment:.leading,spacing:6) {
+                            ForEach(Array(model.protectionSummary.enumerated()),id:\.offset) {_,text in Text(text).textSelection(.enabled)}
+                            ForEach(Array(model.connectivityResults.enumerated()),id:\.offset) {_,result in Text(result.summary).textSelection(.enabled)}
+                        }.font(.caption).frame(maxWidth:.infinity,alignment:.leading)
+                    }
+                }
 
                 // 速率与会话统计卡片
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)], spacing: 14) {
@@ -136,8 +148,8 @@ struct OverviewView: View {
     }
 
     // MARK: - 首页连接控制
-    private var connectionHeroCard: some View {
-        HStack(spacing: 16) {
+    private var heroInformation:some View {
+        HStack(spacing:16) {
             // 连接状态图标
             ZStack {
                 Circle()
@@ -154,7 +166,7 @@ struct OverviewView: View {
                     Text(model.connection.rawValue)
                         .font(.title3.bold())
                         .lineLimit(1)
-                        .frame(width: 88, alignment: .leading)
+                        .fixedSize(horizontal:true,vertical:false)
 
                     // 接管方式标签
                     Text(model.state.captureMode.label)
@@ -164,13 +176,15 @@ struct OverviewView: View {
                         .padding(.vertical, 2)
                         .background(Theme.accentBlue.opacity(0.12))
                         .clipShape(Capsule())
+                        .fixedSize(horizontal:true,vertical:false)
+                        .help(model.state.captureMode.label)
                 }
 
                 HStack(spacing: 8) {
                     Text(model.selectedName)
                         .font(.subheadline)
                         .lineLimit(1)
-                        .frame(width: 64, alignment: .leading)
+                        .frame(maxWidth:220,alignment:.leading)
                         .help(model.selectedName)
                     if model.connection == .connected {
                         let allPassed = model.connectivityHealth == .healthy
@@ -197,10 +211,12 @@ struct OverviewView: View {
                     }
                 }
             }
-            .frame(width: 184, alignment: .leading)
 
-            Spacer(minLength: 0)
 
+        }
+        .fixedSize(horizontal:true,vertical:true)
+    }
+    @ViewBuilder private var heroControls:some View {
             // 代理模式分段选择
             Picker("", selection: Binding(get: { model.state.mode }, set: { mode in Task { await model.setMode(mode) } })) {
                 ForEach(ProxyMode.allCases, id: \.self) { mode in
@@ -240,9 +256,18 @@ struct OverviewView: View {
             .liquidAction(prominent: true, tint: model.connection == .connected ? Theme.dangerRed : Theme.accentBlue)
             .controlSize(.large)
             .disabled(model.stopDisabled || (model.state.activePolicy == nil && model.state.mode != .direct && model.connection != .connected) || (model.recoveryPending && model.connection != .connected))
+    }
+
+    private var connectionHeroCard:some View {
+        ViewThatFits(in:.horizontal) {
+            HStack(spacing:16) {heroInformation;Spacer(minLength:16);heroControls}
+            VStack(alignment:.leading,spacing:14) {
+                heroInformation
+                HStack(spacing:12) {Spacer(minLength:0);heroControls}
+            }
         }
         .padding(16)
-        .frame(maxWidth: .infinity, minHeight: 76, maxHeight: 76, alignment: .leading)
+        .frame(maxWidth: .infinity, minHeight: 76, alignment: .leading)
         .liquidContentSurface(cornerRadius: Theme.cardCornerRadius)
         .overlay(
             RoundedRectangle(cornerRadius: Theme.cardCornerRadius)

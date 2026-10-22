@@ -12,7 +12,8 @@ public enum NetworkPolicy {
         var local:[String:Any]=["type":"local","tag":"local"]
         if let resolver=originalDNS?.first {local=["type":"udp","tag":"local","server":resolver]}
         let remote:[String:Any]=["type":"https","tag":"remote","server":"1.1.1.1","path":"/dns-query","tls":["enabled":true,"server_name":"cloudflare-dns.com"],"detour":"proxy"]
-        var dnsRules:[[String:Any]]=[["clash_mode":"direct","action":"route","server":"local"],["domain_suffix":state.protectedDomains+["local"],"action":"route","server":"local"],["domain_regex":["^[^.]+$"],"action":"route","server":"local"],["domain":["localhost"]+state.nodes.map(\.server),"action":"route","server":"local"]]
+        var dnsRules:[[String:Any]]=[["clash_mode":"direct","action":"route","server":"local"],["domain_suffix":state.bypassDomains+["local"],"action":"route","server":"local"],["domain_regex":["^[^.]+$"],"action":"route","server":"local"],["domain":["localhost"]+state.nodes.map(\.server),"action":"route","server":"local"]]
+        if !state.bypassExactDomains.isEmpty {dnsRules.insert(["domain":state.bypassExactDomains,"action":"route","server":"local"],at:0)}
         let rows=state.rules.map{($0,nil as PolicyReference?)}+state.remoteRules.flatMap{source in source.rules.map{($0,source.target as PolicyReference?)}}
         if state.mode == .rule {for (rule,override) in rows where [.domain,.suffix,.keyword].contains(rule.kind) {
             let target=override ?? rule.target ?? (rule.action == .direct ? .direct:rule.action == .reject ? .reject:.selected)
@@ -39,7 +40,14 @@ public enum NetworkPolicy {
                 var resolve=rule;resolve["strategy"]=family.strategy;ordered.append(resolve)
             } else if !["sniff","hijack-dns"].contains(rule["action"] as? String ?? "") && !(rule["ip_version"] as? Int == 6 && rule["action"] as? String == "reject") {ordered.append(rule)}
         }
-        route["rules"]=leading+prefix+ordered
+        var bypassRules:[[String:Any]]=[]
+        for item in state.enabledBypasses {
+            var condition=RuleEvaluator.condition(item.rule)
+            condition["action"]="route";condition["outbound"]="direct"
+            bypassRules.append(condition)
+        }
+        ordered.removeAll{item in bypassRules.contains{NSDictionary(dictionary:$0).isEqual(to:item)}}
+        route["rules"]=leading+bypassRules+prefix+ordered
         route["default_domain_resolver"]=["server":useRemote ? "remote":"local","strategy":family.strategy]
         object["route"]=route
         var outbounds=object["outbounds"] as! [[String:Any]]

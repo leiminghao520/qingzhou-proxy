@@ -2,6 +2,46 @@ import Foundation
 import QingzhouKit
 
 final class DynamicVPNTests:CheckCase {
+    func testMultiInterfaceRoutes() throws {
+        let wifi=DNSResolverScope(service:"wifi",interface:"en0",servers:["192.0.2.53"],defaultResolver:true)
+        let table="Internet:\n169.254 link#11 UCS en0\n169.254 link#23 UCSI en6\n192.168.66/24 link#11 UCS en0\n192.168.66/24 link#23 UCSI en6\n"
+        let original=NetworkSnapshot.parseRoutes(table)
+        for routes in [original,Array(original.reversed()),original.map{var r=$0;r.gateway=r.interface=="en6" ? "link#99":r.gateway;return r}] {
+            let plan=try CapturePlan.make(snapshot:NetworkSnapshot(primaryInterface:"en0",routes:routes,resolvers:[wifi]),extraCIDRs:[],extraDomains:[])
+            expectEqual(plan.snapshot.routes,routes)
+            expectEqual(plan.protectedRoutes.count,2)
+            expectTrue(plan.protectedRoutes.allSatisfy{$0.interface=="en0" && $0.scope==nil})
+            let partition=try DynamicCaptureRules.partitionRoutes(plan.protectedRoutes)
+            expectEqual(partition["en0"]?.count,2);expectNil(partition["en6"])
+            let folder=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer{try? FileManager.default.removeItem(at:folder)}
+            _=try DynamicCaptureRules(directory:folder,plan:plan)
+            expectEqual(try plan.domainRoute(address:"169.254.1.2",resolver:wifi).interface,"en0")
+        }
+        let scoped=[ProtectedRoute(destination:"10.20.0.0/16",gateway:"link#6",interface:"utun6",scope:"utun6"),ProtectedRoute(destination:"10.20.0.0/16",gateway:"link#7",interface:"utun7",scope:"utun7")]
+        let dns6=DNSResolverScope(service:"corp6",interface:"utun6",servers:["10.20.0.53"],domains:["corp.test"])
+        let dns7=DNSResolverScope(service:"corp7",interface:"utun7",servers:["10.20.0.54"],domains:["other.test"])
+        for resolvers in [[wifi],[wifi,dns6],[wifi,dns6,dns7]] {
+            let plan=try CapturePlan.make(snapshot:NetworkSnapshot(primaryInterface:"en0",routes:scoped,resolvers:resolvers),extraCIDRs:[],extraDomains:["corp.test"])
+            expectEqual(plan.snapshot.routes,scoped)
+            if resolvers.count==2 {
+                expectEqual(plan.protectedRoutes,[scoped[0]])
+                expectEqual(try plan.domainRoute(address:"10.20.1.2",resolver:dns6).interface,"utun6")
+            } else {
+                expectTrue(plan.protectedRoutes.isEmpty)
+                expectThrows(try plan.domainRoute(address:"10.20.1.2",resolver:dns6))
+            }
+        }
+        let global=ProtectedRoute(destination:"10.20.0.0/16",gateway:"192.0.2.1",interface:"en0")
+        let mixed=try CapturePlan.make(snapshot:NetworkSnapshot(primaryInterface:"en0",routes:[global]+scoped,resolvers:[wifi,dns6]),extraCIDRs:[],extraDomains:[])
+        expectEqual(mixed.protectedRoutes,[global]);expectThrows(try mixed.domainRoute(address:"10.20.1.2",resolver:dns6))
+        expectEqual(try CapturePlan.effectiveRoutes([global,global],resolvers:[]),[global])
+        for conflict in [ProtectedRoute(destination:global.destination,gateway:"192.0.2.2",interface:"en0"),ProtectedRoute(destination:global.destination,gateway:"192.0.2.1",interface:"en6")] {
+            do {_=try CapturePlan.effectiveRoutes([global,conflict],resolvers:[]);expectTrue(false)}
+            catch {expectTrue(error.localizedDescription.contains("scope=global"));expectTrue(error.localizedDescription.contains(conflict.gateway))}
+        }
+        expectTrue(NetworkInspection.conflicts(vpn:"",routes:"Internet:\ndefault link#22 UCSg utun7",proxies:[:])?.contains("另一个隧道") == true)
+    }
     func snapshot(_ corporate:Bool)->NetworkSnapshot {
         var resolvers=[DNSResolverScope(service:"wifi",interface:"en0",servers:["192.0.2.53"],defaultResolver:true)]
         var routes=[ProtectedRoute(destination:"192.0.2.0/24",gateway:"link#11",interface:"en0")]

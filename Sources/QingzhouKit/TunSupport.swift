@@ -3,8 +3,9 @@ import Darwin
 import SystemConfiguration
 
 public struct TunRequest:Codable,Sendable {
+    public var progressUpdates:Bool?
     public var preserveExternal:Bool?
-    public var protocolVersion:Int? = 4
+    public var protocolVersion:Int? = 5
     public var systemProxyPort:Int?
     public var httpCompatibilityPort:Int?
     public var operation:String
@@ -15,6 +16,8 @@ public struct TunRequest:Codable,Sendable {
     public init(operation:String,state:AppState?=nil,credentials:[String:String]?=nil,control:CoreControlContext?=nil,verifyNetwork:Bool=false,httpCompatibilityPort:Int?=nil,systemProxyPort:Int?=nil,preserveExternal:Bool=false){self.preserveExternal=preserveExternal;self.systemProxyPort=systemProxyPort;self.httpCompatibilityPort=httpCompatibilityPort;self.verifyNetwork=verifyNetwork;self.operation=operation;self.state=state;self.credentials=credentials;self.control=control}
 }
 public struct TunReply: Codable, Sendable {
+    public var isProgress:Bool?
+    public var tunnelInterface:String?
     public var supportsExternalRecovery: Bool?
     public var recoveryPending: Bool?
     public var safeToQuit: Bool?
@@ -25,7 +28,7 @@ public struct TunReply: Codable, Sendable {
     public var protectionSummary: [String]?
     public var phase: String?
     public var dnsServer: String?
-    public var protocolVersion: Int? = 4
+    public var protocolVersion: Int? = 5
     public var ok: Bool
     public var message: String
     public var running: Bool
@@ -55,10 +58,51 @@ public enum HelperPaths {
 }
 public enum UnixChannel {
     public static let maximum=4*1024*1024
-    public static func send(_ data:Data,fd:Int32) throws {guard data.count<=maximum else{throw ProxyError("控制模型超过 4 MiB")};var length=UInt32(data.count).bigEndian;let prefix=Data(bytes:&length,count:4);for packet in [prefix,data]{try packet.withUnsafeBytes{buffer in var offset=0;while offset<packet.count{let count=Darwin.send(fd,buffer.baseAddress!.advanced(by:offset),packet.count-offset,0);guard count>0 else{throw ProxyError("辅助服务控制通道已中断")};offset+=count}}}}
-    public static func receive(fd:Int32) throws -> Data {
-        func read(_ size:Int) throws -> Data {var data=Data(count:size);try data.withUnsafeMutableBytes{buffer in var offset=0;while offset<size{let count=recv(fd,buffer.baseAddress!.advanced(by:offset),size-offset,0);guard count>0 else{throw ProxyError("辅助服务控制通道已中断")};offset+=count}};return data}
-        let header=try read(4);let size=header.reduce(0){($0<<8)|Int($1)};guard size>0,size<=maximum else{throw ProxyError("控制消息大小无效")};return try read(size)
+    private static func wait(_ fd:Int32,event:Int16,deadline:TimeInterval?) throws {
+        guard let deadline else{return}
+        while true {
+            let remaining=deadline-ProcessInfo.processInfo.systemUptime
+            guard remaining>0 else {throw ProxyError("辅助服务请求超过总时间预算，已停止等待并要求恢复")}
+            var item=pollfd(fd:fd,events:event,revents:0)
+            let ready=poll(&item,1,Int32(min(50,max(1,remaining*1000))))
+            if ready<0 {if errno==EINTR {continue};throw ProxyError("辅助服务通道等待失败")}
+            if item.revents & Int16(POLLHUP|POLLERR|POLLNVAL) != 0 {
+                // 已收到最终帧后关闭的一端仍可能同时带有可读数据。
+                if event==Int16(POLLIN),item.revents & Int16(POLLIN) != 0 {return}
+                throw ProxyError("辅助服务控制通道已中断")
+            }
+            if ready>0 {return}
+        }
+    }
+    public static func send(_ data:Data,fd:Int32,deadline:TimeInterval?=nil) throws {
+        guard data.count<=maximum else{throw ProxyError("控制模型超过 4 MiB")}
+        var length=UInt32(data.count).bigEndian;let prefix=Data(bytes:&length,count:4)
+        for packet in [prefix,data] {try packet.withUnsafeBytes {buffer in
+            var offset=0
+            while offset<packet.count {
+                try wait(fd,event:Int16(POLLOUT),deadline:deadline)
+                let count=Darwin.send(fd,buffer.baseAddress!.advanced(by:offset),packet.count-offset,deadline==nil ? 0:MSG_DONTWAIT)
+                if count<0,[EINTR,EAGAIN,EWOULDBLOCK].contains(errno) {continue}
+                guard count>0 else{throw ProxyError("辅助服务控制通道已中断")};offset+=count
+            }
+        }}
+    }
+    public static func receive(fd:Int32,deadline:TimeInterval?=nil) throws -> Data {
+        func read(_ size:Int) throws -> Data {
+            var data=Data(count:size)
+            try data.withUnsafeMutableBytes {buffer in
+                var offset=0
+                while offset<size {
+                    try wait(fd,event:Int16(POLLIN),deadline:deadline)
+                    let count=recv(fd,buffer.baseAddress!.advanced(by:offset),size-offset,deadline==nil ? 0:MSG_DONTWAIT)
+                    if count<0,[EINTR,EAGAIN,EWOULDBLOCK].contains(errno) {continue}
+                    guard count>0 else{throw ProxyError("辅助服务控制通道已中断")};offset+=count
+                }
+            }
+            return data
+        }
+        let header=try read(4);let size=header.reduce(0){($0<<8)|Int($1)}
+        guard size>0,size<=maximum else{throw ProxyError("控制消息大小无效")};return try read(size)
     }
     public static func address(_ path:String) throws -> sockaddr_un {var address=sockaddr_un();address.sun_family=sa_family_t(AF_UNIX);address.sun_len=UInt8(MemoryLayout<sockaddr_un>.size);let bytes=Array(path.utf8)+[0];guard bytes.count<=MemoryLayout.size(ofValue:address.sun_path) else{throw ProxyError("控制通道路径过长")};withUnsafeMutableBytes(of:&address.sun_path){$0.copyBytes(from:bytes)};return address}
 }
@@ -83,17 +127,31 @@ public enum HelperReadiness {
     }
 }
 public actor PrivilegedServiceClient {
-    private var fd:Int32 = -1
+    private var channel:HelperRequestChannel?
+    private var requestInFlight=false
     public init(){}
+    public init(channel:HelperRequestChannel){self.channel=channel}
     private var onStageTimings: (@Sendable ([ConnectionStageTiming]) -> Void)?
+    private var onProgress:(@Sendable (String)->Void)?
+    public func setProgressObserver(_ observer:(@Sendable (String)->Void)?) {onProgress=observer}
     public func setTimingObserver(_ observer: (@Sendable ([ConnectionStageTiming]) -> Void)?) {onStageTimings=observer}
     public func request(_ request:TunRequest) async throws -> TunReply {
-        if fd<0 {let descriptor=socket(AF_UNIX,SOCK_STREAM,0);guard descriptor>=0 else{throw ProxyError("无法创建辅助服务控制通道")};var option:Int32=1;_ = setsockopt(descriptor,SOL_SOCKET,SO_NOSIGPIPE,&option,socklen_t(MemoryLayout<Int32>.size));var timeout=timeval(tv_sec:60,tv_usec:0);_ = setsockopt(descriptor,SOL_SOCKET,SO_RCVTIMEO,&timeout,socklen_t(MemoryLayout<timeval>.size));var address=try UnixChannel.address(HelperPaths.socket);let connected=withUnsafePointer(to:&address){$0.withMemoryRebound(to:sockaddr.self,capacity:1){Darwin.connect(descriptor,$0,socklen_t(MemoryLayout<sockaddr_un>.size))==0}};guard connected else{let code=errno;close(descriptor);throw HelperConnectionError(code:code)};fd=descriptor}
-        do {try UnixChannel.send(JSONEncoder().encode(request),fd:fd);let reply=try JSONDecoder().decode(TunReply.self,from:UnixChannel.receive(fd:fd));if ["prepare","activate"].contains(request.operation),reply.protocolVersion != 4 {throw ProxyError("辅助服务协议过旧，请更新后再开启组合接管")}
+        guard !requestInFlight else {throw ProxyError("辅助服务请求正在处理，未重复提交")}
+        requestInFlight=true;defer{requestInFlight=false}
+        if channel==nil {let descriptor=socket(AF_UNIX,SOCK_STREAM,0);guard descriptor>=0 else{throw ProxyError("无法创建辅助服务控制通道")};var option:Int32=1;_ = setsockopt(descriptor,SOL_SOCKET,SO_NOSIGPIPE,&option,socklen_t(MemoryLayout<Int32>.size));var timeout=timeval(tv_sec:60,tv_usec:0);_ = setsockopt(descriptor,SOL_SOCKET,SO_RCVTIMEO,&timeout,socklen_t(MemoryLayout<timeval>.size));_ = setsockopt(descriptor,SOL_SOCKET,SO_SNDTIMEO,&timeout,socklen_t(MemoryLayout<timeval>.size));var address=try UnixChannel.address(HelperPaths.socket);let connected=withUnsafePointer(to:&address){$0.withMemoryRebound(to:sockaddr.self,capacity:1){Darwin.connect(descriptor,$0,socklen_t(MemoryLayout<sockaddr_un>.size))==0}};guard connected else{let code=errno;close(descriptor);throw HelperConnectionError(code:code)};channel=HelperRequestChannel(descriptor:descriptor)}
+        do {
+        var outgoing=request
+        if ["prepare","activate"].contains(request.operation) {outgoing.progressUpdates=true}
+        guard let channel else {throw ProxyError("辅助服务通道未建立")}
+        let observer=onProgress
+        let reply=try await channel.exchange(JSONEncoder().encode(outgoing),progress:{observer?($0)})
+        try Task.checkCancellation()
+        guard self.channel === channel else {throw CancellationError()}
+        if ["prepare","activate","pinBypasses"].contains(request.operation),reply.protocolVersion != 5 {throw ProxyError("辅助服务协议过旧，请更新后再开启组合接管")}
         if let timings=reply.stageTimings,!timings.isEmpty {onStageTimings?(timings)}
-        try reply.validateSuccess();return reply}catch{close(fd);fd = -1;throw error}
+        try reply.validateSuccess();return reply}catch{channel?.cancel();channel=nil;throw error}
     }
-    public func closeChannel(){if fd>=0{close(fd);fd = -1}}
+    public func closeChannel(){channel?.cancel();channel=nil}
 }
 public enum NetworkInspection {
     public static func command(_ path:String,_ arguments:[String],deadline:Date?=nil) throws -> String {
@@ -188,7 +246,7 @@ public enum NetworkInspection {
     // 使用独立的补充 DNS 服务，避免修改 DHCP 持有的物理服务状态后被系统刷新覆盖。
     public static func tunDNSKey(_ session:UUID)->String {"State:/Network/Service/Qingzhou-TUN-"+session.uuidString+"/DNS"}
     public static func samePrefix(_ a:String,_ b:String)->Bool {let left=a.split(separator:"/"),right=b.split(separator:"/");guard left.count==2,right.count==2,left[1]==right[1] else{return false};return RuleEvaluator.matches(RoutingRule(kind:.cidr,value:a,action:.direct),host:String(right[0]),ip:String(right[0]))==true && RuleEvaluator.matches(RoutingRule(kind:.cidr,value:b,action:.direct),host:String(left[0]),ip:String(left[0]))==true}
-    public static func checkConflicts(ownedTunnel:String?=nil) throws {let vpn=try command("/usr/sbin/scutil",["--nc","list"]);let rawRoutes=try command("/usr/sbin/netstat",["-rn"])
+    public static func checkConflicts(ownedTunnel:String?=nil,routes suppliedRoutes:String?=nil) throws {let vpn=try command("/usr/sbin/scutil",["--nc","list"]);let rawRoutes=try suppliedRoutes ?? command("/usr/sbin/netstat",["-rn"])
         let routes=rawRoutes.components(separatedBy:.newlines).filter{row in guard let ownedTunnel else{return true};return !row.split(whereSeparator:{$0.isWhitespace}).contains(Substring(ownedTunnel))}.joined(separator:"\n");guard let proxies=SCDynamicStoreCopyProxies(nil) as? [String:Any] else{throw ProxyError("不能可靠判断系统代理状态，未启用 TUN")};if let reason=conflicts(vpn:vpn,routes:routes,proxies:proxies){throw ProxyError(reason)}}
     public static func validatePreparation(interface:String,gateway:String,currentInterface:String?,currentGateway:String?,vpn:String,routes:String,proxies:[String:Any]) throws {
         guard currentInterface==interface,currentGateway==gateway else{throw ProxyError("准备期间默认网络已变化，未接管网络")}
@@ -206,11 +264,14 @@ public enum NetworkInspection {
 }
 public enum TunConfigBuilder {
     public static func build(state:AppState,credentials:CredentialStore,control:CoreControlContext,address4:String,address6:String,originalDNS:[String],bypass:[String],httpCompatibilityPort:Int?=nil,plan:CapturePlan?=nil,dnsForwardPort:Int?=nil,nodeInterfaces:[String:String]=[:]) throws -> Data {
+        try JSONSerialization.data(withJSONObject:object(state:state,credentials:credentials,control:control,address4:address4,address6:address6,originalDNS:originalDNS,bypass:bypass,httpCompatibilityPort:httpCompatibilityPort,plan:plan,dnsForwardPort:dnsForwardPort,nodeInterfaces:nodeInterfaces),options:[.sortedKeys])
+    }
+    public static func object(state:AppState,credentials:CredentialStore,control:CoreControlContext,address4:String,address6:String,originalDNS:[String],bypass:[String],httpCompatibilityPort:Int?=nil,plan:CapturePlan?=nil,dnsForwardPort:Int?=nil,nodeInterfaces:[String:String]=[:]) throws -> [String:Any] {
         try PolicyValidator.validate(state);guard !state.nodes.isEmpty,!originalDNS.isEmpty,originalDNS.count<=16 else{throw ProxyError("TUN 需要节点和可读取的原系统 DNS")}
         for value in [address4,address6]+bypass{try ConfigBuilder.validate(RoutingRule(kind:.cidr,value:value,action:.direct))}
         // 权限服务只接受受限节点模型；利用分享链接往返校验阻止未支持字段进入核心。
         for node in state.nodes{let parsed=try NodeParser.parse(NodeShare.link(node,credentials:credentials));guard parsed.node.fingerprint==node.fingerprint else{throw ProxyError("节点模型参数无效")}}
-        let base=try ConfigBuilder.build(state:state,credentials:credentials,control:control,httpCompatibilityPort:httpCompatibilityPort);var object=try JSONSerialization.jsonObject(with:base) as! [String:Any]
+        var object=try ConfigBuilder.object(state:state,credentials:credentials,control:control,httpCompatibilityPort:httpCompatibilityPort)
         var inbounds=object["inbounds"] as! [[String:Any]]
         // 路由和 DNS 由辅助服务按所有权记录管理，核心不替换现有路由。
         inbounds.append(["type":"tun","tag":"tun-in","address":[address4,address6],"mtu":1500,"stack":"gvisor","auto_route":false,"dns_mode":"disabled"]);object["inbounds"]=inbounds
@@ -218,7 +279,7 @@ public enum TunConfigBuilder {
         for resolver in originalDNS {try ConfigBuilder.validate(RoutingRule(kind:.cidr,value:resolver,action:.direct))}
         NetworkPolicy.apply(&object,state:state,originalDNS:originalDNS)
         if let plan,let dnsForwardPort {CaptureConfiguration.apply(&object,state:state,plan:plan,dnsForwardPort:dnsForwardPort,nodeInterfaces:nodeInterfaces)}
-        return try JSONSerialization.data(withJSONObject:object,options:[.sortedKeys])
+        return object
     }
 }
 

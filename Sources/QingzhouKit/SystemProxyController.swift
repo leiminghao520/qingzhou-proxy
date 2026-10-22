@@ -50,7 +50,7 @@ struct ProxyJournal: Codable { var records: [ProxyRecord] }
         if let commitHandler {try commitHandler(preferences);return}
         guard SCPreferencesCommitChanges(preferences), SCPreferencesApplyChanges(preferences) else { throw ProxyError("系统代理修改失败，请执行恢复原代理") }
     }
-    public func apply(port: Int,ownedTunDNS:String?=nil,protectedDomains:[String]=[]) throws {
+    public func apply(port: Int,ownedTunDNS:String?=nil,protectedDomains:[String]=[],exceptions:[String]=[]) throws {
         guard !hasRecovery else { throw ProxyError("存在未恢复的代理设置，请先恢复原代理") }
         if preferencesFactory==nil {try NetworkSafety.check(ownedDNS:ownedTunDNS)}
         let p = try preferences(); defer {SCPreferencesUnlock(p)}
@@ -61,7 +61,7 @@ struct ProxyJournal: Codable { var records: [ProxyRecord] }
             let id = serviceID as String
             let existing = SCNetworkServiceCopyProtocol(service,kSCNetworkProtocolTypeProxies)
             let original = existing.flatMap {SCNetworkProtocolGetConfiguration($0) as? [String:Any]} ?? [:]
-            let applied = try ProxyRecovery.applied(to:original,port:port,protectedDomains:protectedDomains)
+            let applied = try ProxyRecovery.applied(to:original,port:port,protectedDomains:protectedDomains,exceptions:exceptions)
             let record = ProxyRecord(serviceID:id,original:try encode(original),applied:try encode(applied),originallyEnabled:existing.map {SCNetworkProtocolGetEnabled($0)} ?? false,hadProtocol:existing != nil)
             records.append(record)
         }
@@ -73,7 +73,7 @@ struct ProxyJournal: Codable { var records: [ProxyRecord] }
             if !record.hadProtocol, !SCNetworkServiceAddProtocolType(service,kSCNetworkProtocolTypeProxies) { throw ProxyError("无法添加代理协议") }
             guard let proto = SCNetworkServiceCopyProtocol(service,kSCNetworkProtocolTypeProxies), SCNetworkProtocolSetConfiguration(proto,try dict(record.applied) as CFDictionary), SCNetworkProtocolSetEnabled(proto,true) else { throw ProxyError("无法设置系统代理") }
         }
-        requiredExceptions=try ProtectedDomainPolicy.exceptions(protectedDomains)
+        requiredExceptions=try ProtectedDomainPolicy.exceptions(protectedDomains)+exceptions
         ownedPort=port;ownershipMismatchCount=0
         monitoredSignature=signature()
         try commit(p)

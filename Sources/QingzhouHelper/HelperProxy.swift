@@ -2,13 +2,6 @@ import Foundation
 import SystemConfiguration
 import QingzhouKit
 
-struct HelperProxyRecord:Codable {
-    var service:String
-    var original:Data
-    var applied:Data
-    var enabled:Bool
-    var hadProtocol:Bool
-}
 extension Service {
     func verifyNoOwnedProxyEndpoint(_ records:[HelperProxyRecord]) throws {
         guard !records.isEmpty else{return}
@@ -36,8 +29,11 @@ extension Service {
             guard let id=SCNetworkServiceGetServiceID(service) else{continue}
             let proto=SCNetworkServiceCopyProtocol(service,kSCNetworkProtocolTypeProxies)
             let original=proto.flatMap{SCNetworkProtocolGetConfiguration($0) as? [String:Any]} ?? [:]
-            var applied=try ProxyRecovery.applied(to:original,port:port,protectedDomains:plan.domains)
-            let exceptions=(original["ExceptionsList"] as? [String] ?? [])+plan.exclusions+plan.protectedRoutes.map(\.destination)+plan.domains.flatMap{[$0,"*."+$0]}
+            var applied=try ProxyRecovery.applied(to:original,port:port)
+            let excluded=plan.exclusions.flatMap{NetworkBypass(kind:.cidr,value:$0).proxyExceptions}
+            let protected=plan.protectedRoutes.flatMap{NetworkBypass(kind:.cidr,value:$0.destination).proxyExceptions}
+            let domains=plan.domains.flatMap{[$0,"*."+$0]}
+            let exceptions=(plan.exactDomains ?? [])+excluded+protected+domains
             var ordered=original["ExceptionsList"] as? [String] ?? []
             for entry in exceptions where !ordered.contains(entry) {ordered.append(entry)}
             applied["ExceptionsList"]=ordered

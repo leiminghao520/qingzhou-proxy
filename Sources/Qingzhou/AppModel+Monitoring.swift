@@ -17,7 +17,7 @@ extension AppModel {
                 let hidden=NSApplication.shared.isHidden || NSApplication.shared.windows.filter{$0.canBecomeMain}.allSatisfy{!$0.isVisible || $0.isMiniaturized}
                 do {
                     // 生命周期检查不受“暂停监控”影响，待重连不是核心崩溃。
-                    if self.capture.activeMode?.usesTunnel == true {
+                    if self.capture.activeMode?.usesTunnel == true || self.capture.helperRunning {
                         let status=try await self.capture.helperStatus()
                         guard self.epoch==token,!Task.isCancelled else{return}
                         self.updateHelperNetworkStatus(status)

@@ -4,9 +4,11 @@ import QingzhouKit
 extension Service {
     // 路由查询可能命中同目标的接口缓存项；完整表中按作用域核对真实静态路由。
     func verifiedRoute(_ expected:ProtectedRoute,info:String) throws -> Bool {
-        if CaptureOwnership.matchesQuery(expected,info:info) {return true}
-        let actual=try routeSample().ownershipRoutes
-        return CaptureOwnership.recoveryState(expected:expected,actual:actual) == .owned
+        let actual=try sampledRoutes().ownershipRoutes
+        let state=CaptureOwnership.recoveryState(expected:expected,actual:actual)
+        if state == .owned {return true}
+        if state == .absent {return CaptureOwnership.matchesQuery(expected,info:info)}
+        return false
     }
     func addRoute(_ destination:String,_ gateway:String,_ interface:String,ipv6:Bool,scope:String?=nil,deadline:Date?=nil,preparationBypass:Bool=false) throws {
         if let info=try? routeInfo(destination,ipv6:ipv6,scope:scope,deadline:deadline),let current=prefix(info),NetworkInspection.samePrefix(current,destination),NetworkInspection.routeScopeMatches(scope,flags:field("flags",info),interface:field("interface",info)){
@@ -18,20 +20,29 @@ extension Service {
             };return
         }
         let expected=ProtectedRoute(destination:destination,gateway:gateway,interface:interface,scope:scope)
-        let beforeSample=try routeSample()
+        let beforeSample=try sampledRoutes()
         let before=beforeSample.ownershipRoutes
         let previous=CaptureOwnership.recoveryState(expected:expected,actual:before)
         // 查询可能命中缓存，写入前仍须防止认领完整表中已存在的外部路由。
         if previous == .owned {return}
         if previous == .replaced || previous == .ambiguous {throw ProxyError("路由前缀已有其他出口，未写入或认领："+destination)}
-        if CaptureOwnership.legacyHostRouteInTable(expected,table:beforeSample.table) {
+        if expected.ipv6,expected.destination.hasSuffix("/128"),CaptureOwnership.legacyHostRouteInTable(expected,table:beforeSample.table) {
             throw ProxyError("检测到旧版遗留的异常 IPv6 主机路由："+destination+"；未修改该项，需要先核对旧恢复记录并处理残留")
         }
+        // 使用本次写前采样阻止竞争接管，不能在 Shadowrocket 等已接管后继续铺设更具体捕获项。
+        if let tunnel=journal?.interface {
+            let foreign=NetworkRouteSample(routes:before.filter{$0.interface != tunnel})
+            if let reason=NetworkInspection.conflicts(vpn:"",routes:foreign.table,proxies:[:]) {
+                throw ProxyError("写入前发现其他隧道接管，停止本次事务并恢复自有内容："+reason)
+            }
+        }
+        try checkRouteOwner()
         let args=NetworkInspection.routeArguments(.add,destination:destination,gateway:gateway,ipv6:ipv6,scope:scope,interface:interface)
         let route=OwnedRoute(destination:destination,gateway:gateway,interface:interface,ipv6:ipv6,scope:scope)
         // 先记录意图再写路由；崩溃恢复仍通过当前网关和接口确认所有权。
         journal!.routes.append(route);try save()
         // 命令超时也可能已经写入路由，保留意图以便按所有权恢复。
+        try checkRouteOwner()
         let output=try writeRoute(args,deadline:deadline)
         guard !CaptureOwnership.routeWriteFailed(output) else {
             // 命令明确拒绝写入时不认领原有路由；超时等未知结果仍保留意图。
