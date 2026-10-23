@@ -409,18 +409,7 @@ return};var issues:[String]=[]
         guard request.preserveExternal != true || request.operation=="recover" else{throw ProxyError("保留外部网络仅用于用户恢复操作")}
         switch request.operation {case "status":
             if request.verifyNetwork==true,let record=journal,process?.isRunning==true {
-                let sample=try routeSample(),index=sample.identityIndex
-                let prefixes=record.captureRoutes ?? CaptureRoutePlan.legacyPrefixes
-                let tunnels=record.routes.filter{$0.interface==record.interface && prefixes.contains($0.destination)}
-                let verified=tunnels.count==prefixes.count && tunnels.allSatisfy{index.state(ProtectedRoute(destination:$0.destination,gateway:$0.gateway,interface:$0.interface,scope:$0.scope)) == .owned}
-                let current=SCDynamicStoreCopyValue(dynamic,record.dnsKey as CFString) as? NSDictionary
-                var reply=TunReply(ok:true,message:networkStatus,coreDiagnostics:coreDiagnostics.recent,running:true,routesVerified:verified,dnsVerified:dnsServiceIssues().isEmpty,proxyVerified:verifyProxy(),protectionVerified:verifyProtection(sample:sample),protectionSummary:networkSummary,phase:phase)
-                let states=record.routes.map{index.state(ProtectedRoute(destination:$0.destination,gateway:$0.gateway,interface:$0.interface,scope:$0.scope))}
-                // 缺失路径与外部替换分开报告，客户端不能把刚唤醒的空路径当作归属冲突。
-                if states.contains(.replaced) || states.contains(.ambiguous) || (activeRequest?.systemProxyPort != nil && !proxyConfigurationIssues().isEmpty) {reply.wakeRecoveryReason = .ownershipConflict}
-                else if !dnsServiceIssues().isEmpty {reply.wakeRecoveryReason = current==nil ? .networkNotReady:.ownershipConflict}
-                else if states.contains(.absent) {reply.wakeRecoveryReason = .networkNotReady}
-                return reply
+                return try wakeNetworkReply(record:record,sample:routeSample())
             }
             return TunReply(ok:true,message:networkStatus+(journal != nil && process==nil ? " · 存在待恢复记录":""),coreDiagnostics:process?.isRunning==true ? coreDiagnostics.recent:nil,running:helperIsRunning,protectionSummary:networkSummary,phase:phase)
         case "pinBypasses":

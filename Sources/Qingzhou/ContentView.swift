@@ -121,10 +121,6 @@ struct ContentView: View {
                 Divider().opacity(0.6)
 
                 if interfaceMode == .professional {
-                    if model.connection == .connecting,let stage=model.startupStage {
-                        ConnectionProgressView(stage:stage,startedAt:model.startupStartedAt)
-                            .lineLimit(2).frame(maxWidth:.infinity,alignment:.leading).padding(.horizontal,10)
-                    }
                     VStack(spacing: 8) {
                         HStack(spacing: 8) {
                             Circle()
@@ -163,6 +159,7 @@ struct ContentView: View {
                                         .contentShape(Capsule())
                                 }
                             }
+                            .frame(width:54,height:26)
                             .buttonStyle(.plain)
                             .contentShape(Capsule())
                             .disabled(model.stopDisabled || (model.state.activePolicy == nil && model.state.mode != .direct && model.connection != .connected) || (model.recoveryPending && model.connection != .connected))
@@ -195,11 +192,9 @@ struct ContentView: View {
                             Spacer(minLength:4)
                             if model.healthChecking {Text("检测中").font(.system(size:10)).foregroundStyle(.secondary)}
                         }
-                        if model.connection == .connected {
-                            OfficeRateLine(display:model.trafficDisplay,available:model.monitor.traffic == .available && !model.monitorPaused)
+                        OfficeRateLine(display:model.trafficDisplay,available:model.connection == .connected && model.monitor.traffic == .available && !model.monitorPaused)
                                 .font(.system(size:9,design:.monospaced)).monospacedDigit()
                                 .frame(maxWidth:.infinity,alignment:.leading).lineLimit(1).minimumScaleFactor(0.8)
-                        }
 
                     }
                     .padding(10)
@@ -229,6 +224,10 @@ struct ContentView: View {
                     )
                     .padding(24)
                 } else {
+                    if page != .home && page != .overview,model.connection == .connecting,let stage=model.startupStage {
+                        ConnectionProgressView(stage:stage,startedAt:model.startupStartedAt)
+                            .padding(.horizontal,24).padding(.top,16)
+                    }
                     content
                         .padding(24)
                 }

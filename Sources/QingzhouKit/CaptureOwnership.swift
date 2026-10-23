@@ -2,6 +2,12 @@ import Foundation
 
 public enum CaptureOwnership {
     public enum RecoveryRouteState:Equatable {case owned,absent,replaced,ambiguous}
+    // 运行核验允许同出口的企业主机路由被网段覆盖；删除恢复仍必须使用精确所有权。
+    public static func liveState(_ expected:ProtectedRoute,sample:NetworkRouteSample)->RecoveryRouteState {
+        let state=sample.identityIndex.state(expected)
+        if state == .absent && hasEquivalentHostPath(expected,actual:sample.ownershipRoutes) {return .owned}
+        return state
+    }
     public static func recoveryState(expected:ProtectedRoute,actual:[ProtectedRoute])->RecoveryRouteState {
         let matches=actual.filter{NetworkInspection.samePrefix($0.destination,expected.destination) && $0.scope==expected.scope}
         guard !matches.isEmpty else{return .absent}

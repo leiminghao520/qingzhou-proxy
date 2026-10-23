@@ -112,6 +112,26 @@ func sample(_ routes:[ProtectedRoute]) throws -> NetworkRouteSample {
         let host=ProtectedRoute(destination:"192.0.2.19/32",gateway:"192.0.2.1",interface:"en0",source:"用户网络绕过")
         try RouteProtectionBatch.run(protected:[host],bypass:[],baseline:writer.sampledRoutes(),read:writer.sampledRoutes,check:{},add:{r,bypass in try writer.addRoute(r.destination,r.gateway,r.interface,ipv6:r.ipv6,scope:r.scope,preparationBypass:bypass)})
         check(writer.writes==1 && writer.saves==2 && writer.journal?.routes.count==1,"写前保存与写后核验仍保留")
+        for queryAvailable in [true,false] {
+            let moving=Service()
+            let expected=ProtectedRoute(destination:queryAvailable ? "172.16.0.1/32":"172.16.0.0/12",gateway:"192.168.1.1",interface:"en0",source:"用户网络绕过")
+            var vpn=expected;vpn.gateway="10.251.1.1";vpn.interface="utun5"
+            let prepared=try sample([])
+            moving.table=[vpn];moving.lookupFailure = !queryAvailable
+            do {
+                try RouteProtectionBatch.run(protected:[expected],bypass:[],baseline:prepared,read:moving.sampledRoutes,check:{},add:{r,resample in
+                    try moving.addRoute(r.destination,r.gateway,r.interface,ipv6:r.ipv6,scope:r.scope,preparationBypass:resample)
+                })
+                check(false,"准备期间被 VPN 接管必须撤销旧计划")
+            } catch {check(error is NetworkEnvironmentNotReady,"查询和整表两条入口都返回可重采样类别")}
+            check(moving.writes==0 && moving.saves==0 && moving.journal?.routes.isEmpty==true,"发生竞争时不写入、不认领、不覆盖企业 VPN")
+            try RouteProtectionBatch.run(protected:[vpn],bypass:[],baseline:moving.sampledRoutes(),read:moving.sampledRoutes,check:{},add:{_,_ in check(false,"重采样应复用 VPN 原路由")})
+            check(moving.table==[vpn],"重新规划后保持 VPN 路由及出口")
+            do {
+                try RouteProtectionBatch.run(protected:[expected],bypass:[],baseline:try sample([expected]),read:{try sample([vpn])},check:{},add:{_,_ in check(false,"最终核验不能补写竞争路由")})
+                check(false,"最终核验期间出口变化仍须回滚")
+            } catch {check(error is NetworkEnvironmentNotReady,"最终核验的路由变化同样进入回滚重采样")}
+        }
         // 每个位置模拟进程退出后，仅使用已落盘意图重建恢复视图。
         for failure in ["intent","write","submitted","verify","commit"] {
             for position in 1...4 {

@@ -39,7 +39,7 @@ import QingzhouKit
         .defaultSize(width: 900, height: 680)
         .windowResizability(.contentMinSize)
 
-        MenuBarExtra("轻舟代理", systemImage: model.connection == .connected ? "paperplane.fill" : "paperplane") {
+        MenuBarExtra {
             Text("\(model.connectionSummary) · \(model.state.mode.label)")
             Text(model.actualName + " · " + model.state.captureMode.label)
             OfficeMenuHealth(office:model.office,hasCorporate:!model.state.protectedDomains.isEmpty || !model.state.enabledBypasses.isEmpty)
@@ -52,7 +52,7 @@ import QingzhouKit
                 }.disabled(model.locked)
             }
             if model.connection == .connected {
-                OfficeRateLine(display:model.trafficDisplay,available:model.monitor.traffic == .available && !model.monitorPaused)
+                OfficeMenuRateLine(display:model.trafficDisplay.menu,available:model.monitor.traffic == .available && !model.monitorPaused && !model.networkReconnecting)
             }
             Button(model.connection == .connected ? "断开" : model.connection == .connecting ? "取消连接" : "连接") {
                 Task {
@@ -89,6 +89,8 @@ import QingzhouKit
                 NSApplication.shared.windows.first { $0.canBecomeMain }?.makeKeyAndOrderFront(nil)
             }
             Button("退出轻舟代理") { NSApplication.shared.terminate(nil) }
+        } label: {
+            OfficeMenuBarLabel(display:model.trafficDisplay.menu,connected:model.connection == .connected,available:model.monitor.traffic == .available && !model.monitorPaused && !model.networkReconnecting)
         }
     }
     @ViewBuilder private var advancedMenuActions: some View {

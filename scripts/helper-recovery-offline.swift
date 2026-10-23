@@ -34,6 +34,7 @@ final class RecoveryBackend:RouteBackend {
     static func check(_ condition:Bool,_ message:String){count+=1;if !condition{fatalError(message)}}
     static func main() throws {
         guard geteuid() != 0 else {throw ProxyError("离线恢复夹具禁止管理员身份")}
+        try wakeVerificationChecks()
         for scenario in ["success","queryTimeout","unknownWrite","snapshotFailure","externalRewrite","ambiguous","verifyFailure","restart"] {
             let root=FileManager.default.temporaryDirectory.appendingPathComponent("qz-recovery-offline-"+UUID().uuidString)
             try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true)
@@ -127,5 +128,66 @@ final class RecoveryBackend:RouteBackend {
             check(explicit.ok && service.networkResumeSession==nil,"显式用户恢复仍可取消辅助服务重建")
         }
         print("HELPER_RECOVERY_OFFLINE_OK assertions=\(count) privilegedCalls=0 routeSockets=0")
+    }
+}
+
+extension RecoveryChecks {
+    static func wakeVerificationChecks() throws {
+        let root=FileManager.default.temporaryDirectory.appendingPathComponent("qz-wake-verification-"+UUID().uuidString)
+        try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true)
+        defer {try? FileManager.default.removeItem(at:root)}
+        let backend=RecoveryBackend()
+        let service=Service(fixtureRoot:root,backend:backend)
+        let expected=try DNSServiceTransaction.encode(["ServerAddresses":["127.0.0.1"]])
+        var values:[String:NSDictionary]=["main":["ServerAddresses":["127.0.0.1"]],"corporate":["ServerAddresses":["127.0.0.1"]]]
+        service.networkDNSRead={values[$0]}
+        let tunnels=[ProtectedRoute(destination:"0.0.0.0/1",gateway:"100.64.0.1",interface:"utun42"),ProtectedRoute(destination:"128.0.0.0/1",gateway:"100.64.0.1",interface:"utun42")]
+        let host=ProtectedRoute(destination:"10.20.30.40/32",gateway:"10.1.0.1",interface:"utun9")
+        let parent=ProtectedRoute(destination:"10.0.0.0/8",gateway:host.gateway,interface:host.interface)
+        let snapshot=NetworkSnapshot(primaryInterface:"en0",routes:[parent],resolvers:[DNSResolverScope(service:"fixture",interface:"en0",servers:["192.0.2.1"])])
+        service.capturePlan=try CapturePlan.make(snapshot:snapshot,extraCIDRs:[],extraDomains:[])
+        var record=Journal(captureRoutes:tunnels.map(\.destination),dnsServices:[DNSServiceRecord(key:"corporate",expected:expected,original:nil)],dnsKey:"main",previousDNS:nil,expectedDNS:expected,address4:"",address6:"")
+        record.interface="utun42";record.routes=(tunnels+[host]).map{OwnedRoute(destination:$0.destination,gateway:$0.gateway,interface:$0.interface,ipv6:false)}
+        service.journal=record
+        func reply(_ routes:[ProtectedRoute],proxy:(issues:[String],verified:Bool)?=nil) throws -> TunReply {try service.wakeNetworkReply(record:record,sample:NetworkRouteSample(routes:routes),proxySample:proxy)}
+        let live=tunnels+[parent]
+        var status=try reply(live)
+        check(status.wakeRecoveryReason==nil && status.routesVerified==true && status.protectionVerified==true,"同接口同网关的企业主机缓存回收后仍通过唤醒核验")
+        let local=ProtectedRoute(destination:"192.168.10.0/24",gateway:"link#11",interface:"en0")
+        var other=local;other.gateway="link#12";other.interface="en1"
+        service.capturePlan!.protectedRoutes.append(local)
+        check(try reply(live+[local,other]).protectionVerified==true,"原系统路径继续使用存在性核验，不认领未写入的系统路由")
+        check(try reply(live+[local,other]).wakeRecoveryReason==nil,"未写入的原系统路径不扩大成自有路由所有权冲突")
+        record.routes.append(OwnedRoute(destination:local.destination,gateway:local.gateway,interface:local.interface,ipv6:false))
+        check(try reply(live+[local,other]).wakeRecoveryReason == .ownershipConflict,"同样的竞争发生在轻舟实际写入项时仍拒绝")
+        record.routes.removeLast();service.capturePlan!.protectedRoutes.removeLast()
+        let linkLocal=ProtectedRoute(destination:"fe80::/64",gateway:"link#11",interface:"en0",scope:"en0")
+        let awdl=ProtectedRoute(destination:"fe80::f8ff:57ff:fe17:5707/128",gateway:"link#14",interface:"awdl0",scope:"awdl0")
+        let bypass=try BypassRoutePlan.capture(destinations:["fe80::/10"],existingPrefixes:[],hasIPv6:true,existingRoutes:[linkLocal,awdl],lookup:{_,_ in throw ProxyError("夹具禁止系统查询")})
+        check(bypass.preservedRoutes==[linkLocal],"广域链路本地绕过不冻结 AWDL 临时主机路由")
+        try bypass.validatePreservedRoutes([linkLocal])
+        check(bypass.routes.isEmpty,"AWDL 临时主机消失不生成任何全局绕过路由")
+        let explicit=try BypassRoutePlan.capture(destinations:[awdl.destination],existingPrefixes:[],hasIPv6:true,existingRoutes:[awdl],lookup:{_,_ in throw ProxyError("夹具禁止系统查询")})
+        check(explicit.preservedRoutes==[awdl],"显式主机目标仍保持原接口核验")
+        check(NetworkRouteSample(routes:live).identityIndex.state(host) == .absent,"运行等价路径不能授予删除恢复的精确所有权")
+        var foreign=host;foreign.interface="utun8"
+        check(try reply(live+[foreign]).wakeRecoveryReason == .ownershipConflict,"同前缀被外部改写仍立即拒绝")
+        check(try reply(live+[host,foreign]).wakeRecoveryReason == .ownershipConflict,"等长竞争不能用网段覆盖掩盖")
+        check(try reply(tunnels).wakeRecoveryReason == .networkNotReady,"保护路由暂缺进入有限恢复而非伪造归属冲突")
+        values.removeValue(forKey:"corporate");status=try reply(live)
+        check(status.wakeRecoveryReason == .networkNotReady && status.dnsVerified==false,"主 DNS 仍在而补充 DNS 暂缺时不误判为外部改写")
+        check(status.message.contains("DNS 服务暂缺") && !status.message.contains("corporate"),"记录具体失败类别但不输出企业 DNS 标识")
+        values["corporate"]=["ServerAddresses":["192.0.2.2"]]
+        check(try reply(live).wakeRecoveryReason == .ownershipConflict,"补充 DNS 被外部替换仍停止竞争")
+        values["corporate"]=values["main"]
+        record.dnsServices![0].expected=Data("invalid".utf8)
+        check(try reply(live).wakeRecoveryReason == .unverified,"不可读快照只报告未验证，不能证明外部改写")
+        record.dnsServices![0].expected=expected
+        service.activeRequest=TunRequest(operation:"prepare",systemProxyPort:7890)
+        status=try reply(live,proxy:([],false))
+        check(status.wakeRecoveryReason == .networkNotReady && status.proxyVerified==false,"代理服务配置不变但汇总发布延迟时进入有限恢复")
+        check(try reply(live,proxy:(["代理端口发生外部修改"],false)).wakeRecoveryReason == .ownershipConflict,"明确代理配置变化仍停止自动恢复")
+        check(try reply(live,proxy:([],true)).wakeRecoveryReason==nil,"汇总代理重新发布后直接核验通过")
+        check(backend.writes==0,"唤醒只读核验不写任何路由")
     }
 }

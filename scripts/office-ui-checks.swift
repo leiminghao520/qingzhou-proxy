@@ -134,6 +134,16 @@ private final class OfficeControlProtocol:URLProtocol {
         try check(modelChanges==0 && trafficChanges==30,"速率采样不广播整个应用模型，单次采样仅发布一次")
         let rateModelPublications=modelChanges,rateTrafficPublications=trafficChanges
         withExtendedLifetime([modelSubscription,trafficSubscription]) {}
+        let menuTime=Date(),pagePublications=trafficChanges,appPublications=modelChanges
+        model.trafficDisplay.menu.receive(upload:1024,download:2048,now:menuTime)
+        try check(model.trafficDisplay.menu.sample.download==2048 && trafficChanges==pagePublications && modelChanges==appPublications,"菜单栏速率发布不刷新页面和整个应用模型")
+        model.trafficDisplay.menu.receive(upload:9999,download:9999,now:menuTime.addingTimeInterval(0.5))
+        try check(model.trafficDisplay.menu.sample.download==2048,"菜单栏不会随核心高频采样反复发布")
+        model.trafficDisplay.menu.receive(upload:4096,download:8192,now:menuTime.addingTimeInterval(1))
+        try check(model.trafficDisplay.menu.sample.download==8192,"独立菜单栏在下一秒更新，不等待后台页面的五秒周期")
+        model.trafficDisplay.menu.reset()
+        try check(model.trafficDisplay.menu.sample==OfficeMenuTrafficSample(),"断开和失去采样时清除菜单栏旧速率")
+        withExtendedLifetime([modelSubscription,trafficSubscription]) {}
         // 使用 URLProtocol 模拟核心；不启动核心、设置系统代理或联系辅助服务。
         let control=CoreAPIClient(context:try CoreControlContext.make(),protocolClasses:[OfficeControlProtocol.self])
         var connectivityChecks=0
@@ -204,6 +214,17 @@ private final class OfficeControlProtocol:URLProtocol {
         try await capture("office-home-accessibility")
         window.setContentSize(NSSize(width:1040,height:760))
         host.rootView=AnyView(OverviewView(model:model).padding(20));try await capture("office-overview")
+        preferences.set("professional",forKey:"interfaceMode")
+        host.rootView=AnyView(root);await settle(100)
+        model.connection = .connecting;model.busy=true;model.startupStage="准备核心";model.startupStartedAt=ProcessInfo.processInfo.systemUptime
+        try await capture("office-sidebar-connecting")
+        model.startupStage="核验企业网络与绕过路由"
+        try await capture("office-sidebar-connecting-long-stage")
+        model.connection = .connected;model.busy=false;model.startupStage=nil
+        try await capture("office-sidebar-connected")
+        model.trafficDisplay.menu.receive(upload:1048576,download:2097152,now:Date())
+        host.rootView=AnyView(OfficeMenuBarLabel(display:model.trafficDisplay.menu,connected:true,available:true).padding(20))
+        try await capture("office-menu-traffic")
         host.rootView=AnyView(DeveloperProxyAssistantView(port:7890,configuredDomains:["internal.example"],cidrs:["10.0.0.0/8"]))
         try await capture("office-developer-tools")
         host.rootView=AnyView(ProfilesView(model:model).padding(20));try await capture("office-profiles")

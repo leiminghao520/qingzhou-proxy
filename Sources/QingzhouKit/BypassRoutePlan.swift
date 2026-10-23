@@ -30,6 +30,8 @@ public struct BypassRoutePlan:Sendable {
                 guard hasIPv6 else {continue}
                 let candidates=existingRoutes.filter {route in
                     guard route.scope==route.interface,let prefix=IPPrefix(route.destination),IPPrefix("fe80::/10")!.contains(prefix) else {return false}
+                    // 广域链路本地绕过只保留接口网段；AWDL 的临时主机项会随屏幕和邻居状态消失。
+                    if target.bits<128 && prefix.bits==128 {return false}
                     return prefix.overlaps(target)
                 }
                 guard !candidates.isEmpty else {throw ProxyError("链路本地绕过项 "+destination+" 缺少原接口作用域路由，未接管网络")}

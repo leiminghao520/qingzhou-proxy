@@ -78,7 +78,8 @@ public enum RouteProtectionBatch {
         for route in protected where route.scope != nil || route.source=="用户网络绕过" {
             try check()
             var global=route;global.scope=nil
-            if index.state(global) != .owned {try add(global,false)}
+            // 这些路径来自本轮系统快照；写入前出口变化应回滚重采样，不能覆盖新出口。
+            if index.state(global) != .owned {try add(global,true)}
         }
         for route in bypass {
             try check()
@@ -89,10 +90,10 @@ public enum RouteProtectionBatch {
             let final=RouteIdentityIndex(try read().ownershipRoutes)
             for route in protected+bypass {
                 try check()
-                guard final.state(route) == .owned else {throw ProxyError("接管前保护路径核验失败："+route.destination)}
+                guard final.state(route) == .owned else {throw NetworkEnvironmentNotReady("接管前保护路径变化，需要重新采样："+route.destination)}
                 if route.scope != nil {
                     var global=route;global.scope=nil
-                    guard final.state(global) == .owned else {throw ProxyError("全局保护路径核验失败："+route.destination)}
+                    guard final.state(global) == .owned else {throw NetworkEnvironmentNotReady("全局保护路径变化，需要重新采样："+route.destination)}
                 }
             }
         }

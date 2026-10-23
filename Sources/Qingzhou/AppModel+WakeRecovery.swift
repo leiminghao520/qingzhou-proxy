@@ -108,14 +108,20 @@ extension AppModel {
         if state.captureMode.usesTunnel || capture.helperRunning {
             do {
                 let status=try await capture.wakeStatus()
+                if status.wakeRecoveryReason != nil {log("唤醒网络核验："+Redactor.redact(status.message))}
                 if status.networkReconnecting || (status.phase=="networkRetry" && state.pinnedBypasses.isEmpty) {return .helperRecovering}
-                if let reason=status.wakeRecoveryReason {return reason.terminal ? .stop(reason):.failed(reason)}
+                if let reason=status.wakeRecoveryReason {
+                    if [.unverified,.timeout].contains(reason) {return .inconclusive(reason)}
+                    if reason == .helperRecovery {return .helperRecovering}
+                    return reason.terminal ? .stop(reason):.failed(reason)
+                }
                 if status.phase=="networkProtectionFailed" {return .stop(.ownershipConflict)}
                 if status.networkNotReady==true {return .failed(.networkNotReady)}
                 // 旧辅助服务缺少核验结果时不能据此认领或重建网络。
                 if status.running && state.captureMode.usesTunnel {
                     let checks=[status.routesVerified,status.dnsVerified,status.protectionVerified]+(state.captureMode == .compatible ? [status.proxyVerified]:[])
-                    if checks.contains(where:{$0==false}) {return .stop(.ownershipConflict)}
+                    // 旧服务的失败布尔值不能证明外部所有权；保持会话且不据此重建。
+                    if checks.contains(where:{$0==false}) {return .inconclusive(.unverified)}
                     if checks.contains(where:{$0==nil}) {return .inconclusive(.unverified)}
                     if !wakeNetworkReady() {return .failed(.networkNotReady)}
                 } else if !status.running {return .stop(.configuration)}

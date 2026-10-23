@@ -321,7 +321,11 @@ import QingzhouKit
                 let status=try await capture.wakeStatus()
                 try self.checkStartup(generation)
                 guard status.running else {throw ProxyError("TUN 保护流程已停止核心："+status.message)}
-                guard status.routesVerified==true,status.dnsVerified==true,status.protectionVerified==true,(next.captureMode != .compatible || status.proxyVerified==true) else {throw WakeRecoveryError(.ownershipConflict)}
+                guard status.routesVerified==true,status.dnsVerified==true,status.protectionVerified==true,(next.captureMode != .compatible || status.proxyVerified==true) else {
+                    log("接管核验未通过：routes=\(String(describing:status.routesVerified)) dns=\(String(describing:status.dnsVerified)) protection=\(String(describing:status.protectionVerified)) proxy=\(String(describing:status.proxyVerified)) reason=\(status.wakeRecoveryReason?.rawValue ?? "unverified")；"+Redactor.redact(status.message))
+                    if status.wakeRecoveryReason == .networkNotReady {throw NetworkEnvironmentNotReady(status.message)}
+                    throw ProxyError("接管核验未通过："+status.message+"；"+(status.wakeRecoveryReason?.label ?? "保护状态未验证"))
+                }
                 guard StartupConnectivityPolicy.allows(captured,mode:next.mode) else {throw wakeStartupError(captured)}
             }
             timing.begin("systemProxyActivation")

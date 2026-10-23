@@ -72,6 +72,7 @@ extension AppModel {
             await TrafficMonitor.run(connect: { try await trafficStream(client) }, receive: { [weak self] rate in
                 guard let self, !Task.isCancelled, self.epoch==token else { return }
                 if self.monitor.traffic != .available { self.monitor.traffic = .available }
+                if !self.monitorPaused {self.trafficDisplay.menu.receive(upload:rate.up,download:rate.down,now:Date())}
                 let hidden=NSApplication.shared.isHidden || NSApplication.shared.windows.filter{$0.canBecomeMain}.allSatisfy{!$0.isVisible || $0.isMiniaturized}
                 if !self.monitorPaused && Date().timeIntervalSince(last)>=OfficeTelemetryCadence.traffic(hidden:hidden) {
                     last=Date();self.trafficDisplay.receive(upload:rate.up,download:rate.down,now:last)
@@ -79,6 +80,7 @@ extension AppModel {
             }, disconnected: { [weak self] in
                 guard let self, !Task.isCancelled, self.epoch==token else { return }
                 self.monitor.traffic = .unavailable
+                self.trafficDisplay.menu.reset()
                 self.uploadRate=0;self.downloadRate=0;last = .distantPast
             })
         }
@@ -122,7 +124,7 @@ extension AppModel {
         }
     }
 
-    func stopTelemetry() {verifiedSelectionTag=nil;history.finish();networkReconnecting=false;cancelHealthRefresh();epoch=UUID();connectivityEpoch=UUID();healthRefreshPending=false;healthTask?.cancel();healthTask=nil;telemetryTask?.cancel();connectionListTask?.cancel();policyTask?.cancel();trafficTask?.cancel();telemetryTask=nil;connectionListTask=nil;policyTask=nil;trafficTask=nil;if let old=api{Task{await old.shutdown()}};api=nil;connections=[];proxyInfo=[:];uploadRate=0;downloadRate=0;uploadTotal=0;downloadTotal=0;monitor=RuntimeMonitorState()}
+    func stopTelemetry() {trafficDisplay.menu.reset();verifiedSelectionTag=nil;history.finish();networkReconnecting=false;cancelHealthRefresh();epoch=UUID();connectivityEpoch=UUID();healthRefreshPending=false;healthTask?.cancel();healthTask=nil;telemetryTask?.cancel();connectionListTask?.cancel();policyTask?.cancel();trafficTask?.cancel();telemetryTask=nil;connectionListTask=nil;policyTask=nil;trafficTask=nil;if let old=api{Task{await old.shutdown()}};api=nil;connections=[];proxyInfo=[:];uploadRate=0;downloadRate=0;uploadTotal=0;downloadTotal=0;monitor=RuntimeMonitorState()}
 
     func closeConnection(_ id:String?) async {guard !locked,let api else{return};do{if let id{try await api.closeConnection(id)}else{try await api.closeAllConnections()}}catch{report(error)}}
     func aggregate(_ rows:[CoreConnection]) {

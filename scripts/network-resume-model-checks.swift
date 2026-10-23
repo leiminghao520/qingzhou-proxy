@@ -255,12 +255,20 @@ final class WakeModelProtocol:URLProtocol {
             reply.phase="active";reply.wakeRecoveryReason = .networkNotReady;reply.routesVerified=false
             await inspect(.failed(.networkNotReady),"唤醒路径暂缺不当作外部归属冲突")
             reply.wakeRecoveryReason = .ownershipConflict;await inspect(.stop(.ownershipConflict),"真实替换立即停止")
+            reply.wakeRecoveryReason = .unverified;await inspect(.inconclusive(.unverified),"明确未验证不能进入网络重建")
+            reply.wakeRecoveryReason = .timeout;await inspect(.inconclusive(.timeout),"明确核验超时只降级")
+            reply.wakeRecoveryReason = .helperRecovery;await inspect(.helperRecovering,"明确辅助服务恢复原因继续等待")
             reply.wakeRecoveryReason=nil;reply.networkNotReady=true;await inspect(.failed(.networkNotReady),"兼容旧暂态错误字段")
-            reply.networkNotReady=nil;await inspect(.stop(.ownershipConflict),"缺少结构化暂态证据时保持保守")
+            reply.networkNotReady=nil;await inspect(.inconclusive(.unverified),"缺少结构化冲突证据时只降级，不认领或重建网络")
             reply.routesVerified=nil;await inspect(.inconclusive(.unverified),"旧服务未返回核验值不能认领网络")
             reply.routesVerified=true;reply.running=false;await inspect(.stop(.configuration),"辅助会话已停止时不能发布恢复成功")
             reply.running=true;model.state.captureMode = .compatible;reply.proxyVerified=false
-            await inspect(.stop(.ownershipConflict),"完整接管还核对系统代理所有权")
+            await inspect(.inconclusive(.unverified),"旧服务只有代理失败布尔值时不能证明外部接管")
+            reply.wakeRecoveryReason = .networkNotReady
+            await inspect(.failed(.networkNotReady),"完整接管的代理发布延迟进入有限恢复")
+            reply.wakeRecoveryReason = .ownershipConflict
+            await inspect(.stop(.ownershipConflict),"明确的代理外部修改仍立即停止")
+            reply.wakeRecoveryReason=nil
             reply.proxyVerified=true;model.wakeNetworkReady={false};await inspect(.failed(.networkNotReady),"物理网络延迟就绪进入确认而非冲突")
             model.wakeNetworkReady={true};model.busy=true;await inspect(.helperRecovering,"旧重建尚未收尾时不并发探测")
             model.busy=false;await model.api?.shutdown();model.api=nil;await inspect(.failed(.controlUnavailable),"控制客户端缺失不伪报节点失败")
