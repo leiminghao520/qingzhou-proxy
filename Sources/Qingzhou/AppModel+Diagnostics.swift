@@ -32,7 +32,7 @@ extension AppModel {
                 return [DiagnosticResult("辅助服务",status.running ? "通过":"未验证","独立只读通道；当前代理通道保持不变",code:status.running ? "helperRunning":"helperStopped"),
                         DiagnosticResult("TUN 路由",status.routesVerified==true ? "通过":status.running ? "失败":"未验证","按当前接管记录核验",code:status.routesVerified==true ? "routeVerified":"routeUnverified"),
                         DiagnosticResult("TUN DNS",status.dnsVerified==true ? "通过":status.running ? "失败":"未验证","按当前 DNS 所有权核验",code:status.dnsVerified==true ? "dnsVerified":"dnsUnverified"),
-                        DiagnosticResult("内网保护",status.protectionVerified==true ? "通过":status.running ? "失败":"未验证","内网保护状态核验",code:status.protectionVerified==true ? "protectionVerified":"protectionUnverified")]
+                        DiagnosticResult("内网保护",status.protectionVerified==true ? "通过":status.running ? "失败":"未验证","内网保护状态核验",code:status.protectionVerified==true ? "protectionVerified":"protectionUnverified")]+(status.corporateDNSDiagnostics ?? []).map(\.result)
             }catch {return [DiagnosticResult("辅助服务","未验证","无法完成本次辅助服务核验",code:error is CancellationError ? "cancelled":"helperUnavailable")]}
         })
         jobs.append(DiagnosticJob("HTTPS 与代理入口") {

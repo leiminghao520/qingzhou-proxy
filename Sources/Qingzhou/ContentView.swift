@@ -196,7 +196,7 @@ struct ContentView: View {
                             if model.healthChecking {Text("检测中").font(.system(size:10)).foregroundStyle(.secondary)}
                         }
                         if model.connection == .connected {
-                            Text("↑ \(model.uploadRateText)  ↓ \(model.downloadRateText)")
+                            OfficeRateLine(display:model.trafficDisplay,available:model.monitor.traffic == .available && !model.monitorPaused)
                                 .font(.system(size:9,design:.monospaced)).monospacedDigit()
                                 .frame(maxWidth:.infinity,alignment:.leading).lineLimit(1).minimumScaleFactor(0.8)
                         }
@@ -240,6 +240,17 @@ struct ContentView: View {
         .onAppear {
             page = interfaceMode == .simple ? .home : .overview
         }
+        .onReceive(model.office.$diagnosticRequested) {requested in
+            if requested {Task {@MainActor in model.office.diagnosticRequested=false;utility = .diagnostics;NSApplication.shared.activate(ignoringOtherApps:true);NSApplication.shared.windows.first{$0.canBecomeMain}?.makeKeyAndOrderFront(nil)}}
+        }
+        .onReceive(model.office.$linesRequested) {requested in
+            if requested {Task {@MainActor in model.office.linesRequested=false;page=interfaceMode == .simple ? .lines:.nodes;NSApplication.shared.activate(ignoringOtherApps:true);NSApplication.shared.windows.first{$0.canBecomeMain}?.makeKeyAndOrderFront(nil)}}
+        }
+        .onReceive(model.office.$developerRequested) {requested in
+            if requested {Task {@MainActor in model.office.developerRequested=false;utility = .developer;NSApplication.shared.activate(ignoringOtherApps:true);NSApplication.shared.windows.first{$0.canBecomeMain}?.makeKeyAndOrderFront(nil)}}
+        }
+        .onReceive(NotificationCenter.default.publisher(for:NSApplication.didBecomeActiveNotification)) {_ in model.requestOfficeRefresh()}
+        .onReceive(NotificationCenter.default.publisher(for:NSApplication.didResignActiveNotification)) {_ in model.requestOfficeRefresh()}
         .onChange(of: interfaceMode) { _, mode in
             page = mode == .simple ? .home : .overview
         }
@@ -254,6 +265,7 @@ struct ContentView: View {
                 }.padding(20)
                 Divider()
                 if destination == .settings { SettingsView(model: model) }
+                else if destination == .developer {DeveloperProxyAssistantView(port:model.state.listenPort,configuredDomains:model.state.protectedDomains,cidrs:model.state.tunExcludedCIDRs)}
                 else { DiagnosticsView(model: model).padding(24) }
             }
             .frame(minWidth: 1000, minHeight: 680)

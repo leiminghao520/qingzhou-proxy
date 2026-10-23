@@ -18,29 +18,9 @@ struct OverviewView: View {
                     ConnectionProgressView(stage:stage,startedAt:model.startupStartedAt)
                 }
 
-                if !model.protectionSummary.isEmpty || !model.connectivityResults.isEmpty {
-                    DisclosureGroup("保护与连通性详情") {
-                        VStack(alignment:.leading,spacing:6) {
-                            ForEach(Array(model.protectionSummary.enumerated()),id:\.offset) {_,text in Text(text).textSelection(.enabled)}
-                            ForEach(Array(model.connectivityResults.enumerated()),id:\.offset) {_,result in Text(result.summary).textSelection(.enabled)}
-                        }.font(.caption).frame(maxWidth:.infinity,alignment:.leading)
-                    }
-                }
-
+                OfficeLiveRateCards(display:model.trafficDisplay,available:model.monitor.traffic == .available && !model.monitorPaused)
                 // 速率与会话统计卡片
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)], spacing: 14) {
-                    ModernStatCard(
-                        title: "实时下载速率",
-                        value: model.downloadRateText,
-                        icon: "arrow.down.circle.fill",
-                        iconColor: Theme.trafficDownload
-                    )
-                    ModernStatCard(
-                        title: "实时上传速率",
-                        value: model.uploadRateText,
-                        icon: "arrow.up.circle.fill",
-                        iconColor: Theme.trafficUpload
-                    )
                     ModernStatCard(
                         title: "本次会话流量",
                         value: bytes(model.downloadTotal + model.uploadTotal),
@@ -58,7 +38,7 @@ struct OverviewView: View {
                 }
 
                 // 最近速率曲线
-                RateChart(samples: model.rateHistory)
+                OfficeRateChart(display:model.trafficDisplay)
 
                 // 快捷操作
                 VStack(alignment: .leading, spacing: 12) {
@@ -91,9 +71,9 @@ struct OverviewView: View {
                         .disabled(model.locked)
 
                         Button {
-                            model.copyTerminalProxy()
+                            model.office.developerRequested=true
                         } label: {
-                            Label("复制终端代理命令", systemImage: "terminal")
+                            Label("终端代理助手", systemImage: "terminal")
                         }
                         .buttonStyle(.bordered)
                     }
@@ -197,11 +177,11 @@ struct OverviewView: View {
                             Circle()
                                 .fill(allPassed ? Theme.connectedGreen : (anyFailed ? Theme.amberAccent : Color.secondary))
                                 .frame(width: 6, height: 6)
-                            Text(model.connectivityHealth == .healthy ? "链路正常" : model.connectivityHealth == .unhealthy ? "链路异常" : model.connectivityHealth == .checking ? "检测中" : "无法确定")
+                            Text(model.linkStatusLabel)
                                 .font(.system(size: 11, weight: .medium))
                                 .foregroundStyle(allPassed ? Theme.connectedGreen : (anyFailed ? Theme.amberAccent : Color.secondary))
                                 .lineLimit(1)
-                                .frame(width: 48, alignment: .leading)
+                                .frame(width: 72, alignment: .leading)
 
                         }
                         .padding(.horizontal, 6)

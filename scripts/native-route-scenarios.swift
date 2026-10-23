@@ -93,6 +93,14 @@ extension Checks {
         let node=try BypassRoutePlan.capture(destinations:["198.51.100.7/32"],existingPrefixes:[],hasIPv6:false,lookup:{_,_ in RouteRecord(route:default4,flags:3).queryText})
         let nodeCapture=try CaptureRoutePlan.make(plan:emptyPlan,bypass:node,baseline:sample)
         check(!nodeCapture.captures("198.51.100.7") && nodeCapture.captures("198.51.100.8"),"节点地址精确排除，邻接公网仍捕获")
+        let enterprise=ProtectedRoute(destination:"198.51.100.0/24",gateway:"10.20.0.1",interface:"utun6")
+        let physicalChild=ProtectedRoute(destination:"198.51.100.128/25",gateway:default4.gateway,interface:default4.interface)
+        let fragmentSample=NetworkRouteSample(records:[default4,enterprise,physicalChild].map{RouteRecord(route:$0,flags:UInt32(RTF_UP|RTF_GATEWAY))})
+        var fragmentPlan=plan;fragmentPlan.protectedRoutes=[enterprise]
+        let fragmentBypass=try BypassRoutePlan.capture(destinations:[physicalChild.destination],existingPrefixes:[],hasIPv6:false,lookup:{_,_ in RouteRecord(route:physicalChild,flags:UInt32(RTF_UP|RTF_GATEWAY)).queryText})
+        let fragments=try CaptureRoutePlan.make(plan:fragmentPlan,bypass:fragmentBypass,baseline:fragmentSample)
+        check(!fragments.captures("198.51.100.1") && !fragments.captures("198.51.100.129"),"物理子网排除产生的更具体捕获碎片不能覆盖原企业路由")
+        check(fragments.exclusions.contains(enterprise.destination),"相交时继续差集直到原企业出口优先")
         let exclusions=["10.0.0.0/8","172.16.0.0/12","192.168.0.0/16","127.0.0.0/8","2001:db8::/32","fc00::/7"]
         let capture=try CaptureRoutePlan(exclusions:exclusions)
         let excluded=exclusions.compactMap(IPPrefix.init)

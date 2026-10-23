@@ -59,26 +59,8 @@ public enum ConnectivityProbe {
         }catch{return ConnectivityResult(title,.failed,ConnectivityResult.category(error))}
     }
     public static func node(client:CoreAPIClient,mode:ProxyMode) async -> ConnectivityResult {
-        let title="当前节点通道检测"
-        if mode == .direct{return ConnectivityResult(title,.notApplicable,"全部直连模式")}
-        do {
-            let proxies=try await client.proxies()
-            guard let tag=CoreAPIClient.actualTag(proxies) else{return ConnectivityResult(title,.failed,"控制接口缺少实际节点")}
-            if tag=="direct" || tag=="reject"{return ConnectivityResult(title,.notApplicable,"当前策略未选择节点")}
-            guard tag.hasPrefix("node-"),let id=UUID(uuidString:String(tag.dropFirst(5))) else{return ConnectivityResult(title,.failed,"控制接口节点格式")}
-            switch await client.measureNode(id) {
-            case .success(let delay):
-                guard !Task.isCancelled else { return ConnectivityResult(title,.failed,"取消") }
-                return ConnectivityResult(title,.passed,"强制当前节点 HTTPS（双目标）",milliseconds:delay)
-            case .failure(let failures):
-                guard !Task.isCancelled else { return ConnectivityResult(title,.failed,"取消") }
-                if failures.count == 2 && failures.allSatisfy({["节点通道","超时"].contains($0)}) {
-                    _=try await client.proxies()
-                    return ConnectivityResult(title,.failed,"节点通道")
-                }
-                return ConnectivityResult(title,.failed,failures.first(where:{!["节点通道","超时"].contains($0)}) ?? "无法确定")
-            }
-        }catch{return ConnectivityResult(title,.failed,ConnectivityResult.category(error))}
+        // 日常、启动与唤醒共用分类，超时不能升级为已确认的节点失效。
+        await wakeNode(client:client,mode:mode)
     }
     public static func wakeNode(client:CoreAPIClient,mode:ProxyMode) async -> ConnectivityResult {
         let title="当前节点通道检测"
@@ -98,7 +80,7 @@ public enum ConnectivityProbe {
             }
         }catch{
             let category=ConnectivityResult.category(error)
-            return ConnectivityResult(title,.failed,["鉴权","超时","取消"].contains(category) ? category:"无法确定")
+            return ConnectivityResult(title,.failed,category)
         }
     }
     public static func all(port:Int?,client:CoreAPIClient,mode:ProxyMode,protocolClasses:[AnyClass]?=nil) async -> [ConnectivityResult] {
@@ -116,5 +98,24 @@ public enum ConnectivityHealth:String,Sendable {
         if results.contains(where:{$0.status == .pending}) {return .checking}
         if results.contains(where:{$0.status == .passed}) && results.allSatisfy({$0.status == .passed || $0.status == .notApplicable}) {return .healthy}
         return .unknown
+    }
+}
+
+// 网站响应与接管安全分开判断；本地监听、核心和网络所有权仍由启动流程强制核验。
+public enum StartupConnectivityPolicy {
+    public static func allows(_ results:[ConnectivityResult],mode:ProxyMode)->Bool {
+        guard results.count==3 else{return false}
+        if ConnectivityHealth.evaluate(results) == .healthy {return true}
+        guard mode != .direct,results.count==3,results[1].status == .passed else{return false}
+        let paths=[results[0],results[2]]
+        guard paths.allSatisfy({$0.status != .pending}),
+              !paths.contains(where:{$0.status == .failed && ["鉴权","代理入口","取消"].contains($0.category)}) else{return false}
+        return paths.filter{$0.status == .failed}.count==1
+    }
+    public static func recovery(_ results:[ConnectivityResult])->WakeRecoveryCheck {
+        // 实际节点已可用时，测试网站局部异常不触发重建，也不改写检测结果。
+        if results.count==2,results[0].status != .pending,results[1].status == .passed,
+           !results.contains(where:{$0.status == .failed && ["鉴权","代理入口","取消"].contains($0.category)}) {return .healthy}
+        return .connectivity(results)
     }
 }

@@ -3,6 +3,9 @@ import QingzhouKit
 
 // 应用入口统一装配依赖；测试可以替换下载、时钟和存储而不触碰日常数据。
 struct AppDependencies {
+    var officeHiddenOverride:(()->Bool)?
+    var officePathOverride:((SavedDiagnosticTarget,AppState,Bool,String?) throws -> TargetPathEvidence)?
+    var officeProbeOverride:((SavedDiagnosticTarget,TargetPathEvidence,AppState,Bool) async -> DiagnosticResult)?
     var makeCredentials:(Bool)->any CredentialStore = {$0 ? MemoryCredentials():KeychainStore()}
     var diagnosticExecutor=DiagnosticExecutor()
     var diagnosticDNS:(String) async -> DiagnosticResult = {await DiagnosticService.dns($0)}

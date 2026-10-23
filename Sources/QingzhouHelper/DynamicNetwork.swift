@@ -6,10 +6,7 @@ extension Service {
     // 企业网络变化只能影响企业保护项；公网接管、补充 DNS 和代理入口仍单独核对。
     func essentialNetworkIssues(sample:NetworkRouteSample) throws -> [String] {
         guard let record=journal else{return ["恢复记录缺失"]}
-        let expected=try PropertyListSerialization.propertyList(from:record.expectedDNS,format:nil) as? NSDictionary
-        let current=networkDNSRead?(record.dnsKey) ?? (SCDynamicStoreCopyValue(dynamic,record.dnsKey as CFString) as? NSDictionary)
-        var issues:[String]=[]
-        if current != expected {issues.append("本次补充 DNS 服务与应用值不一致")}
+        var issues=dnsServiceIssues()
         let takeover=record.routes.filter{$0.interface==record.interface || $0.destination.hasSuffix("/1")}.map{ProtectedRoute(destination:$0.destination,gateway:$0.gateway,interface:$0.interface,scope:$0.scope)}
         issues += CaptureOwnership.routeIssues(expected:takeover,index:sample.identityIndex)
         return issues
@@ -122,6 +119,7 @@ extension Service {
         journal?.preservedRoutes=bypass.preservedRoutes
         try save()
         try rules.update(fresh)
+        try publishCorporateDNS(fresh)
         capturePlan=fresh
         protectedQueriesSuspended=false
         dnsForwarder?.updatePlan(fresh)

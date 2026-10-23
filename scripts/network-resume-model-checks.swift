@@ -273,6 +273,71 @@ final class WakeModelProtocol:URLProtocol {
             }
             model.cancelWakeRecovery();model.connection = .disconnected
         }
+        do {
+            model.cancelWakeRecovery();model.busy=false;model.stopRequested=false;model.coreFailed=false
+            model.healthDisplayAwake={true};model.healthPowerUptime={1_000_000_000}
+            model.wakeRecovery=WakeRecoveryCoordinator(sleep:{_ in try Task.checkCancellation()})
+            model.wakeCheckOverride={.healthy};model.wakeRebuildOverride={wakeBuilds+=1;return .healthy}
+            model.connection = .connected
+            let before=wakeBuilds
+            model.beginRoutineRecovery(reason:.nodeUnavailable)
+            let single=model.wakeRecovery.id
+            model.beginRoutineRecovery(reason:.controlUnavailable)
+            check(single != nil && single==model.wakeRecovery.id,"日常恢复与重复故障只启动一个任务")
+            await model.wakeRecovery.waitUntilFinished()
+            check(wakeBuilds==before && model.connection == .connected && model.wakeRecoveryStatus.phase == .recovered,"日常故障复查成功保留原会话")
+            model.wakeCheckOverride={.inconclusive(.timeout)}
+            model.beginRoutineRecovery(reason:.nodeUnavailable)
+            await model.wakeRecovery.waitUntilFinished()
+            for _ in 0..<30 {await Task.yield()}
+            check(model.connection == .connected && model.wakeRecoveryStatus.phase == .idle && model.errorMessage==nil,"日常恢复中的未知检测只降级，不释放可用会话或弹出错误")
+            model.wakeCheckOverride={.failed(.nodeUnavailable)}
+            model.wakeRebuildOverride={wakeBuilds+=1;return .failed(.nodeUnavailable)}
+            var releaseCalls=0
+            model.capture=CaptureController(core:model.core,proxy:model.proxy,helperRequest:{request in
+                if request.operation=="stop" || request.operation=="recover" {releaseCalls+=1}
+                if request.operation=="recover" {check(request.preserveExternal==true,"日常恢复耗尽必须保留外部网络")}
+                var reply=TunReply(ok:true,message:"隔离释放",running:request.operation=="prepare")
+                reply.supportsExternalRecovery=true;reply.recoveryPending=false
+                return reply
+            })
+            var routineTunnel=AppState();routineTunnel.captureMode = .tun
+            try await model.capture.start(routineTunnel,credentials:MemoryCredentials(),control:control)
+            model.beginRoutineRecovery(reason:.nodeUnavailable)
+            await model.wakeRecovery.waitUntilFinished()
+            for _ in 0..<100 where model.connection != .error {try await Task.sleep(nanoseconds:1_000_000)}
+            check(wakeBuilds==before+3 && model.connection == .error && model.wakeRecoveryStatus.reason == .retryExhausted,"日常明确故障最多重建三次，耗尽后释放并提示")
+            check(model.wakeIntent==nil && !model.wakeRecovery.active && !model.routineRecovery && releaseCalls==1,"恢复耗尽撤销连接意图并释放一次自有接管")
+            model.cancelWakeRecovery();model.connection = .connected
+            model.wakeRecovery=WakeRecoveryCoordinator(sleep:{_ in try await Task.sleep(nanoseconds:30_000_000_000)})
+            model.beginRoutineRecovery(reason:.nodeUnavailable)
+            check(model.wakeRecovery.active && model.linkStatusLabel=="自动恢复中","首页准确显示日常自动恢复")
+            model.epoch=UUID()
+            check(!model.wakeRecovery.active && model.wakeIntent==nil && !model.routineRecovery,"切换会话撤销日常恢复，旧任务不能重连")
+            model.connection = .disconnected
+            model.connectivityResults=[ConnectivityResult("网站",.failed,"超时")]
+            check(model.linkStatusLabel=="检测降级","局部异常不能显示链路正常")
+            model.cancelWakeRecovery()
+        }
+        do {
+            model.cancelWakeRecovery();model.connection = .disconnected;model.coreFailed=false
+            model.setHistoryEnabled(false)
+            guard let store=model.store else{fatalError("缺少隔离配置")}
+            var first=try NodeParser.parse("trojan://fixture@first.example:443#一")
+            var second=try NodeParser.parse("trojan://fixture@second.example:443#二")
+            first.node.id=UUID();second.node.id=UUID(uuidString:"00000000-0000-0000-0000-000000000002")!
+            try store.commit(store.prepareImport([first,second]));model.state=store.state
+            model.state.captureMode = .tun;model.connection = .connected
+            model.api=CoreAPIClient(context:CoreControlContext(port:18600,secret:"fixture"),protocolClasses:[WakeModelProtocol.self])
+            var probes=0
+            model.connectivityProbe={_,_,_ in probes+=1;return [ConnectivityResult("网站",.failed,"超时"),ConnectivityResult("节点",.passed,""),ConnectivityResult("入口",.notApplicable,"")]}
+            _=model.healthFailures.update([.unavailable])
+            await model.selectPolicy(.node(second.node.id))
+            check(model.state.activePolicy == .node(second.node.id) && probes==1,"选节点共用降级策略且只执行一次检测")
+            check(!model.healthRefreshPending && model.verifiedSelectionTag==PolicyReference.node(second.node.id).tag,"切换节点完成后不被操作锁重新安排重复检测")
+            check(model.healthFailures.failures==0 && model.failedHealthCycles==0,"切换节点清除旧节点连续失败计数")
+            await model.api?.shutdown();model.api=nil;model.connection = .disconnected
+        }
         print("RESULT network_resume_model_assertions=\(assertions) failures=0")
     }
 }

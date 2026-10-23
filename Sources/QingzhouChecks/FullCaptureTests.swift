@@ -83,7 +83,8 @@ final class FullCaptureTests:CheckCase {
         expectTrue(CaptureDNSPolicy.isPreferred(server:"192.168.1.1",in:applied+"\n"+specific))
         expectFalse(CaptureDNSPolicy.isPreferred(server:"192.168.1.1",in:applied.replacingOccurrences(of:"order : 103000",with:"order : 3401")))
         expectFalse(CaptureDNSPolicy.isPreferred(server:"192.168.1.1",in:""))
-        expectFalse(CaptureDNSPolicy.isPreferred(server:"192.168.1.1",in:"resolver #1\nnameserver[0] : 192.168.1.1"))
+        // 苹果 DNS 输出会省略零优先级，缺省字段不是未验证。
+        expectTrue(CaptureDNSPolicy.isPreferred(server:"192.168.1.1",in:"resolver #1\nnameserver[0] : 192.168.1.1"))
         expectFalse(CaptureDNSPolicy.isPreferred(server:"192.168.1.1",in:applied.replacingOccurrences(of:"nameserver[0] : 192.168.1.1",with:"nameserver[0] : 192.168.1.1\nnameserver[1] : 10.251.1.1")))
         let expected=CaptureDNSPolicy.settings(server:"192.168.1.1")
         // macOS 会移除独立补充服务的 SearchOrder；匹配顺序必须仍在数组中。

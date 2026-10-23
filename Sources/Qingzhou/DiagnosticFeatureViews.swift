@@ -12,16 +12,24 @@ func saveDiagnosticData(_ data:Data?,name:String) {
 }
 struct DiagnosticsView:View {
     @ObservedObject var model:AppModel
-    @State private var tab=0
+    @State private var tab=3
     var body:some View {
         VStack(alignment:.leading,spacing:16) {
             Picker("诊断类型",selection:$tab) {
+                Text("网络健康").tag(3)
                 Text("综合诊断").tag(0)
                 Text("目标路径").tag(1)
                 Text("事件时间线").tag(2)
             }.pickerStyle(.segmented)
             Group {
                 switch tab {
+                case 3:
+                    ScrollView {
+                        VStack(alignment:.leading,spacing:20) {
+                            OfficeHealthPanel(office:model.office,hasCorporate:!model.state.protectedDomains.isEmpty || !model.state.enabledBypasses.isEmpty) {tab=0}
+                            SavedTargetsPanel(model:model,targets:model.state.savedDiagnosticTargets ?? [],office:model.office,locked:model.locked,showAll:true)
+                        }
+                    }
                 case 1:TargetPathPanel(model:model)
                 case 2:NetworkTimelineView(timeline:model.timeline,profiles:model.profiles)
                 default:ComprehensiveDiagnosticsView(model:model)
@@ -78,9 +86,8 @@ struct TargetPathPanel:View {
             let tunnel=state.captureMode.usesTunnel ? (try? await helper().tunnelInterface):nil
             return await withTaskCancellationHandler(operation:{
                 await DiagnosticWorkPool.dns.run(stage:"目标路径",timeout:3) {
-                    let expected=try RuleEvaluator.explain(input,state:state)
-                    let actual=try BypassDiagnostics.inspect(input,state:state,active:active,ownedTunnel:tunnel,cancelled:{cancellation.cancelled})
-                    return [DiagnosticResult("配置预期","通过",(expected.steps+["预期策略："+state.label(expected.target)]+(expected.uncertainty.map{[$0]} ?? [])).joined(separator:"\n"),code:"ruleSimulation"),DiagnosticResult("系统实际路径",actual.hasFailure ? "失败":"未验证",actual.rows.joined(separator:"\n"),code:actual.hasFailure ? "pathMismatch":"businessUnverified")]
+                    let target=try SavedDiagnosticTarget(name:"临时查询",host:input).validated()
+                    return try TargetPathService.inspect(target,state:state,active:active,tunnel:tunnel,cancelled:{cancellation.cancelled}).rows
                 }
             },onCancel:{cancellation.cancel()})
         }

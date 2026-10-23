@@ -26,6 +26,8 @@ public actor CoreAPIClient {
     public let port:Int
     private let secret:String
     private let session:URLSession
+    private var closed=false
+    private var activeRequests=0
     public init(context:CoreControlContext,protocolClasses:[AnyClass]?=nil) {
         port=context.port;secret=context.secret
         let configuration=URLSessionConfiguration.ephemeral;configuration.timeoutIntervalForRequest=10;configuration.timeoutIntervalForResource=10;configuration.urlCache=nil;configuration.httpCookieStorage=nil;configuration.protocolClasses=protocolClasses
@@ -38,6 +40,10 @@ public actor CoreAPIClient {
         if let body {request.httpBody=try JSONEncoder().encode(body);request.setValue("application/json",forHTTPHeaderField:"Content-Type")};return request
     }
     private func send(_ request:URLRequest) async throws -> Data {
+        guard !closed else {throw CoreAPIError("控制通道已关闭")}
+        try Task.checkCancellation()
+        activeRequests+=1
+        defer {activeRequests-=1;if closed && activeRequests==0 {session.invalidateAndCancel()}}
         do {
             let (bytes,response)=try await session.bytes(for:request)
             guard let http=response as? HTTPURLResponse else {throw CoreAPIError("控制接口")}
@@ -92,7 +98,7 @@ public actor CoreAPIClient {
         case .success: return Task.isCancelled ? .unknown : .available
         case .failure(let failures):
             guard !Task.isCancelled, failures.count == 2,
-                  failures.allSatisfy({ ["节点通道", "超时"].contains($0) }) else { return .unknown }
+                  failures.allSatisfy({ $0 == "节点通道" }) else { return .unknown }
             // 两个目标都失败后独立核对控制接口，避免核心退出被误判为节点故障。
             do { _ = try await proxies(); return Task.isCancelled ? .unknown : .unavailable }
             catch { return .unknown }
@@ -117,6 +123,7 @@ public actor CoreAPIClient {
     public func closeConnection(_ id:String) async throws {guard UUID(uuidString:id) != nil else {throw ProxyError("连接 ID 无效")};_=try await send(request("/connections/"+id,method:"DELETE"))}
     public func closeAllConnections() async throws {_=try await send(request("/connections",method:"DELETE"))}
     public func traffic() throws -> AsyncThrowingStream<TransferRate,Error> {
+        guard !closed else {throw CoreAPIError("控制通道已关闭")}
         var request=try request("/traffic");var components=URLComponents(url:request.url!,resolvingAgainstBaseURL:false)!;components.scheme="ws";request.url=components.url
         let socket=session.webSocketTask(with:request);socket.resume()
         return AsyncThrowingStream {continuation in
@@ -127,7 +134,12 @@ public actor CoreAPIClient {
             continuation.onTermination={_ in task.cancel();socket.cancel(with:.goingAway,reason:nil)}
         }
     }
-    public func shutdown() {session.invalidateAndCancel()}
+    public func shutdown() {
+        guard !closed else{return};closed=true
+        // 先拒绝新请求并取消已创建任务；在途请求收尾后再失效，避免 Foundation 创建任务时抛异常。
+        if activeRequests==0 {session.invalidateAndCancel()}
+        else {session.getAllTasks{tasks in tasks.forEach{$0.cancel()}}}
+    }
     public static func actualTag(_ proxies:[String:ProxyInfo]) -> String? {
         var next=proxies["proxy"]?.now;var seen=Set<String>()
         while let tag=next {guard seen.insert(tag).inserted else{return nil};if let nested=proxies[tag]?.now {next=nested} else{return tag}}

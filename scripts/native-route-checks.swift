@@ -108,6 +108,19 @@ final class Transport:RouteTransport {
             if size==0 {check(try NativeRouteBackend.decode(Data()).isEmpty,"空整表")}
             else {fails("截断报文拒绝") {_=try NativeRouteBackend.decode(valid.prefix(size))}}
         }
+        var table=Data()
+        for _ in 0..<100 {table.append(valid)}
+        check(try NativeRouteBackend.decode(table).count==100,"单快照重复接口仍保留全部路由")
+        var missingInterface=valid
+        missingInterface.withUnsafeMutableBytes{$0.baseAddress!.assumingMemoryBound(to:rt_msghdr.self).pointee.rtm_index=65535}
+        fails("计数成功但接口已消失时填充轮拒绝整个快照") {_=try NativeRouteBackend.decode(missingInterface)}
+        check(try NativeRouteBackend.decode(valid).first?.route.interface=="lo0","下一份快照重新解析接口身份")
+        var countOnly=0
+        let sizeError=valid.withUnsafeBytes{qz_route_decode($0.baseAddress,$0.count,nil,0,&countOnly)}
+        check(sizeError==0 && countOnly==1,"计数轮保持完整结构计数")
+        let tiny=valid.prefix(valid.count-1)
+        let truncated=tiny.withUnsafeBytes{qz_route_decode($0.baseAddress,$0.count,nil,0,&countOnly)}
+        check(truncated != 0,"计数轮拒绝损坏报文，不能等到填充后再处理")
         var malformed=valid
         malformed.withUnsafeMutableBytes{$0.baseAddress!.assumingMemoryBound(to:rt_msghdr.self).pointee.rtm_version=99}
         fails("错误版本拒绝") {_=try NativeRouteBackend.decode(malformed)}

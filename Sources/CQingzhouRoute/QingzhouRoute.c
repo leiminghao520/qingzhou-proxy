@@ -49,7 +49,21 @@ static int prefix_length(const struct sockaddr *mask,int family,int host,int *bi
     }
     return 0;
 }
-static int decode_one(const struct rt_msghdr *header,size_t size,QZRouteRow *row,int *present) {
+// 名称只在本次不可变路由快照内复用，不跨采样缓存接口身份。
+typedef struct { unsigned index; char name[IF_NAMESIZE]; } QZInterfaceName;
+typedef struct { QZInterfaceName entries[64]; size_t count; } QZInterfaceNames;
+static int interface_name(unsigned index,char *name,QZInterfaceNames *cache) {
+    for (size_t n=0;n<cache->count;n++) if (cache->entries[n].index==index) {
+        strcpy(name,cache->entries[n].name);return 0;
+    }
+    if (!if_indextoname(index,name)) return ENXIO;
+    if (cache->count<64) {
+        cache->entries[cache->count].index=index;
+        strcpy(cache->entries[cache->count++].name,name);
+    }
+    return 0;
+}
+static int decode_one(const struct rt_msghdr *header,size_t size,QZRouteRow *row,int *present,int materialize,QZInterfaceNames *cache) {
     const unsigned char *start=(const unsigned char *)header,*cursor=start+sizeof(*header),*end=start+size;
     const struct sockaddr *addresses[RTAX_MAX]={0};
     *present=0;
@@ -67,7 +81,18 @@ static int decode_one(const struct rt_msghdr *header,size_t size,QZRouteRow *row
     memset(row,0,sizeof(*row));row->family=family;row->flags=header->rtm_flags;row->interface_index=header->rtm_index;
     const struct sockaddr *ifp=addresses[RTAX_IFP];
     if (!row->interface_index && ifp && ifp->sa_family==AF_LINK && ifp->sa_len>=offsetof(struct sockaddr_dl,sdl_data)) row->interface_index=((const struct sockaddr_dl *)ifp)->sdl_index;
-    if (!row->interface_index || !if_indextoname(row->interface_index,row->interface_name)) return ENXIO;
+    if (!row->interface_index) return ENXIO;
+    int mask_error=prefix_length(addresses[RTAX_NETMASK],family,header->rtm_flags & RTF_HOST,&row->prefix_length);
+    if (mask_error) return mask_error;
+    // 计数轮仍校验全部地址边界和掩码，但不做接口查询与文本转换。
+    if (header->rtm_flags & RTF_GATEWAY) {
+        if (!gateway || !((gateway->sa_family==AF_LINK && gateway->sa_len>=offsetof(struct sockaddr_dl,sdl_data)) ||
+            (gateway->sa_family==AF_INET && gateway->sa_len>=sizeof(struct sockaddr_in)) ||
+            (gateway->sa_family==AF_INET6 && gateway->sa_len>=sizeof(struct sockaddr_in6)))) return EPROTO;
+    }
+    if (!materialize) {*present=1;return 0;}
+    int name_error=interface_name(row->interface_index,row->interface_name,cache);
+    if (name_error) return name_error;
     if (family==AF_INET) {
         if (!inet_ntop(family,&((const struct sockaddr_in *)destination)->sin_addr,row->destination,sizeof(row->destination))) return errno;
     } else {
@@ -76,8 +101,6 @@ static int decode_one(const struct rt_msghdr *header,size_t size,QZRouteRow *row
         if (IN6_IS_ADDR_LINKLOCAL(&address) || IN6_IS_ADDR_MC_LINKLOCAL(&address)) address.s6_addr[2]=address.s6_addr[3]=0;
         if (!inet_ntop(family,&address,row->destination,sizeof(row->destination))) return errno;
     }
-    int error=prefix_length(addresses[RTAX_NETMASK],family,header->rtm_flags & RTF_HOST,&row->prefix_length);
-    if (error) return error;
     // 邻居缓存的链路地址独立保留，不能把它与父项的 link# 网关混为一条路由。
     if (gateway && gateway->sa_family==AF_LINK && gateway->sa_len>=offsetof(struct sockaddr_dl,sdl_data)) {
         const struct sockaddr_dl *link=(const struct sockaddr_dl *)gateway;
@@ -100,13 +123,14 @@ static int decode_one(const struct rt_msghdr *header,size_t size,QZRouteRow *row
 }
 int qz_route_decode(const void *bytes,size_t length,QZRouteRow *rows,size_t capacity,size_t *count) {
     const unsigned char *cursor=bytes,*end=cursor+length;*count=0;
+    QZInterfaceNames cache={0};
     while (cursor<end) {
         if ((size_t)(end-cursor)<sizeof(struct rt_msghdr)) return EPROTO;
         struct rt_msghdr header;memcpy(&header,cursor,sizeof(header));
         if (header.rtm_msglen<sizeof(header) || header.rtm_msglen>(size_t)(end-cursor) || header.rtm_version!=RTM_VERSION) return EPROTO;
         QZRouteRow row;int present=0;
         // 路由消息由内核按字长对齐；先复制头部，剩余地址只通过已检查的范围访问。
-        int error=decode_one((const struct rt_msghdr *)cursor,header.rtm_msglen,&row,&present);
+        int error=decode_one((const struct rt_msghdr *)cursor,header.rtm_msglen,&row,&present,rows != NULL,&cache);
         if (error) return error;
         if (present) {if (rows && *count<capacity) rows[*count]=row;(*count)++;}
         cursor+=header.rtm_msglen;

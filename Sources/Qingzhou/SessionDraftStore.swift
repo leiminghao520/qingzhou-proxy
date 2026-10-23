@@ -96,10 +96,27 @@ struct ShortcutSettingsDraft:Equatable {
     func discard() {value=original}
 }
 
+@MainActor final class SavedTargetsDraft:ObservableObject,SessionDraft {
+    @Published var values:[SavedDiagnosticTarget]
+    let profileID:UUID?
+    private var original:[SavedDiagnosticTarget]
+    var revision:Data?
+    init(_ values:[SavedDiagnosticTarget],profileID:UUID?=nil) {self.profileID=profileID;self.values=values;original=values;revision=try? SavedDiagnosticTarget.revision(values)}
+    var dirty:Bool {values != original}
+    func accept(_ values:[SavedDiagnosticTarget]) {if self.values != values {self.values=values};original=values;revision=try? SavedDiagnosticTarget.revision(values)}
+    func discard() {values=original}
+}
+
 // 仅驻留内存；页面销毁不会丢草稿，也不会触发配置保存或网络操作。
 @MainActor final class SessionDraftStore {
     private enum Key:Hashable {case unconfigured,profile(UUID)}
     private func key(_ profile:UUID?)->Key {profile.map(Key.profile) ?? .unconfigured}
+    private var targetEntries:[Key:SavedTargetsDraft]=[:]
+    func targets(profile:UUID?,state:AppState)->SavedTargetsDraft {
+        let key=key(profile),values=state.savedDiagnosticTargets ?? []
+        if let draft=targetEntries[key] {if !draft.dirty {draft.accept(values)};return draft}
+        let draft=SavedTargetsDraft(values,profileID:profile);targetEntries[key]=draft;return draft
+    }
     private var settingsEntries:[Key:SettingsDraft]=[:]
     private var ruleEntries:[Key:RulesDraft]=[:]
     private var bypassEntries:[Key:BypassDraft]=[:]
@@ -123,9 +140,9 @@ struct ShortcutSettingsDraft:Equatable {
         let value=BypassDraft(items:items,revision:revision);bypassEntries[key]=value;return value
     }
     private func entries(profile:UUID?,all:Bool)->[any SessionDraft] {
-        if all {return editors.values.map{$0.1}+settingsEntries.values.map{$0 as any SessionDraft}+ruleEntries.values.map{$0 as any SessionDraft}+bypassEntries.values.map{$0 as any SessionDraft}}
+        if all {return targetEntries.values.map{$0 as any SessionDraft}+editors.values.map{$0.1}+settingsEntries.values.map{$0 as any SessionDraft}+ruleEntries.values.map{$0 as any SessionDraft}+bypassEntries.values.map{$0 as any SessionDraft}}
         let key=key(profile)
-        return editors.values.filter{$0.0==profile}.map{$0.1}+[settingsEntries[key] as (any SessionDraft)?,ruleEntries[key] as (any SessionDraft)?,bypassEntries[key] as (any SessionDraft)?].compactMap{$0}
+        return editors.values.filter{$0.0==profile}.map{$0.1}+[targetEntries[key] as (any SessionDraft)?,settingsEntries[key] as (any SessionDraft)?,ruleEntries[key] as (any SessionDraft)?,bypassEntries[key] as (any SessionDraft)?].compactMap{$0}
     }
     func hasDirty(profile:UUID?=nil,all:Bool=false)->Bool {entries(profile:profile,all:all).contains{$0.dirty}}
     func allowLeaving(_ action:String,profile:UUID?=nil,all:Bool=false)->Bool {

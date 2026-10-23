@@ -21,10 +21,11 @@ public struct DNSResolverScope:Codable,Equatable,Sendable {
     public var searchDomains:[String]
     public var defaultResolver:Bool
     public var order:Int
-    public init(service:String,interface:String,servers:[String],domains:[String]=[],searchDomains:[String]=[],order:Int=200000,defaultResolver:Bool=false) {
-        self.service=service;self.interface=interface;self.servers=servers;self.domains=domains;self.searchDomains=searchDomains;self.order=order;self.defaultResolver=defaultResolver
+    public var matchOrders:[Int]?
+    public init(service:String,interface:String,servers:[String],domains:[String]=[],searchDomains:[String]=[],order:Int=200000,defaultResolver:Bool=false,matchOrders:[Int]?=nil) {
+        self.service=service;self.interface=interface;self.servers=servers;self.domains=domains;self.searchDomains=searchDomains;self.order=order;self.defaultResolver=defaultResolver;self.matchOrders=matchOrders
     }
-    public var protectedDomains:[String] {Array(Set(domains+searchDomains)).filter{!$0.isEmpty}.sorted()}
+    public var protectedDomains:[String] {Array(Set((domains+searchDomains).map{$0.lowercased().trimmingCharacters(in:CharacterSet(charactersIn:"."))})).filter{!$0.isEmpty}.sorted()}
 }
 public struct NetworkSnapshot:Codable,Equatable,Sendable {
     public var primaryInterface:String
@@ -58,13 +59,13 @@ public struct NetworkSnapshot:Codable,Equatable,Sendable {
             return ProtectedRoute(destination:prefix,gateway:gateway,interface:interface,scope:fields[2].contains("I") ? interface:nil)
         }
     }
-    public static func read(store:SCDynamicStore,primary:String,routes:@autoclosure () -> String,ownedDNSKey:String?=nil,ownedTunnel:String?=nil,structuredRoutes:[ProtectedRoute]?=nil,lookup:((String,Bool) throws -> String)?=nil) throws -> NetworkSnapshot {
+    public static func read(store:SCDynamicStore,primary:String,routes:@autoclosure () -> String,ownedDNSKey:String?=nil,ownedDNSKeys:Set<String>=[],ownedTunnel:String?=nil,structuredRoutes:[ProtectedRoute]?=nil,lookup:((String,Bool) throws -> String)?=nil) throws -> NetworkSnapshot {
         let keys=(SCDynamicStoreCopyKeyList(store,"State:/Network/Service/.*/DNS" as CFString) as? [String] ?? []).sorted()
         var resolvers:[DNSResolverScope]=[]
         var unavailableDomains:[String]=[]
-        for key in keys where key != ownedDNSKey {
+        for key in keys where key != ownedDNSKey && !ownedDNSKeys.contains(key) {
             let parts=key.components(separatedBy:"/");guard parts.count>=5 else{continue};let service=parts[3]
-            guard let dns=SCDynamicStoreCopyValue(store,key as CFString) as? [String:Any],let servers=dns["ServerAddresses"] as? [String],!servers.isEmpty else{continue}
+            guard let dns=SCDynamicStoreCopyValue(store,key as CFString) as? [String:Any] else{continue}
             let base="State:/Network/Service/"+service
             let ipv4=SCDynamicStoreCopyValue(store,(base+"/IPv4") as CFString) as? [String:Any]
             let ipv6=SCDynamicStoreCopyValue(store,(base+"/IPv6") as CFString) as? [String:Any]
@@ -72,6 +73,7 @@ public struct NetworkSnapshot:Codable,Equatable,Sendable {
             let indexed=index.flatMap {value -> String? in var buffer=[CChar](repeating:0,count:Int(IF_NAMESIZE));return if_indextoname(value,&buffer).map{String(cString:$0)}}
             let rawDomains=(dns["SupplementalMatchDomains"] as? [String] ?? [])+(dns["SearchDomains"] as? [String] ?? [])+((dns["DomainName"] as? String).map{[$0]} ?? [])
             let scopeDomains=rawDomains.filter{!$0.isEmpty && (try? ConfigBuilder.validate(RoutingRule(kind:.suffix,value:$0,action:.direct))) != nil}
+            guard let servers=dns["ServerAddresses"] as? [String],!servers.isEmpty else {unavailableDomains += scopeDomains;continue}
             guard servers.allSatisfy({(try? ConfigBuilder.validate(RoutingRule(kind:.cidr,value:$0.components(separatedBy:"%")[0],action:.direct))) != nil}) else {unavailableDomains += scopeDomains;continue}
             var inferred:String?
             if ipv4?["InterfaceName"] == nil && ipv6?["InterfaceName"] == nil && indexed == nil {
@@ -85,11 +87,15 @@ public struct NetworkSnapshot:Codable,Equatable,Sendable {
             }
             guard let interface=(ipv4?["InterfaceName"] as? String) ?? (ipv6?["InterfaceName"] as? String) ?? indexed ?? inferred else{unavailableDomains += scopeDomains;continue}
             if interface==ownedTunnel {continue}
-            let domains=(dns["SupplementalMatchDomains"] as? [String] ?? []).filter{!$0.isEmpty}.map{$0.lowercased()}
+            func validDomain(_ value:String)->Bool {scopeDomains.contains(value)}
+            let rawMatches=dns["SupplementalMatchDomains"] as? [String] ?? []
+            let indices=rawMatches.indices.filter{!rawMatches[$0].isEmpty && validDomain(rawMatches[$0])}
+            let domains=indices.map{rawMatches[$0].lowercased()}
+            let orders=indices.map{CaptureDNSPolicy.matchOrder(dns,index:$0)}
             var search=(dns["SearchDomains"] as? [String] ?? []).map{$0.lowercased()}
             if let domain=dns["DomainName"] as? String,!domain.isEmpty {search.append(domain.lowercased())}
             let validScope=Set(scopeDomains.map{$0.lowercased()})
-            resolvers.append(DNSResolverScope(service:service,interface:interface,servers:servers,domains:domains.filter{validScope.contains($0)},searchDomains:search.filter{validScope.contains($0)},order:(dns["SearchOrder"] as? Int) ?? 200000,defaultResolver:(dns["SupplementalMatchDomains"] as? [String])?.contains("")==true || interface==primary))
+            resolvers.append(DNSResolverScope(service:service,interface:interface,servers:servers,domains:domains.filter{validScope.contains($0)},searchDomains:search.filter{validScope.contains($0)},order:rawMatches.firstIndex(of:"").map{CaptureDNSPolicy.matchOrder(dns,index:$0)} ?? ((dns["SearchOrder"] as? Int) ?? 200000),defaultResolver:rawMatches.contains("") || interface==primary,matchOrders:orders))
         }
         guard resolvers.contains(where:{$0.interface==primary}) else{throw NetworkEnvironmentNotReady("原系统 DNS 无法完整读取，未接管网络")}
         let proxies=SCDynamicStoreCopyProxies(nil) as? [String:Any] ?? [:]
@@ -214,21 +220,42 @@ public struct CapturePlan:Codable,Equatable,Sendable {
         }
         return result
     }
-    public func resolvers(for domain:String)->[DNSResolverScope] {
+    public func selectResolvers(for domain:String) throws -> [DNSResolverScope] {
         let name=domain.lowercased().trimmingCharacters(in:CharacterSet(charactersIn:"."))
-        func suffixes(_ resolver:DNSResolverScope)->[String] {(resolver.domains+resolver.searchDomains).map{$0.lowercased().trimmingCharacters(in:CharacterSet(charactersIn:"."))}.filter{!$0.isEmpty}}
-        let matches=snapshot.resolvers.filter{suffixes($0).contains{name==$0 || name.hasSuffix("."+$0)}}
+        func length(_ resolver:DNSResolverScope)->Int {
+            resolver.protectedDomains.filter{name==$0 || name.hasSuffix("."+$0)}.map(\.count).max() ?? 0
+        }
+        func priority(_ resolver:DNSResolverScope)->Int {
+            let orders=resolver.domains.map{$0.lowercased().trimmingCharacters(in:CharacterSet(charactersIn:"."))}.enumerated().filter{name==$0.element || name.hasSuffix("."+$0.element)}.filter{$0.element.count==length(resolver)}.map {index,_ in
+                index<(resolver.matchOrders?.count ?? 0) ? resolver.matchOrders![index]:resolver.order
+            }
+            return orders.min() ?? resolver.order
+        }
+        let matches=snapshot.resolvers.filter{length($0)>0}
+        let unavailableLength=snapshot.unavailableDomains.filter{name==$0 || name.hasSuffix("."+$0)}.map(\.count).max() ?? 0
+        if unavailableLength>0,unavailableLength >= (matches.map{length($0)}.max() ?? 0) {throw CorporateDNSSelectionError.unavailable}
         if !matches.isEmpty {
-            let length=matches.flatMap{suffixes($0)}.filter{name==$0 || name.hasSuffix("."+$0)}.map(\.count).max() ?? 0
-            return matches.filter{suffixes($0).contains{$0.count==length && (name==$0 || name.hasSuffix("."+$0))}}.sorted{$0.order<$1.order}
+            let longest=matches.map{length($0)}.max()!
+            let scoped=matches.filter{length($0)==longest}
+            let order=scoped.map{priority($0)}.min()!
+            let best=scoped.filter{priority($0)==order}
+            guard let first=best.first,best.allSatisfy({$0.interface==first.interface && $0.servers==first.servers}) else {throw CorporateDNSSelectionError.ambiguous}
+            return [first]
         }
-        if domains.contains(where:{name==$0 || name.hasSuffix("."+$0)}) || !name.contains(".") {
-            // 未匹配到明确作用域时只选择最高优先级企业解析器，不向所有 VPN 广播。
-            let corporate=snapshot.resolvers.filter{Self.isVPN($0.interface)}.sorted{$0.order<$1.order}
-            if let first=corporate.first {return [first]}
-            // 企业 VPN 离线时保留域名保护，只拒绝该域名的查询，不阻止普通代理连接。
-            if domains.contains(where:{name==$0 || name.hasSuffix("."+$0)}) {return []}
+        if protects(name) {
+            // 无明确域名作用域时，只允许唯一企业出口；不能按优先级猜测其他 VPN。
+            let corporate=snapshot.resolvers.filter{Self.isVPN($0.interface) && !$0.servers.isEmpty}
+            guard let first=corporate.first else {throw CorporateDNSSelectionError.unavailable}
+            guard corporate.allSatisfy({$0.interface==first.interface && $0.servers==first.servers}) else {throw CorporateDNSSelectionError.ambiguous}
+            return [first]
         }
-        let defaults=snapshot.resolvers.filter{$0.defaultResolver};return defaults.isEmpty ? snapshot.resolvers.filter{$0.interface==snapshot.primaryInterface}:defaults
+        let defaults=snapshot.resolvers.filter{$0.defaultResolver}
+        return defaults.isEmpty ? snapshot.resolvers.filter{$0.interface==snapshot.primaryInterface}:defaults
     }
+    public func resolvers(for domain:String)->[DNSResolverScope] {(try? selectResolvers(for:domain)) ?? []}
+}
+
+public enum CorporateDNSSelectionError:String,Error,LocalizedError,Sendable {
+    case ambiguous,unavailable
+    public var errorDescription:String? {self == .ambiguous ? "企业解析器歧义：多个原网络解析器无法确定域名归属":"企业解析器不可用：原作用域或接口未就绪"}
 }

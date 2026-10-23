@@ -13,6 +13,7 @@ final class ConnectivityFixtureProtocol:URLProtocol {
             let tag="node-00000000-0000-0000-0000-000000000001"
             body=port==18405 ? "{}":"{\"proxies\":{\"proxy\":{\"type\":\"Selector\",\"name\":\"proxy\",\"now\":\"group-a\"},\"group-a\":{\"type\":\"Selector\",\"name\":\"group-a\",\"now\":\"\(tag)\"},\"\(tag)\":{\"type\":\"Hysteria2\",\"name\":\"\(tag)\"}}}"
         }else if url.path.hasSuffix("/delay") {
+            if port==18408 {client?.urlProtocol(self,didFailWithError:URLError(.timedOut));return}
             expectTrue(url.path.contains("00000000-0000-0000-0000-000000000001"),"必须使用核心实际选中的节点")
             let target=URLComponents(url:url,resolvingAgainstBaseURL:false)?.queryItems?.first{$0.name=="url"}?.value
             expectTrue([ConfigBuilder.testURL,ConfigBuilder.secondaryTestURL].contains(target ?? ""))
@@ -49,6 +50,34 @@ func runConnectivityChecks() async {
         if port==18404{expectEqual(result.category,"超时")}
         if port==18405{expectEqual(result.category,"控制接口响应格式")}
         let direct=await ConnectivityProbe.node(client:client,mode:.direct);expectEqual(direct.status,.notApplicable)
+        await client.shutdown()
+    }
+    let pass=ConnectivityResult("规则路径",.passed,""),node=ConnectivityResult("节点",.passed,""),na=ConnectivityResult("入口",.notApplicable,"")
+    expectFalse(StartupConnectivityPolicy.allows([],mode:.rule))
+    expectTrue(StartupConnectivityPolicy.allows([pass,node,pass],mode:.rule))
+    expectTrue(StartupConnectivityPolicy.allows([pass,node,na],mode:.direct))
+    for category in ["DNS","超时","TLS","HTTP 响应","连接"] {
+        let failure=ConnectivityResult("测试网站",.failed,category)
+        expectTrue(StartupConnectivityPolicy.allows([failure,node,pass],mode:.rule),"单个测试网站失败允许降级连接")
+        expectTrue(StartupConnectivityPolicy.allows([failure,node,na],mode:.global),"TUN 单个测试网站失败允许保留已验证节点")
+        expectTrue(StartupConnectivityPolicy.allows([pass,node,failure],mode:.rule))
+        expectFalse(StartupConnectivityPolicy.allows([failure,node,failure],mode:.rule),"两个网站都失败不能放行")
+        expectFalse(StartupConnectivityPolicy.allows([failure,node,na],mode:.direct),"直连模式不能借用节点证明")
+        expectEqual(StartupConnectivityPolicy.recovery([failure,node]),.healthy,"网站异常不触发已可用节点的重建")
+        expectFalse(ConnectivityHealth.evaluate([failure,node,na]) == .healthy,"降级不能伪报链路正常")
+    }
+    for category in ["鉴权","代理入口","取消"] {
+        let failure=ConnectivityResult("入口",.failed,category)
+        expectFalse(StartupConnectivityPolicy.allows([pass,node,failure],mode:.rule))
+        expectFalse(StartupConnectivityPolicy.recovery([failure,node]) == .healthy)
+    }
+    expectFalse(StartupConnectivityPolicy.allows([pass,ConnectivityResult("节点",.failed,"超时"),pass],mode:.rule))
+    expectFalse(StartupConnectivityPolicy.allows([ConnectivityResult("规则",.pending,""),node,na],mode:.rule))
+    expectFalse(StartupConnectivityPolicy.recovery([ConnectivityResult("规则",.pending,""),node]) == .healthy)
+    for port in [18401,18404,18408] {
+        let client=CoreAPIClient(context:CoreControlContext(port:port,secret:"synthetic"),protocolClasses:[ConnectivityFixtureProtocol.self])
+        let status=await client.probe(UUID(uuidString:"00000000-0000-0000-0000-000000000001")!)
+        switch status {case .unavailable:expectEqual(port,18401);case .unknown:expectTrue([18404,18408].contains(port));case .available:expectTrue(false)}
         await client.shutdown()
     }
     let tunEntry=await ConnectivityProbe.https(port:nil,entry:true);expectEqual(tunEntry.status,.notApplicable)

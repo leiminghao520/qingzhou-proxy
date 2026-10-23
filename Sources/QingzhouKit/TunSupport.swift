@@ -28,6 +28,7 @@ public struct TunReply: Codable, Sendable {
     public var coreDiagnostics: [String]?
     public var proxyVerified: Bool?
     public var protectionVerified: Bool?
+    public var corporateDNSDiagnostics:[CorporateDNSDiagnostic]?
     public var protectionSummary: [String]?
     public var phase: String?
     public var dnsServer: String?

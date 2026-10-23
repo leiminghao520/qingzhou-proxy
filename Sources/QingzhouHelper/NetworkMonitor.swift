@@ -19,13 +19,9 @@ extension Service {
     func verifyOwnedNetwork()->Bool {(try? inspectOwnedNetwork()) == true}
     func inspectOwnedNetwork() throws -> Bool {try ownedNetworkIssues().isEmpty}
     func ownedNetworkIssues(sample: NetworkRouteSample? = nil,excluding:Set<String>=[]) throws -> [String] {
-        guard let record=journal,let expected=try PropertyListSerialization.propertyList(from:record.expectedDNS,format:nil) as? NSDictionary else{return ["恢复快照缺失或 DNS 快照不可读取"]}
+        guard let record=journal else{return ["恢复快照缺失或 DNS 快照不可读取"]}
         let routes=try (sample ?? routeSample()).ownershipRoutes
-        var issues:[String]=[]
-        let currentDNS: NSDictionary?
-        if let networkDNSRead { currentDNS=networkDNSRead(record.dnsKey) }
-        else { currentDNS=SCDynamicStoreCopyValue(dynamic,record.dnsKey as CFString) as? NSDictionary }
-        if currentDNS != expected {issues.append("本次补充 DNS 服务与应用值不一致")}
+        var issues=dnsServiceIssues()
         let expectedRoutes=record.routes.filter{!excluding.contains($0.destination)}.map{ProtectedRoute(destination:$0.destination,gateway:$0.gateway,interface:$0.interface,scope:$0.scope)}
         var confirmed=routes
         let required=expectedRoutes.filter{!CaptureOwnership.hasEquivalentHostPath($0,actual:routes)}+CaptureOwnership.monitoredPreservedRoutes(record.preservedRoutes ?? [])
@@ -47,7 +43,7 @@ extension Service {
         if let networkSnapshotRead { snapshot=try networkSnapshotRead(sample) }
         else {
             guard let global=SCDynamicStoreCopyValue(dynamic,"State:/Network/Global/IPv4" as CFString) as? [String:Any],let primary=global["PrimaryInterface"] as? String else{throw NetworkEnvironmentNotReady("网络快照无法更新")}
-            snapshot=try NetworkSnapshot.read(store:dynamic,primary:primary,routes:sample.table,ownedDNSKey:record.dnsKey,ownedTunnel:record.interface,structuredRoutes:sample.planningRoutes,lookup:{try self.routeInfo($0,ipv6:$1)})
+            snapshot=try NetworkSnapshot.read(store:dynamic,primary:primary,routes:sample.table,ownedDNSKey:record.dnsKey,ownedDNSKeys:Set(record.allDNSServices.map(\.key)),ownedTunnel:record.interface,structuredRoutes:sample.planningRoutes,lookup:{try self.routeInfo($0,ipv6:$1)})
         }
         snapshot.routes.removeAll {route in record.routes.contains{owned in NetworkInspection.samePrefix(route.destination,owned.destination) && route.interface==owned.interface && route.gateway==owned.gateway && route.scope==owned.scope}}
         return snapshot
@@ -106,7 +102,8 @@ extension Service {
         var fresh:CapturePlan
         do {
             var snapshot=try currentSnapshot(sample: sample);snapshot.proxies=previous.snapshot.proxies
-            fresh=try CapturePlan.make(snapshot:snapshot,state:request.state ?? AppState(),pinned:try PinnedBypassPolicy.routes(request.state?.pinnedBypasses ?? [],services:bypassServicesRead()))
+            // 每轮仍读取真实路由和 DNS；只有完整快照一致才复用派生计划。
+            fresh = snapshot == previous.snapshot ? previous : try CapturePlan.make(snapshot:snapshot,state:request.state ?? AppState(),pinned:try PinnedBypassPolicy.routes(request.state?.pinnedBypasses ?? [],services:bypassServicesRead()))
         } catch let error as NetworkCaptureConflict {failNetworkChange(error.localizedDescription);return}
         catch {suspendCorporateQueries();retrySnapshot(error);return}
         snapshotRetry.reset();phase="active"
@@ -114,6 +111,11 @@ extension Service {
             let issues=try reconciledNetworkIssues(fresh,sample:sample)
             if !issues.isEmpty {failNetworkChange("网络保护核验未通过："+issues.joined(separator:"；"));return}
         } catch {retrySnapshot(error);return}
+        if fresh == previous {
+            pendingNetworkChange=nil;changeWindow.reset()
+            if protectedQueriesSuspended {capturePlan=fresh;protectedQueriesSuspended=false;dnsForwarder?.updatePlan(fresh)}
+            return
+        }
         knownProtectedDomains.formUnion(fresh.domains)
         fresh.domains=Array(knownProtectedDomains).sorted()
         let defaultsChanged=fresh.snapshot.routes.filter{$0.destination.hasSuffix("/0")} != previous.snapshot.routes.filter{$0.destination.hasSuffix("/0")}

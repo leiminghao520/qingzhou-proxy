@@ -3,13 +3,39 @@ import QingzhouKit
 
 extension AppModel {
     func cancelWakeRecovery() {
-        wakeRecovery.cancel();wakeIntent=nil;wakeNeedsRebuild=false
+        wakeRecovery.cancel();wakeIntent=nil;wakeNeedsRebuild=false;routineRecovery=false
         wakeRecoveryStatus=WakeRecoveryStatus(.idle)
     }
     func cancelWakeRecoveryAndWait() async {
-        wakeIntent=nil;wakeNeedsRebuild=false
+        wakeIntent=nil;wakeNeedsRebuild=false;routineRecovery=false
         await wakeRecovery.cancelAndWait()
         wakeRecoveryStatus=WakeRecoveryStatus(.idle)
+    }
+    func beginRoutineRecovery(reason:WakeRecoveryReason) {
+        guard connection == .connected,!locked,!wakeRecovery.active,wakeIntent==nil else{return}
+        cancelHealthRefresh()
+        routineRecovery=true
+        wakeIntent=(UUID(),eventSessionID,currentProfileID,epoch)
+        log("日常连接进入自动恢复："+reason.label)
+        beginWakeRecovery()
+    }
+    func finishRoutineRecovery(_ status:WakeRecoveryStatus,epoch token:UUID) async {
+        await wakeRecovery.waitUntilFinished()
+        guard epoch==token,wakeRecoveryStatus==status,!stopRequested,!busy else{return}
+        // 未知检测只降级；指定出口不可用时保留拒绝保护，不能恢复成其他出口。
+        if connection == .connected,[.unverified,.timeout,.helperRecovery].contains(status.reason) {
+            wakeRecoveryStatus=WakeRecoveryStatus(.idle)
+            monitor.health="连接暂无法确认，保留会话继续复查"
+            return
+        }
+        if status.reason == .exitUnavailable {return}
+        busy=true;defer{busy=false}
+        do {
+            try await disconnectInternal(preserveExternal:true)
+            wakeRecoveryStatus=status
+            connection = .error
+            errorMessage=status.label+"；已释放轻舟接管，外部网络已保留"
+        }catch{recoveryPending=true;wakeRecoveryStatus=status;report(error)}
     }
     func wakeStartupError(_ results:[ConnectivityResult])->Error {
         switch WakeRecoveryCheck.connectivity(results) {
@@ -19,7 +45,7 @@ extension AppModel {
     }
     func beginWakeRecovery() {
         guard let intent=wakeIntent,!wakeRecovery.active,!healthPower.suspended,healthDisplayAwake() else{return}
-        recordEvent(.network,.changed,.systemWake,recoveryID:intent.id,originalSessionID:intent.session)
+        if !routineRecovery {recordEvent(.network,.changed,.systemWake,recoveryID:intent.id,originalSessionID:intent.session)}
         wakeRecovery.changed={ [weak self] status,id in
             guard let self else{return}
             self.wakeRecoveryStatus=status
@@ -38,10 +64,14 @@ extension AppModel {
                 self.timeline.record(NetworkEvent(sessionID:self.eventSessionID,profileID:self.currentProfileID,category:.recovery,outcome:status.phase == .recovered ? .succeeded:status.phase == .manual ? .failed:status.phase == .cancelled ? .cancelled:.started,reason:reason,recoveryID:id,originalSessionID:intent.session,recoveryReason:status.reason,recoveryAttempt:status.attempt,time:self.dependencies.now()))
             }
             if status.phase == .manual {
-                self.wakeIntent=nil;self.errorMessage=status.label
-                Task { @MainActor [weak self] in await Task.yield();self?.drainPendingDisconnect() }
+                let routine=self.routineRecovery,token=self.epoch
+                self.wakeIntent=nil;self.routineRecovery=false
+                let uncertain=routine && self.connection == .connected && [.unverified,.timeout,.helperRecovery].contains(status.reason)
+                self.errorMessage=uncertain ? nil:status.label
+                if routine {Task { @MainActor [weak self] in await self?.finishRoutineRecovery(status,epoch:token) }}
+                else {Task { @MainActor [weak self] in await Task.yield();self?.drainPendingDisconnect() }}
             }
-            if status.phase == .recovered {self.wakeIntent=nil;self.coreFailed=false;self.helperFailureReason=nil;self.failedHealthCycles=0;self.healthFailures=HealthFailureCounter()}
+            if status.phase == .recovered {self.routineRecovery=false;self.wakeIntent=nil;self.coreFailed=false;self.helperFailureReason=nil;self.failedHealthCycles=0;self.healthFailures=HealthFailureCounter()}
         }
         var recoveryToken:UUID?
         wakeRecovery.start(id:intent.id,stableDelay:healthPower.remaining(uptime:healthPowerUptime()),isCurrent:{ [weak self] in
@@ -112,7 +142,7 @@ extension AppModel {
         let results=await [path,node]
         guard !Task.isCancelled,wakeRecovery.id==recoveryToken,epoch==connectionToken,!healthPower.suspended,healthDisplayAwake(),wakeIntent != nil else{return .inconclusive(.cancelled)}
         connectivityResults=results;reachability=ConnectivityResult.combinedSummary(results)
-        return .connectivity(results)
+        return StartupConnectivityPolicy.recovery(results)
     }
     func rebuildWakeSession() async -> WakeRecoveryCheck {
         guard !busy,!stopRequested,!Task.isCancelled else{return .inconclusive(.cancelled)}

@@ -5,6 +5,7 @@ public enum ProfileHistoryDiff {
         guard let current else{return ["原配置已删除，将恢复为新配置；不会切换当前配置","节点：\(snapshot.profile.configuration.nodes.count) 个；规则：\(snapshot.profile.configuration.rules.count) 条","恢复后暂停该配置的订阅与远程规则自动更新，可手动重新开启"]}
         let before=current.configuration,after=snapshot.profile.configuration
         var rows:[String]=[]
+        if before.savedDiagnosticTargets != after.savedDiagnosticTargets {rows.append("常用目标已变化") }
         if current.name != snapshot.profile.name {rows.append("配置名称已变化")}
         let old=Dictionary(uniqueKeysWithValues:before.nodes.map{($0.id,$0)}),new=Dictionary(uniqueKeysWithValues:after.nodes.map{($0.id,$0)})
         rows.append("节点：新增 \(Set(new.keys).subtracting(old.keys).count)，移除 \(Set(old.keys).subtracting(new.keys).count)")

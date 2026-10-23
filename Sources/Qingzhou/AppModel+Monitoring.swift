@@ -11,28 +11,59 @@ extension AppModel {
             if let self,self.epoch==token,!self.locked,!self.healthChecking {self.scheduleHealthRefresh(delay:0)}
             try? await Task.sleep(nanoseconds:60_000_000_000)
         }}
+        telemetryRefreshRequested=true;policyRefreshRequested=true
+        // 辅助服务生命周期独立核验，不随连接列表和策略刷新降频。
         telemetryTask=Task{[weak self] in
             while !Task.isCancelled {
                 guard let self,self.epoch==token else{return}
-                let hidden=NSApplication.shared.isHidden || NSApplication.shared.windows.filter{$0.canBecomeMain}.allSatisfy{!$0.isVisible || $0.isMiniaturized}
-                do {
-                    // 生命周期检查不受“暂停监控”影响，待重连不是核心崩溃。
-                    if self.capture.activeMode?.usesTunnel == true || self.capture.helperRunning {
+                if self.capture.activeMode?.usesTunnel == true || self.capture.helperRunning {
+                    do {
                         let status=try await self.capture.helperStatus()
                         guard self.epoch==token,!Task.isCancelled else{return}
                         self.updateHelperNetworkStatus(status)
-                        if self.networkReconnecting {try? await Task.sleep(nanoseconds:1_000_000_000);continue}
-                        if !status.running || status.phase == "networkProtectionFailed" {self.recordEvent(.network,.failed,.helperFailed);self.log(status.message);self.helperFailureReason=status.message;self.coreFailed=true;self.drainPendingDisconnect();return}
+                        if !self.networkReconnecting && (!status.running || status.phase == "networkProtectionFailed") {self.recordEvent(.network,.failed,.helperFailed);self.log(status.message);self.helperFailureReason=status.message;self.coreFailed=true;self.drainPendingDisconnect();return}
+                    }catch {
+                        self.office.set("routes",title:"内网保护路由",status:.unverified,detail:"辅助服务状态暂不可读，未认定保护正常",now:self.dependencies.now())
                     }
-                    if !self.monitorPaused {
-                        let snapshot=try await client.connections();let info=try await client.proxies()
+                }
+                try? await Task.sleep(nanoseconds:self.telemetryHidden ? 5_000_000_000:1_000_000_000)
+            }
+        }
+        connectionListTask=Task{[weak self] in
+            var last=Date.distantPast
+            while !Task.isCancelled {
+                guard let self,self.epoch==token else{return}
+                let interval=OfficeTelemetryCadence.connections(hidden:self.telemetryHidden,pageVisible:self.connectionsPageVisible)
+                if !self.networkReconnecting && (self.telemetryRefreshRequested || Date().timeIntervalSince(last)>=interval) {
+                    self.telemetryRefreshRequested=false;last=Date()
+                    do {
+                        let snapshot=try await client.connections()
                         guard self.epoch==token,!Task.isCancelled else{return}
+                        // 历史总量在暂停页面刷新时仍累计，不依赖速率展示。
                         if let profileID {self.history.receive(snapshot,profileID:profileID)}
-                        let changed=self.publishTelemetry(snapshot,info:info)
-                        if changed,self.connectivityResults != ConnectivityResult.pending {Task{await self.checkConnectivity()}}
-                    }
-                } catch {if self.epoch==token,!Task.isCancelled,self.monitor.connections != .unavailable{self.monitor.connections = .unavailable}}
-                try? await Task.sleep(nanoseconds:hidden ? 5_000_000_000 : 1_000_000_000)
+                        if !self.monitorPaused {_=self.publishTelemetry(snapshot,info:self.proxyInfo)}
+                    } catch {if self.epoch==token,!Task.isCancelled,self.monitor.connections != .unavailable {self.monitor.connections = .unavailable}}
+                }
+                await self.connectionRefreshSignal.wait(self.networkReconnecting ? interval:max(0.05,interval-Date().timeIntervalSince(last)))
+            }
+        }
+        policyTask=Task{[weak self] in
+            var last=Date.distantPast
+            while !Task.isCancelled {
+                guard let self,self.epoch==token else{return}
+                if !self.networkReconnecting && (self.policyRefreshRequested || Date().timeIntervalSince(last)>=OfficeTelemetryCadence.policies(hidden:self.telemetryHidden)) {
+                    self.policyRefreshRequested=false;last=Date()
+                    do {
+                        let info=try await client.proxies()
+                        guard self.epoch==token,!Task.isCancelled else{return}
+                        let changed=self.publishPolicyInfo(info)
+                        if changed,self.connectivityResults != ConnectivityResult.pending {
+                            if CoreAPIClient.actualTag(info) != self.verifiedSelectionTag {self.scheduleHealthRefresh()}
+                            self.verifiedSelectionTag=nil
+                        }
+                    } catch { /* 策略查询失败不覆盖上次节点，也不伪造新出口。 */ }
+                }
+                await self.policyRefreshSignal.wait(self.networkReconnecting ? OfficeTelemetryCadence.policies(hidden:self.telemetryHidden):max(0.05,OfficeTelemetryCadence.policies(hidden:self.telemetryHidden)-Date().timeIntervalSince(last)))
             }
         }
         let trafficStream=dependencies.trafficStream
@@ -42,10 +73,8 @@ extension AppModel {
                 guard let self, !Task.isCancelled, self.epoch==token else { return }
                 if self.monitor.traffic != .available { self.monitor.traffic = .available }
                 let hidden=NSApplication.shared.isHidden || NSApplication.shared.windows.filter{$0.canBecomeMain}.allSatisfy{!$0.isVisible || $0.isMiniaturized}
-                if !self.monitorPaused && Date().timeIntervalSince(last)>=(hidden ? 5 : 0.8) {
-                    self.uploadRate=max(0,rate.up);self.downloadRate=max(0,rate.down);last=Date()
-                    self.rateHistory.append(RateSample(upload:self.uploadRate,download:self.downloadRate))
-                    self.rateHistory.removeAll{Date().timeIntervalSince($0.time)>1800}
+                if !self.monitorPaused && Date().timeIntervalSince(last)>=OfficeTelemetryCadence.traffic(hidden:hidden) {
+                    last=Date();self.trafficDisplay.receive(upload:rate.up,download:rate.down,now:last)
                 }
             }, disconnected: { [weak self] in
                 guard let self, !Task.isCancelled, self.epoch==token else { return }
@@ -59,13 +88,22 @@ extension AppModel {
         if connections != snapshot.connections {aggregate(snapshot.connections);connections=snapshot.connections}
         if uploadTotal != snapshot.uploadTotal {uploadTotal=snapshot.uploadTotal}
         if downloadTotal != snapshot.downloadTotal {downloadTotal=snapshot.downloadTotal}
-        let changed=CoreAPIClient.actualTag(proxyInfo) != CoreAPIClient.actualTag(info)
-        if changed {recordEvent(.node,.changed,.nodeSelected)}
-        if proxyInfo != info {proxyInfo=info}
+        let changed=publishPolicyInfo(info)
         if monitor.connections != .available {monitor.connections = .available}
         return changed
     }
+    func requestOfficeRefresh() {telemetryRefreshRequested=true;policyRefreshRequested=true;connectionRefreshSignal.wake();policyRefreshSignal.wake()}
+    func setConnectionsPageVisible(_ visible:Bool) {connectionsPageVisible=visible;telemetryRefreshRequested=true;connectionRefreshSignal.wake()}
+    var telemetryHidden:Bool {dependencies.officeHiddenOverride?() ?? (NSApplication.shared.isHidden || NSApplication.shared.windows.filter{$0.canBecomeMain}.allSatisfy{!$0.isVisible || $0.isMiniaturized})}
+    @discardableResult func publishPolicyInfo(_ info:[String:ProxyInfo])->Bool {
+        let changed=CoreAPIClient.actualTag(proxyInfo) != CoreAPIClient.actualTag(info)
+        if changed {invalidateOfficeResults();if CoreAPIClient.actualTag(info)==verifiedSelectionTag {publishOfficeConnectivity()};recordEvent(.node,.changed,.nodeSelected)}
+        if proxyInfo != info {proxyInfo=info}
+        return changed
+    }
     func updateHelperNetworkStatus(_ status:TunReply) {
+        if status.message == "网络变化，正在重新检查",helperStatus != status.message {invalidateOfficeResults(network:true)}
+        publishOfficeHelper(status)
         if helperStatus != status.message {helperStatus=status.message}
         let summary=status.protectionSummary ?? []
         if protectionSummary != summary {protectionSummary=summary}
@@ -84,7 +122,7 @@ extension AppModel {
         }
     }
 
-    func stopTelemetry() {history.finish();networkReconnecting=false;cancelHealthRefresh();epoch=UUID();connectivityEpoch=UUID();healthRefreshPending=false;healthTask?.cancel();healthTask=nil;telemetryTask?.cancel();trafficTask?.cancel();telemetryTask=nil;trafficTask=nil;if let old=api{Task{await old.shutdown()}};api=nil;connections=[];proxyInfo=[:];uploadRate=0;downloadRate=0;uploadTotal=0;downloadTotal=0;monitor=RuntimeMonitorState()}
+    func stopTelemetry() {verifiedSelectionTag=nil;history.finish();networkReconnecting=false;cancelHealthRefresh();epoch=UUID();connectivityEpoch=UUID();healthRefreshPending=false;healthTask?.cancel();healthTask=nil;telemetryTask?.cancel();connectionListTask?.cancel();policyTask?.cancel();trafficTask?.cancel();telemetryTask=nil;connectionListTask=nil;policyTask=nil;trafficTask=nil;if let old=api{Task{await old.shutdown()}};api=nil;connections=[];proxyInfo=[:];uploadRate=0;downloadRate=0;uploadTotal=0;downloadTotal=0;monitor=RuntimeMonitorState()}
 
     func closeConnection(_ id:String?) async {guard !locked,let api else{return};do{if let id{try await api.closeConnection(id)}else{try await api.closeAllConnections()}}catch{report(error)}}
     func aggregate(_ rows:[CoreConnection]) {

@@ -5,6 +5,7 @@ public enum PolicyValidator {
         switch ref {case .node(let id):return state.nodes.contains{$0.id==id};case .group(let id):return state.groups.contains{$0.id==id};case .automatic:return !state.nodes.isEmpty;case .selected,.direct,.reject:return true}
     }
     public static func validate(_ state:AppState) throws {
+        try SavedDiagnosticTarget.validate(state.savedDiagnosticTargets ?? [])
         if let shadow=state.shadowrocket {try shadow.validate()}
         for rule in state.rules where rule.kind == .geoip || rule.kind == .asn {
             let key=(rule.kind == .geoip ? "GEOIP:":"IP-ASN:")+rule.value

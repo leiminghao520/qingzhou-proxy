@@ -42,8 +42,17 @@ import QingzhouKit
         MenuBarExtra("轻舟代理", systemImage: model.connection == .connected ? "paperplane.fill" : "paperplane") {
             Text("\(model.connectionSummary) · \(model.state.mode.label)")
             Text(model.actualName + " · " + model.state.captureMode.label)
+            OfficeMenuHealth(office:model.office,hasCorporate:!model.state.protectedDomains.isEmpty || !model.state.enabledBypasses.isEmpty)
+            if !(model.state.savedDiagnosticTargets ?? []).isEmpty {
+                Menu("常用目标路径检查") {
+                    ForEach(Array((model.state.savedDiagnosticTargets ?? []).prefix(5))) {target in
+                        Button(target.name) {model.inspectSavedTarget(target);model.office.diagnosticRequested=true}
+                    }
+                    Button("全部目标与诊断") {model.office.diagnosticRequested=true}
+                }.disabled(model.locked)
+            }
             if model.connection == .connected {
-                Text("↑ \(model.uploadRateText)  ↓ \(model.downloadRateText)")
+                OfficeRateLine(display:model.trafficDisplay,available:model.monitor.traffic == .available && !model.monitorPaused)
             }
             Button(model.connection == .connected ? "断开" : model.connection == .connecting ? "取消连接" : "连接") {
                 Task {
@@ -59,7 +68,8 @@ import QingzhouKit
                     ForEach(model.state.groups) { group in
                         Button(group.name) { Task { await model.selectPolicy(.group(group.id)) } }
                     }
-                    ForEach(model.state.nodes) { node in
+                    Button("更多线路") {model.office.linesRequested=true}
+                    ForEach(OfficeTelemetryCadence.menuNodes(model.state,actualTag:CoreAPIClient.actualTag(model.proxyInfo))) { node in
                         Button((model.state.activePolicy == .node(node.id) ? "✓ " : "") + node.name) {
                             Task { await model.select(node.id) }
                         }
@@ -85,7 +95,7 @@ import QingzhouKit
         Menu("配置") {
             ForEach(model.profiles) { profile in
                 Button((model.currentProfileID == profile.id ? "✓ " : "") + profile.name) {
-                    Task { await model.changeProfile(profile.id) }
+                    Task { await model.requestProfileChange(profile.id) }
                 }
             }
         }
@@ -113,7 +123,8 @@ import QingzhouKit
                 Button(group.name) { Task { await model.selectPolicy(.group(group.id)) } }
             }
             Divider()
-            ForEach(model.state.nodes.prefix(30)) { node in
+            Button("更多线路") {model.office.linesRequested=true}
+            ForEach(OfficeTelemetryCadence.menuNodes(model.state,actualTag:CoreAPIClient.actualTag(model.proxyInfo))) { node in
                 Button((model.state.favorites.contains(node.id) ? "★ " : "") + node.name) {
                     Task { await model.select(node.id) }
                 }
@@ -130,7 +141,7 @@ import QingzhouKit
         Button("更新订阅和规则") { Task { await model.refreshAll() } }
             .disabled(model.locked)
 
-        Button("复制终端代理命令") { model.copyTerminalProxy() }
+        Button("开发工具代理助手") {model.office.developerRequested=true}
         Button("恢复原代理") { Task { await model.recover() } }
             .disabled(model.loadingFailed || model.recovering)
     }

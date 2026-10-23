@@ -6,6 +6,7 @@ import QingzhouKit
 // 链接正式退出核验，只注入快照和代理核验；夹具禁止写入真实网络。
 struct HelperProxyRecord {}
 struct Journal {
+    var allDNSServices:[DNSServiceRecord] {[DNSServiceRecord(key:dnsKey,expected:expectedDNS,original:nil)]}
     var firewall:String?=nil
     var expectedDNS:Data
     var dnsKey="fixture"
@@ -23,6 +24,7 @@ final class Service {
     var quitDNSRead:((String) -> NSDictionary?)?
     let dynamic=SCDynamicStoreCreate(nil,"轻舟退出只读夹具" as CFString,nil,nil)!
     var proxyBlocked=false
+    func readDNSService(_ key:String) throws -> NSDictionary? {throw ProxyError("夹具必须注入 DNS 读取")}
     func verifyNoOwnedProxyEndpoint(_ records:[HelperProxyRecord]) throws {
         if proxyBlocked {throw ProxyError("合成代理残留")}
     }

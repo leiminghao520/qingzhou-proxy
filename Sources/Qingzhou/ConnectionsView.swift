@@ -126,6 +126,8 @@ struct ConnectionsView: View {
                 if visible.count<rows.count {Button("再显示 1,000 条") {page.loadMore()}}
             }
         }
+        .onAppear {model.setConnectionsPageVisible(true)}
+        .onDisappear {model.setConnectionsPageVisible(false)}
         .sheet(item: $detail) { row in
             VStack(alignment: .leading, spacing: 14) {
                 Text("连接详细信息").font(.title2.bold())

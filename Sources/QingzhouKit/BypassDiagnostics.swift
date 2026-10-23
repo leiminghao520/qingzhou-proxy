@@ -8,14 +8,16 @@ public struct BypassPathDiagnostic:Sendable {
     public init(rows:[String],hasFailure:Bool) {self.rows=rows;self.hasFailure=hasFailure}
 }
 public enum BypassDiagnostics {
-    public static func inspect(_ input:String,state:AppState,active:Bool,ownedTunnel:String?=nil,cancelled:@escaping ()->Bool={false},resolve:(String)throws->[String]=NetworkInspection.addresses) throws -> BypassPathDiagnostic {
+    public static func inspect(_ input:String,state:AppState,active:Bool,ownedTunnel:String?=nil,cancelled:@escaping ()->Bool={false},resolve:(String)throws->[String]=NetworkInspection.addresses,inspectEnterpriseDNS:Bool=true) throws -> BypassPathDiagnostic {
         let host=input.trimmingCharacters(in:.whitespacesAndNewlines).lowercased()
         guard !host.isEmpty,!host.contains("/"),!host.contains("://") else {throw ProxyError("请输入不含协议、端口和路径的域名或 IP")}
         let isIP=(try? ConfigBuilder.validate(RoutingRule(kind:.cidr,value:host,action:.direct))) != nil
-        if !isIP {_=try ProtectedDomainPolicy.normalize([host])}
+        if !isIP {_=try SavedDiagnosticTarget(name:"路径查询",host:host).validated()}
         var rows=["运行查询：只读，不修改路由、DNS 或代理设置"],failed=false
         guard !cancelled() else{throw CancellationError()}
-        let addresses=isIP ? [host] : try resolve(host)
+        let addresses:[String]
+        do {addresses=isIP ? [host]:try resolve(host)}
+        catch {addresses=[];failed=true;rows.append("系统解析：未取得地址；继续检查企业解析器与转发阶段") }
         guard !cancelled() else{throw CancellationError()}
         let backend=NativeRouteBackend();backend.cancelled=cancelled
         let matched=state.enabledBypasses.filter{$0.matches(host:host,ip:isIP ? host:nil)}
@@ -47,12 +49,36 @@ public enum BypassDiagnostics {
                 if !valid {failed=true}
             }
         }
-        if !isIP,let store=SCDynamicStoreCreate(nil,"轻舟绕过 DNS 路径只读诊断" as CFString,nil,nil),let global=SCDynamicStoreCopyValue(store,"State:/Network/Global/IPv4" as CFString) as? [String:Any],let primary=global["PrimaryInterface"] as? String {
+        if inspectEnterpriseDNS,!isIP,let store=SCDynamicStoreCreate(nil,"轻舟绕过 DNS 路径只读诊断" as CFString,nil,nil),let global=SCDynamicStoreCopyValue(store,"State:/Network/Global/IPv4" as CFString) as? [String:Any],let primary=global["PrimaryInterface"] as? String {
             guard !cancelled() else{throw CancellationError()}
             let sample=try backend.snapshot()
-            let snapshot=try NetworkSnapshot.read(store:store,primary:primary,routes:sample.table,ownedTunnel:ownedTunnel,structuredRoutes:sample.planningRoutes,lookup:{try backend.lookup($0,ipv6:$1).queryText})
-            let plan=try CapturePlan.make(snapshot:snapshot,extraCIDRs:[],extraDomains:[])
+            let keys=SCDynamicStoreCopyKeyList(store,"State:/Network/Service/Qingzhou-.*/DNS" as CFString) as? [String] ?? []
+            // 诊断原网络时排除轻舟命名服务；此过滤不用于恢复或认领所有权。
+            let snapshot=try NetworkSnapshot.read(store:store,primary:primary,routes:sample.table,ownedDNSKeys:Set(keys),ownedTunnel:ownedTunnel,structuredRoutes:sample.planningRoutes,lookup:{try backend.lookup($0,ipv6:$1).queryText})
+            let plan=try CapturePlan.make(snapshot:snapshot,state:state)
+            rows.append("原系统 DNS："+snapshot.resolvers.map{$0.service+" / "+$0.interface+" / "+$0.servers.joined(separator:",")+" / order="+String($0.order)}.joined(separator:"；"))
             let resolvers=plan.resolvers(for:host)
+            if plan.protects(host) {
+                let relay=try ScopedDNSForwarder(plan:plan,protectAnswers:{name,answers,resolver,_ in
+                    for address in answers {_=try plan.domainRoute(address:address,resolver:resolver,host:name)}
+                });defer{relay.stop()}
+                for type:UInt16 in [1,28] {
+                    guard !cancelled() else {throw CancellationError()}
+                    _=relay.resolve(DNSPacket.query(host,type:type),name:host,budget:1)
+                }
+                for result in relay.diagnosticResults {
+                    rows.append(result.summary)
+                    for address in result.addresses {
+                        let actual=try backend.lookup(address,ipv6:address.contains(":")).route
+                        rows.append("企业答案目标路由："+address+" → "+actual.interface+" / "+actual.gateway)
+                        if let resolver=resolvers.first,let expected=try? plan.domainRoute(address:address,resolver:resolver,host:host) {
+                            rows.append("原保护出口："+expected.interface+" / "+expected.gateway)
+                            if active,actual.interface != expected.interface {failed=true}
+                        }
+                    }
+                    if result.result.outcome == .failed {failed=true}
+                }
+            }
             rows.append("系统 DNS 作用域："+resolvers.map{$0.interface+" / "+$0.servers.joined(separator:",")}.joined(separator:"；"))
             rows.append("核心 DNS 配置："+(matched.isEmpty ? "由普通分流决定":"优先使用原系统解析；完整接管由作用域转发器处理"))
         }

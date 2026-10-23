@@ -183,7 +183,7 @@ final class RepairTests:CheckCase {
         expectEqual(plan.resolvers(for:"a.corp.example").map(\.service),["a"])
         expectEqual(plan.resolvers(for:"a.dev.corp.example").map(\.service),["b"])
         expectEqual(plan.resolvers(for:"public.example").map(\.service),["wifi"])
-        expectEqual(plan.resolvers(for:"short").map(\.service),["b"])
+        expectThrows(try plan.selectResolvers(for:"short"))
     }
 }
 

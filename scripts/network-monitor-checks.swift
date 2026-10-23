@@ -4,7 +4,7 @@ import QingzhouKit
 
 // 此夹具链接正式 NetworkMonitor.swift，只替换管理员服务的外部输入和写操作。
 struct OwnedRoute { var destination: String; var gateway: String; var interface: String; var ipv6: Bool = false; var scope: String? = nil }
-struct Journal { var captureRoutes:[String]?=nil; var address4="100.64.1.1/30"; var address6="fd71:717a::1/126"; var expectedDNS: Data; var dnsKey = "fixture"; var routes: [OwnedRoute]; var preservedRoutes: [ProtectedRoute]? = []; var interface: String? = "utun42" }
+struct Journal { var allDNSServices:[DNSServiceRecord] {[DNSServiceRecord(key:dnsKey,expected:expectedDNS,original:nil)]}; var captureRoutes:[String]?=nil; var address4="100.64.1.1/30"; var address6="fd71:717a::1/126"; var expectedDNS: Data; var dnsKey = "fixture"; var routes: [OwnedRoute]; var preservedRoutes: [ProtectedRoute]? = []; var interface: String? = "utun42" }
 final class Service {
     var routeBackend:RouteBackend=LegacyRouteBackend(command:{_,_,_ in throw ProxyError("夹具禁止真实命令")})
     func checkRouteOwner() throws {}
@@ -68,6 +68,12 @@ final class Service {
     func field(_ label:String,_ text:String)->String? {label == "gateway" ? NetworkInspection.routeGateway(text):NetworkInspection.routeField(label,text)}
     func prefix(_ info:String)->String? {NetworkInspection.routePrefix(destination:field("destination",info),mask:field("mask",info),host:info.contains("HOST"))}
     func save() throws {}
+    func dnsServiceIssues()->[String] {
+        guard let journal else {return ["记录缺失"]}
+        return DNSServiceTransaction.issues(journal.allDNSServices,read:{self.networkDNSRead?($0)})
+    }
+    // 此夹具验证路由监控；DNS 发布事务由企业 DNS 夹具链接正式实现验证。
+    func publishCorporateDNS(_ plan:CapturePlan) throws {}
     func writeRoute(_ arguments:[String],deadline:Date?) throws -> String {routeWrites += 1;if let writeRouteHook {return try writeRouteHook(arguments)};throw ProxyError("夹具禁止写系统路由")}
 
     func proxyConfigurationIssues() -> [String] { proxyReads += 1; return proxyIssues }

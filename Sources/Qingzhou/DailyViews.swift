@@ -10,6 +10,10 @@ struct ProfilesView: View {
     @State private var name = ""
     @State private var office = ""
     @State private var copy = false
+    @State private var officeTemplate=OfficeSceneTemplate.bank
+    @State private var officeCIDRs=""
+    @State private var officeTargets=""
+    @State private var officeDNS=DNSPreference.system
     @State private var backup = false
     @State private var historyProfile: UUID?
     @State private var showingHistory = false
@@ -68,7 +72,7 @@ struct ProfilesView: View {
                             HStack(spacing: 8) {
                                 if !isCurrent {
                                     Button("应用并切换") {
-                                        Task { await model.changeProfile(profile.id) }
+                                        Task { await model.requestProfileChange(profile.id) }
                                     }
                                     .buttonStyle(.borderedProminent)
                                     .controlSize(.small)
@@ -119,18 +123,29 @@ struct ProfilesView: View {
                 }
                 
                 if !copy {
-                    TextField("办公模板内网域名（用逗号分隔；留空则为通用模板）", text: $office)
-                        .textFieldStyle(.roundedBorder)
+                    Picker("场景模板",selection:$officeTemplate) {
+                        ForEach(OfficeSceneTemplate.allCases,id:\.self) {Text($0.label).tag($0)}
+                    }.pickerStyle(.segmented)
+                    if officeTemplate == .bank {
+                        TextField("内网域名（逗号分隔）",text:$office).textFieldStyle(.roundedBorder)
+                        TextField("绕行 CIDR（逗号分隔，可留空）",text:$officeCIDRs).textFieldStyle(.roundedBorder)
+                        TextField("常用目标域名或 IP（逗号分隔，可留空）",text:$officeTargets).textFieldStyle(.roundedBorder)
+                        Picker("DNS 偏好",selection:$officeDNS) {Text("原系统解析").tag(DNSPreference.system);Text("外网通过代理 HTTPS DNS").tag(DNSPreference.httpsProxy)}
+                        Text("常用目标默认跟随系统路由、HTTPS 443；创建后可在目标管理中设置端口与测试类型。").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Text("模板不含公司地址、节点或凭据，默认关闭自动连接。").font(.caption).foregroundStyle(.secondary)
                 }
                 
                 Button {
                     Task {
-                        await model.createProfile(
-                            name: name,
-                            copy: copy,
-                            officeDomains: office.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-                        )
-                        if model.errorMessage == nil { name = ""; office = "" }
+                        model.errorMessage=nil
+                        if copy {await model.createProfile(name:name,copy:true)}
+                        else {
+                            let split:(String)->[String] = {$0.split(whereSeparator:{$0=="," || $0=="\n"}).map{String($0).trimmingCharacters(in:.whitespaces)}}
+                            let targets=split(officeTargets).map{SavedDiagnosticTarget(name:$0,host:$0)}
+                            await model.createOfficeProfile(name:name,template:officeTemplate,domains:split(office),cidrs:split(officeCIDRs),dns:officeDNS,targets:targets)
+                        }
+                        if model.errorMessage == nil {name="";office="";officeCIDRs="";officeTargets=""}
                     }
                 } label: {
                     Label("创建新配置", systemImage: "plus.circle.fill")
@@ -378,6 +393,17 @@ struct ComprehensiveDiagnosticsView: View {
                 .disabled(model.diagnosticRows.isEmpty)
             }
             
+            if !model.protectionSummary.isEmpty || !model.connectivityResults.isEmpty {
+                DisclosureGroup("网络保护与连通性详情") {
+                    ScrollView {
+                        LazyVStack(alignment:.leading,spacing:6) {
+                            ForEach(Array(model.protectionSummary.enumerated()),id:\.offset) {_,text in Text(text).textSelection(.enabled)}
+                            ForEach(Array(model.connectivityResults.enumerated()),id:\.offset) {_,result in Text(result.summary).textSelection(.enabled)}
+                        }.font(.caption).frame(maxWidth:.infinity,alignment:.leading)
+                    }.frame(maxHeight:220)
+                }
+            }
+
             if model.diagnosticRows.isEmpty {
                 ContentUnavailableView(
                     "尚未执行诊断",

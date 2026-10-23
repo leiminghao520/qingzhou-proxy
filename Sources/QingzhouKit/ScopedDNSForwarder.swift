@@ -21,6 +21,12 @@ public enum DNSPacket {
         }
         return nil
     }
+    public static func query(_ name:String,type:UInt16)->Data {
+        var bytes:[UInt8]=[0x71,0x7a,1,0,0,1,0,0,0,0,0,0]
+        for part in name.split(separator:".") {guard part.utf8.count<=63 else {return Data()};bytes.append(UInt8(part.utf8.count));bytes += part.utf8}
+        bytes += [0,UInt8(type>>8),UInt8(type&255),0,1];return Data(bytes)
+    }
+    public static func queryType(_ data:Data)->UInt16 {question(data)?.1 ?? 0}
     public static func name(_ data:Data)->String? {guard data.count>=12,data[2]&0x80==0 else{return nil};return question(data)?.0}
     public static func failure(_ query:Data)->Data {var bytes=[UInt8](query);if bytes.count>=12 {bytes[2]=(bytes[2]|0x80)&0xfd;bytes[3]=(bytes[3]&0xf0)|2;for i in 6..<12 {bytes[i]=0}};return Data(bytes)}
     public static func acceptable(_ response:Data,query:Data)->Bool {
@@ -40,7 +46,16 @@ public final class ScopedDNSForwarder {
     private let protectAnswers:((String,[String],DNSResolverScope,Date)throws->Void)?
     private let transport:((Data,String,String)->Data?)?
     private let work=DNSWorkQueue()
-    public var diagnostics:String {work.snapshot.summary}
+    private var recent:[CorporateDNSDiagnostic]=[]
+    public var diagnosticResults:[CorporateDNSDiagnostic] {lock.lock();defer{lock.unlock()};return recent}
+    public var diagnostics:String {([work.snapshot.summary]+diagnosticResults.map(\.summary)).joined(separator:"\n")}
+    private func record(_ value:CorporateDNSDiagnostic,generation:UInt64) {
+        lock.lock();defer{lock.unlock()}
+        // 旧代次不能覆盖新接口的诊断状态。
+        guard generation==planGeneration else {return}
+        recent.removeAll{$0.name==value.name && $0.queryType==value.queryType}
+        recent.append(value);if recent.count>32 {recent.removeFirst(recent.count-32)}
+    }
     private let lock=NSLock()
     private var stopped=false
     private var started=false
@@ -85,7 +100,7 @@ public final class ScopedDNSForwarder {
     }
     // 计划整体替换，旧代次的异步响应不得返回或触发保护写入。
     public func updatePlan(_ next:CapturePlan,suspended:Bool=false) {
-        lock.lock();plan=next;planGeneration &+= 1;self.suspended=suspended;lock.unlock()
+        lock.lock();plan=next;planGeneration &+= 1;recent=[];self.suspended=suspended;lock.unlock()
     }
     public func suspendProtectedQueries() {
         lock.lock();suspended=true;planGeneration &+= 1;lock.unlock()
@@ -103,26 +118,44 @@ public final class ScopedDNSForwarder {
     }
     public func resolve(_ query:Data,name:String,exchange:((Data,String,String)->Data?)?=nil,budget:TimeInterval=5)->Data {
         let (plan,generation,suspended)=currentPlan()
-        if suspended && plan.protects(name) {return DNSPacket.failure(query)}
+        func report(_ outcome:CorporateDNSOutcome,_ stage:String,_ server:String?=nil,_ interface:String?=nil,_ addresses:[String]=[]) {
+            record(CorporateDNSDiagnostic(name:name,queryType:DNSPacket.queryType(query),outcome:outcome,server:server,interface:interface,addresses:addresses,stage:stage),generation:generation)
+        }
+        if suspended && plan.protects(name) {report(.resolverUnavailable,"网络更新");return DNSPacket.failure(query)}
         let deadline=Date().addingTimeInterval(min(5,max(0,budget)))
-        for resolver in plan.resolvers(for:name) {for server in resolver.servers {
+        let resolvers:[DNSResolverScope]
+        do {resolvers=try plan.selectResolvers(for:name)}
+        catch {report((error as? CorporateDNSSelectionError) == .ambiguous ? .resolverAmbiguous:.resolverUnavailable,"解析器选择");return DNSPacket.failure(query)}
+        if resolvers.isEmpty {report(.resolverUnavailable,"解析器选择")}
+        for resolver in resolvers {for server in resolver.servers {
             guard !isStopped else{return DNSPacket.failure(query)}
-            guard Date()<deadline else{work.recordTimeout();return DNSPacket.failure(query)}
+            guard Date()<deadline else{work.recordTimeout();report(.timeout,"转发",server,resolver.interface);return DNSPacket.failure(query)}
+            if exchange==nil,transport==nil,if_nametoindex(resolver.interface)==0 {report(.resolverUnavailable,"接口绑定",server,resolver.interface);continue}
             let response:Data?
             if let hook=exchange ?? transport {response=hook(query,server,resolver.interface)}else{response=Self.exchange(query,server,resolver.interface,deadline:deadline)}
-            if let response,Date()<deadline,DNSPacket.acceptable(response,query:query){
-                guard validGeneration(generation,name:name,wasProtected:plan.protects(name)) else {return DNSPacket.failure(query)}
-                if plan.protects(name) {
-                    do {
-                        try protectSnapshotAnswers?(plan,generation,name,DNSPacket.addresses(response),resolver,deadline)
-                        try protectAnswers?(name,DNSPacket.addresses(response),resolver,deadline)
-                    } catch {return DNSPacket.failure(query)}
-                }
-                guard Date()<deadline,validGeneration(generation,name:name,wasProtected:plan.protects(name)) else {return DNSPacket.failure(query)}
-                return response
+            guard Date()<deadline else {work.recordTimeout();report(.timeout,"转发",server,resolver.interface);return DNSPacket.failure(query)}
+            guard let response else {report(.timeout,"转发",server,resolver.interface);continue}
+            guard DNSPacket.acceptable(response,query:query) else {
+                // 只有事务和问题匹配的响应才能按 RCODE 分类。
+                var normalized=response
+                if normalized.count>=12 {normalized[3] &= 0xf0}
+                let outcome:CorporateDNSOutcome=DNSPacket.acceptable(normalized,query:query) ? (response[3]&15==2 ? .servfail:response[3]&15==5 ? .refused:.invalidResponse):.invalidResponse
+                report(outcome,"上游响应",server,resolver.interface);continue
             }
+            guard validGeneration(generation,name:name,wasProtected:plan.protects(name)) else {report(.staleResponse,"代次核验",server,resolver.interface);return DNSPacket.failure(query)}
+            do {
+                let addresses=try DNSPacket.addresses(response)
+                if plan.protects(name) {
+                    try protectSnapshotAnswers?(plan,generation,name,addresses,resolver,deadline)
+                    try protectAnswers?(name,addresses,resolver,deadline)
+                }
+                guard Date()<deadline,validGeneration(generation,name:name,wasProtected:plan.protects(name)) else {report(.staleResponse,"返回核验",server,resolver.interface);return DNSPacket.failure(query)}
+                let code=response[3]&15
+                guard code==0 || code==3 else {report(.invalidResponse,"上游响应",server,resolver.interface);return DNSPacket.failure(query)}
+                report(code==3 ? .nxdomain:addresses.isEmpty ? .noRecords:.answered,"完成",server,resolver.interface,addresses)
+                return response
+            } catch {report(.answerProtectionFailed,"答案保护",server,resolver.interface);return DNSPacket.failure(query)}
         }}
-        if Date()>=deadline {work.recordTimeout()}
         return DNSPacket.failure(query)
     }
     public func probe(_ resolver:DNSResolverScope)->Bool {

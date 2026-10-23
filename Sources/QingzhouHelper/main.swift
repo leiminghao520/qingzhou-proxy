@@ -37,6 +37,8 @@ final class Service {
     var networkChecks: NetworkCheckScheduler?
     let routeBackend:RouteBackend
     lazy var routeSample: () throws -> NetworkRouteSample = { [unowned self] in try self.routeAudit.operation(transaction:self.routeTransaction,stage:self.phase,kind:"snapshot",identity:"table") {try self.measured("routeTableSample") {try self.routeBackend.snapshot()}} }
+    var corporateDNSVerify:(([String],Int) throws -> Void)?
+    var dnsServiceWrite:((String,NSDictionary?) throws -> Void)?
     var networkDNSRead: ((String) -> NSDictionary?)?
     var networkSnapshotRead: ((NetworkRouteSample) throws -> NetworkSnapshot)?
     var networkClock: () -> Date = { Date() }
@@ -119,18 +121,7 @@ final class Service {
 return};var issues:[String]=[]
         // 用户显式恢复时也只清理仍属于轻舟的入口，不能覆盖后来接管的代理。
         do{issues += try restoreProxy(record.proxies ?? [],preserveExternal:preserveExternal)}catch{issues.append("系统代理读取或提交失败："+error.localizedDescription)}
-        let current=SCDynamicStoreCopyValue(dynamic,record.dnsKey as CFString)
-        let expected=try PropertyListSerialization.propertyList(from:record.expectedDNS,format:nil) as! NSDictionary
-        if let current=current as? NSDictionary,current==expected {
-            if let original=record.previousDNS {
-                let value=try PropertyListSerialization.propertyList(from:original,format:nil)
-                if !SCDynamicStoreSetValue(dynamic,record.dnsKey as CFString,value as CFPropertyList){issues.append("原 DNS 恢复写入失败")}
-            }else if !SCDynamicStoreRemoveValue(dynamic,record.dnsKey as CFString){issues.append("本次补充 DNS 服务移除失败")}
-        } else if current==nil,record.previousDNS != nil {issues.append("原 DNS 服务缺失，保留恢复记录")}
-        else if let current=current as? NSDictionary {
-            let old=try record.previousDNS.map{try PropertyListSerialization.propertyList(from:$0,format:nil) as! NSDictionary}
-            if current != old && !preserveExternal {issues.append("本次补充 DNS 服务已有外部修改，保留当前值")}
-        }
+        issues += DNSServiceTransaction.restore(record.allDNSServices,read:readDNSService,write:writeDNSService)
         let recoverySample=preserveExternal ? try routeSample():nil
         let recoveryTable=recoverySample?.table ?? ""
         for route in record.routes.reversed() {
@@ -294,7 +285,7 @@ return};var issues:[String]=[]
         catch {try? FileManager.default.removeItem(at:file);throw ProxyError("固定核心校验 TUN 配置失败："+error.localizedDescription)}
         }
         let expected=CaptureDNSPolicy.settings(server:addresses.gateway4)
-        journal=Journal(transactionID:routeTransaction,captureRoutes:captureRoutes.prefixes,preservedRoutes:bypassPlan.preservedRoutes,dnsKey:dnsKey,previousDNS:nil,expectedDNS:try PropertyListSerialization.data(fromPropertyList:expected,format:.binary,options:0),address4:address4,address6:address6);try save()
+        journal=Journal(transactionID:routeTransaction,captureRoutes:captureRoutes.prefixes,preservedRoutes:bypassPlan.preservedRoutes,dnsKey:dnsKey,previousDNS:try readDNSService(dnsKey).map(DNSServiceTransaction.encode),expectedDNS:try PropertyListSerialization.data(fromPropertyList:expected,format:.binary,options:0),address4:address4,address6:address6);try save()
         do {
             try installBypassFirewall(state)
             phase="coreStartup"
@@ -343,7 +334,8 @@ return};var issues:[String]=[]
             try bypassPlan.validatePreservedRoutes(try routeSample().ownershipRoutes)
             try bypassPlan.validate(lookup:{try self.routeInfo($0,ipv6:$1)})
             phase="dnsActivation"
-            guard SCDynamicStoreSetValue(dynamic,dnsKey as CFString,expected as CFDictionary) else{throw ProxyError("TUN DNS 设置失败")}
+            try DNSServiceTransaction.apply([journal!.allDNSServices[0]],persist:save,read:readDNSService,write:writeDNSService)
+            try publishCorporateDNS(plan)
             let dnsDeadline=Date().addingTimeInterval(3)
             var preferredDNS=false,lastDNS="",dnsCheckError=""
             repeat {
@@ -402,6 +394,7 @@ return};var issues:[String]=[]
             reply.supportsWakeRecovery=true;reply.supportsExternalRecovery=true;reply.recoveryPending=journal != nil
             if request.operation=="status",request.verifyNetwork==true {reply.safeToQuit=verifyReleasedForQuit()}
             timing.finish()
+            reply.corporateDNSDiagnostics=dnsForwarder?.diagnosticResults
             reply.stageTimings=timing.samples+(routeMetrics?.samples ?? [])
             return reply
         } catch {
@@ -420,12 +413,12 @@ return};var issues:[String]=[]
                 let prefixes=record.captureRoutes ?? CaptureRoutePlan.legacyPrefixes
                 let tunnels=record.routes.filter{$0.interface==record.interface && prefixes.contains($0.destination)}
                 let verified=tunnels.count==prefixes.count && tunnels.allSatisfy{index.state(ProtectedRoute(destination:$0.destination,gateway:$0.gateway,interface:$0.interface,scope:$0.scope)) == .owned}
-                let current=SCDynamicStoreCopyValue(dynamic,record.dnsKey as CFString) as? NSDictionary;let expected=try PropertyListSerialization.propertyList(from:record.expectedDNS,format:nil) as! NSDictionary
-                var reply=TunReply(ok:true,message:networkStatus,coreDiagnostics:coreDiagnostics.recent,running:true,routesVerified:verified,dnsVerified:current==expected,proxyVerified:verifyProxy(),protectionVerified:verifyProtection(sample:sample),protectionSummary:networkSummary,phase:phase)
+                let current=SCDynamicStoreCopyValue(dynamic,record.dnsKey as CFString) as? NSDictionary
+                var reply=TunReply(ok:true,message:networkStatus,coreDiagnostics:coreDiagnostics.recent,running:true,routesVerified:verified,dnsVerified:dnsServiceIssues().isEmpty,proxyVerified:verifyProxy(),protectionVerified:verifyProtection(sample:sample),protectionSummary:networkSummary,phase:phase)
                 let states=record.routes.map{index.state(ProtectedRoute(destination:$0.destination,gateway:$0.gateway,interface:$0.interface,scope:$0.scope))}
                 // 缺失路径与外部替换分开报告，客户端不能把刚唤醒的空路径当作归属冲突。
                 if states.contains(.replaced) || states.contains(.ambiguous) || (activeRequest?.systemProxyPort != nil && !proxyConfigurationIssues().isEmpty) {reply.wakeRecoveryReason = .ownershipConflict}
-                else if current != expected {reply.wakeRecoveryReason = current==nil ? .networkNotReady:.ownershipConflict}
+                else if !dnsServiceIssues().isEmpty {reply.wakeRecoveryReason = current==nil ? .networkNotReady:.ownershipConflict}
                 else if states.contains(.absent) {reply.wakeRecoveryReason = .networkNotReady}
                 return reply
             }

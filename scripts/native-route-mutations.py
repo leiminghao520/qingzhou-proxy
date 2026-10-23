@@ -27,12 +27,12 @@ def run(name):
 if run('baseline')[0]:
     raise SystemExit('原生路由变异基线未通过')
 mutations = [
-    ('错误拒绝无作用域链路查询', 'CQingzhouRoute/QingzhouRoute.c', 'index,operation==RTM_GET,address,&n)', 'index,0,address,&n)'),
+    ('错误拒绝无作用域链路查询', 'CQingzhouRoute/QingzhouRoute.c', 'scoped ? index:0,operation==RTM_GET,address,&n)', 'scoped ? index:0,0,address,&n)'),
     ('链路本地纳入全局出口', 'QingzhouKit/BypassRoutePlan.swift', 'route.scope==route.interface,let prefix=IPPrefix(route.destination)', 'let prefix=IPPrefix(route.destination)'),
     ('保留冗余链路缓存', 'QingzhouKit/BypassRoutePlan.swift', 'if !covered && !preserved.contains(route)', 'if !preserved.contains(route)'),
-    ('扩大链路排除至整个范围', 'QingzhouKit/CaptureRoutePlan.swift', 'excluded += bypass.preservedRoutes.map(\\.destination)', 'excluded += bypass.preservedRoutes.map{_ in "fe80::/10"}'),
-    ('忽略 PID', 'CQingzhouRoute/QingzhouRoute.c', 'if(h.rtm_pid!=pid || h.rtm_seq!=sequence)', 'if(h.rtm_seq!=sequence)'),
-    ('忽略序列', 'CQingzhouRoute/QingzhouRoute.c', 'if(h.rtm_pid!=pid || h.rtm_seq!=sequence)', 'if(h.rtm_pid!=pid)'),
+    ('遗漏企业前缀差集', 'QingzhouKit/CaptureRoutePlan.swift', 'if required.isEmpty {', 'if true {'),
+    ('忽略 PID', 'CQingzhouRoute/RouteTransport.c', 'if(h.rtm_pid!=pid || h.rtm_seq!=sequence)', 'if(h.rtm_seq!=sequence)'),
+    ('忽略序列', 'CQingzhouRoute/RouteTransport.c', 'if(h.rtm_pid!=pid || h.rtm_seq!=sequence)', 'if(h.rtm_pid!=pid)'),
     ('接受非连续掩码', 'CQingzhouRoute/QingzhouRoute.c', 'if (zero) return EPROTO;', ''),
     ('忽略内核拒绝', 'QingzhouKit/RouteBackend.swift', 'return result.kernelError==0 ? .applied:.rejected(result.kernelError)', 'return .applied'),
     ('未知响应冒充确定失败', 'QingzhouKit/RouteBackend.swift', 'outcomeUnknown:operation != RTM_GET', 'outcomeUnknown:false'),

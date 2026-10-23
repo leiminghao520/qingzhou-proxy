@@ -48,9 +48,9 @@ enum AppPage: String, Identifiable {
 }
 
 enum UtilityPage: String, Identifiable {
-    case settings, diagnostics
+    case settings, diagnostics, developer
     var id: Self { self }
-    var title: String { self == .settings ? "高级设置" : "网络诊断" }
+    var title: String {switch self {case .settings:return "高级设置";case .diagnostics:return "网络诊断";case .developer:return "开发工具代理助手"}}
 }
 
 struct SimpleCard<Content: View>: View {
@@ -71,6 +71,7 @@ struct SimpleConnectionView: View {
     var onDiagnose: () -> Void
 
     private var status: String {
+        if model.wakeRecovery.active || model.wakeRecoveryStatus.phase == .manual {return model.wakeRecoveryStatus.label}
         if model.recovering { return "正在恢复网络" }
         if model.stopRequested { return "等待安全断开" }
         if model.networkReconnecting { return "网络恢复中，正在自动重连" }
@@ -78,7 +79,7 @@ struct SimpleConnectionView: View {
         return model.connection == .connected ? "代理已连接" : model.connection.rawValue
     }
     private var transitioning: Bool {
-        model.recovering || model.stopRequested || model.networkRechecking || model.connection == .connecting || model.connection == .disconnecting
+        model.wakeRecovery.active || model.recovering || model.stopRequested || model.networkRechecking || model.connection == .connecting || model.connection == .disconnecting
     }
     private var needsSelection: Bool {
         guard model.state.mode != .direct else { return false }
@@ -101,47 +102,32 @@ struct SimpleConnectionView: View {
                     }
                 }
                 SimpleCard {
-                    VStack(spacing: 18) {
+                    HStack(alignment:.center,spacing:12) {
                         ZStack {
-                            if transitioning { ProgressView().controlSize(.large) }
-                            else {
-                                Image(systemName: model.connection == .connected ? "paperplane.fill" : "power")
-                                    .font(.system(size: 30, weight: .medium))
-                                    .foregroundStyle(Theme.accentBlue)
-                            }
+                            if transitioning {ProgressView().controlSize(.regular)}
+                            else {Image(systemName:model.connection == .connected ? "paperplane.fill":"power").font(.system(size:22,weight:.medium)).foregroundStyle(Theme.accentBlue)}
+                        }.frame(width:44,height:44).liquidControl(in:Circle(),tint:Theme.accentBlue.opacity(0.1),interactive:false).accessibilityHidden(true)
+                        VStack(alignment:.leading,spacing:4) {
+                            Text(status).font(.title3.bold()).fixedSize(horizontal:false,vertical:true)
+                            if model.connection == .connecting,let stage=model.startupStage {ConnectionProgressView(stage:stage,startedAt:model.startupStartedAt)}
+                            if needsImport && model.connection != .connected {Text("添加订阅或节点，开始使用轻舟。").font(.caption).foregroundStyle(.secondary)}
+                            else if needsSelection && model.connection != .connected {Text("选择一条线路后即可连接。").font(.caption).foregroundStyle(.secondary)}
                         }
-                        .frame(width: 80, height: 80)
-                        .liquidControl(in: Circle(), tint: Theme.accentBlue.opacity(0.1), interactive: false)
-                        .accessibilityHidden(true)
-                        Text(status).font(.title2.bold()).multilineTextAlignment(.center)
-                        if model.connection == .connecting,let stage=model.startupStage {
-                            ConnectionProgressView(stage:stage,startedAt:model.startupStartedAt)
-                        }
+                        Spacer(minLength:8)
                         if needsImport && model.connection != .connected {
-                            Text("添加订阅或节点，开始使用轻舟。")
-                                .foregroundStyle(.secondary)
-                            Button("添加订阅或节点", action: onImport)
-                                .liquidAction(prominent: true).controlSize(.large)
-                                .disabled(model.locked)
+                            Button("添加订阅或节点",action:onImport).liquidAction(prominent:true).disabled(model.locked)
                         } else if needsSelection && model.connection != .connected {
-                            Text("选择一条线路后即可连接。").foregroundStyle(.secondary)
-                            Button("选择线路", action: onLines).liquidAction(prominent: true).disabled(model.locked)
+                            Button("选择线路",action:onLines).liquidAction(prominent:true).disabled(model.locked)
                         } else {
                             Button {
-                                Task {
-                                    if model.connection == .connected || model.connection == .connecting { await model.disconnect() }
-                                    else { await model.connect() }
-                                }
+                                Task {if model.connection == .connected || model.connection == .connecting {await model.disconnect()}else{await model.connect()}}
                             } label: {
-                                Text(model.connection == .connected ? "断开连接" : model.connection == .connecting ? "取消连接" : "连接")
-                                    .fontWeight(.semibold).frame(minWidth: 140)
-                            }
-                            .liquidAction(prominent: true, tint: model.connection == .connected ? Theme.dangerRed : Theme.accentBlue).controlSize(.large)
+                                Text(model.connection == .connected ? "断开连接":model.connection == .connecting ? "取消连接":"连接").fontWeight(.semibold)
+                            }.liquidAction(prominent:true,tint:model.connection == .connected ? Theme.dangerRed:Theme.accentBlue)
                             .disabled(model.stopDisabled || (model.recoveryPending && model.connection != .connected))
                             .accessibilityIdentifier("primaryConnectionButton")
                         }
                     }
-                    .frame(maxWidth: .infinity).padding(.vertical, 12)
                     Divider()
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: 6) {
@@ -156,23 +142,8 @@ struct SimpleConnectionView: View {
                         Spacer(minLength: 12)
                         Button("更换", action: onLines).liquidAction().disabled(model.locked)
                     }
-                    if model.connection == .connected {
-                        Divider()
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                if model.healthChecking { ProgressView().controlSize(.small) }
-                                Text(model.healthChecking ? "正在检测网络…" : ConnectivityResult.combinedSummary(model.connectivityResults))
-                                    .font(.callout)
-                            }
-                            ForEach(model.connectivityResults, id: \.title) { result in
-                                Label(result.summary, systemImage: result.status == .passed ? "checkmark.circle" : result.status == .failed ? "exclamationmark.circle" : "circle.dotted")
-                                    .font(.caption)
-                                    .foregroundStyle(result.status == .failed ? Theme.amberAccent : Color.secondary)
-                            }
-                            Text("↑ \(model.uploadRateText)    ↓ \(model.downloadRateText)")
-                                .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-                        }
-                    }
+                    if model.connection == .connected {OfficeRateLine(display:model.trafficDisplay,available:model.monitor.traffic == .available && !model.monitorPaused).font(.caption).foregroundStyle(.secondary)}
+                    Text("配置："+(model.profiles.first{$0.id==model.currentProfileID}?.name ?? "默认配置")+" · "+model.state.captureMode.label).font(.caption).foregroundStyle(.secondary)
                 }
                 if model.state.subscriptions.contains(where: \.pendingReview) {
                     SimpleCard {
@@ -379,6 +350,7 @@ struct SimpleSettingsView: View {
                     LabeledContent("当前接管方式", value: model.state.captureMode.label)
                     Button("高级设置…", action: onAdvanced)
                     Button("网络诊断…", action: onDiagnose)
+                    Button("开发工具代理助手…") {model.office.developerRequested=true}
                     Button("恢复网络设置") { Task { await model.recover() } }
                         .disabled(model.loadingFailed || model.recovering)
                 }

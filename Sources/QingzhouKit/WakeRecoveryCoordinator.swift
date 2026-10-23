@@ -32,10 +32,10 @@ public struct WakeRecoveryStatus:Equatable,Sendable {
     public var label:String {switch phase {
     case .idle:return ""
     case .waiting:return "等待网络稳定"
-    case .checking:return "唤醒后复查中"
+    case .checking:return "连接复查中"
     case .retryWaiting:return "等待自动重连第 \(attempt)/3 次"
     case .rebuilding:return "自动重连第 \(attempt)/3 次"
-    case .recovered:return "唤醒后已恢复"
+    case .recovered:return "连接已恢复"
     case .manual:return "需手动处理："+(reason?.label ?? "未验证")
     case .cancelled:return "恢复已取消"
     }}
@@ -126,7 +126,7 @@ public extension WakeRecoveryCheck {
     // 只读取结构化类别；单次超时和未知节点均不能累计为失效证据。
     static func connectivity(_ results:[ConnectivityResult])->Self {
         if results.contains(where:{$0.status == .failed && $0.category=="鉴权"}) {return .stop(.authentication)}
-        if results.contains(where:{$0.status == .failed && ["超时","取消","控制接口缺少实际节点","控制接口节点格式","无法确定"].contains($0.category)}) {return .inconclusive(.unverified)}
+        if results.contains(where:{$0.status == .failed && ["超时","取消","控制接口缺少实际节点","控制接口节点格式","控制接口响应格式","控制接口","节点测速响应格式","无法确定"].contains($0.category)}) {return .inconclusive(.unverified)}
         if let failed=results.first(where:{$0.status == .failed}) {
             return .failed(failed.category=="节点通道" ? .nodeUnavailable:.pathUnavailable)
         }

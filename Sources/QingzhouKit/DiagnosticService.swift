@@ -17,9 +17,10 @@ public struct DiagnosticResult:Identifiable,Sendable,Codable {
         self.stage=stage;outcome=DiagnosticOutcome(rawValue:status) ?? .unverified;self.detail=detail;self.code=code;self.checkedAt=checkedAt;self.milliseconds=milliseconds
     }
 }
-public enum DiagnosticErrorCategory:String,Codable,Sendable {case none,cancellation,timeout,capacity,configuration,network,unverified}
+public enum DiagnosticErrorCategory:String,Codable,Sendable {case none,cancellation,timeout,capacity,configuration,network,unverified,corporateDNS}
 public extension DiagnosticResult {
     var errorCategory:DiagnosticErrorCategory {
+        if code.hasPrefix("corporateDNS.") {return .corporateDNS}
         if code=="cancelled" {return .cancellation}
         if code=="timeout" {return .timeout}
         if code=="overloaded" {return .capacity}
@@ -33,6 +34,7 @@ public extension DiagnosticResult {
         case .timeout:return "本次等待超过时间预算；底层同步调用可能尚未返回"
         case .capacity:return "两个后台诊断槽位仍被占用，请稍后重试"
         case .configuration:return "本地核心或配置静态校验未通过"
+        case .corporateDNS:return "企业 DNS 检查结果已按解析器、响应和答案保护阶段分类"
         case .network:return "本阶段检查失败，需结合本机详情核对"
         case .unverified:return "证据不足，未认定网络或端口归属已验证"
         case .none:return outcome == .passed ? "本阶段检查通过":"本阶段不适用或仅提供范围说明"
