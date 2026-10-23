@@ -182,7 +182,7 @@ struct SectionHeader: View {
     }
 }
 
-// MARK: - Modern Help / Info Tooltip Indicator (Interactive Hover + Click Pill)
+// 信息提示支持悬停查看和点击固定，长说明自动换行。
 struct HelpTip: View {
     let text: String
     @State private var isHovered = false
@@ -215,8 +215,9 @@ struct HelpTip: View {
                     Text(text)
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(Color.primary)
-                        .fixedSize(horizontal: true, vertical: false)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
+                .frame(width: 340, alignment: .leading)
                 .padding(.horizontal, 9)
                 .padding(.vertical, 5)
                 .background(

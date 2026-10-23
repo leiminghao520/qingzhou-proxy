@@ -78,6 +78,15 @@ static int decode_one(const struct rt_msghdr *header,size_t size,QZRouteRow *row
     }
     int error=prefix_length(addresses[RTAX_NETMASK],family,header->rtm_flags & RTF_HOST,&row->prefix_length);
     if (error) return error;
+    // 邻居缓存的链路地址独立保留，不能把它与父项的 link# 网关混为一条路由。
+    if (gateway && gateway->sa_family==AF_LINK && gateway->sa_len>=offsetof(struct sockaddr_dl,sdl_data)) {
+        const struct sockaddr_dl *link=(const struct sockaddr_dl *)gateway;
+        size_t offset=offsetof(struct sockaddr_dl,sdl_data)+(size_t)link->sdl_nlen;
+        if (link->sdl_alen==6 && offset+6<=gateway->sa_len) {
+            const unsigned char *mac=(const unsigned char *)gateway+offset;
+            snprintf(row->link_layer_address,sizeof(row->link_layer_address),"%x:%x:%x:%x:%x:%x",mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);
+        }
+    }
     if (!(header->rtm_flags & RTF_GATEWAY)) snprintf(row->gateway,sizeof(row->gateway),"link#%u",row->interface_index);
     else if (gateway && gateway->sa_family==AF_INET && gateway->sa_len>=sizeof(struct sockaddr_in)) inet_ntop(AF_INET,&((const struct sockaddr_in *)gateway)->sin_addr,row->gateway,sizeof(row->gateway));
     else if (gateway && gateway->sa_family==AF_INET6 && gateway->sa_len>=sizeof(struct sockaddr_in6)) {
@@ -122,7 +131,7 @@ static int append(void *bytes,size_t capacity,size_t *length,const void *address
     size_t step=aligned_size(size);if(*length>capacity || step>capacity-*length)return ENOBUFS;
     memset((char *)bytes+*length,0,step);memcpy((char *)bytes+*length,address,size);*length+=step;return 0;
 }
-int qz_route_encode(int operation,const char *destination,int family,int bits,const char *gateway,const char *interface_name,int scoped,int legacy,int pid,int sequence,void *bytes,size_t capacity,size_t *length) {
+static int encode_route(int operation,const char *destination,int family,int bits,const char *gateway,const char *interface_name,int scoped,int legacy,int pid,int sequence,void *bytes,size_t capacity,size_t *length,int host_override) {
     if(operation!=RTM_GET && operation!=RTM_ADD && operation!=RTM_DELETE)return EINVAL;
     if(legacy && (operation!=RTM_DELETE || family!=AF_INET6 || bits!=128))return EINVAL;
     int max=family==AF_INET ? 32:family==AF_INET6 ? 128:-1;
@@ -135,7 +144,7 @@ int qz_route_encode(int operation,const char *destination,int family,int bits,co
     header.rtm_pid=pid;header.rtm_seq=sequence;header.rtm_index=scoped ? index:0;header.rtm_addrs=RTA_DST;
     header.rtm_flags=RTF_UP|(scoped ? RTF_IFSCOPE:0);
     if(operation==RTM_GET){header.rtm_addrs|=RTA_IFP;if(bits<max)header.rtm_addrs|=RTA_NETMASK;}
-    if(operation!=RTM_GET){header.rtm_flags|=RTF_STATIC;if(bits==max && !legacy)header.rtm_flags|=RTF_HOST;header.rtm_addrs|=RTA_GATEWAY;if(!(header.rtm_flags & RTF_HOST))header.rtm_addrs|=RTA_NETMASK;}
+    if(operation!=RTM_GET){header.rtm_flags|=RTF_STATIC;if(bits==max && !legacy && host_override!=0)header.rtm_flags|=RTF_HOST;header.rtm_addrs|=RTA_GATEWAY;if(!(header.rtm_flags & RTF_HOST))header.rtm_addrs|=RTA_NETMASK;}
     unsigned char address[sizeof(struct sockaddr_in6)];size_t n=0;int error=ip_sockaddr(destination,family,scoped ? index:0,operation==RTM_GET,address,&n);if(error)return error;
     *length=sizeof(header);if((error=append(bytes,capacity,length,address,n)))return error;
     if(operation!=RTM_GET){
@@ -161,6 +170,14 @@ int qz_route_encode(int operation,const char *destination,int family,int bits,co
         if((error=append(bytes,capacity,length,&dl,sizeof(dl))))return error;
     }
     if(*length>UINT16_MAX)return EOVERFLOW;header.rtm_msglen=*length;memcpy(bytes,&header,sizeof(header));return qz_route_validate(bytes,*length);
+}
+int qz_route_encode(int operation,const char *destination,int family,int bits,const char *gateway,const char *interface_name,int scoped,int legacy,int pid,int sequence,void *bytes,size_t capacity,size_t *length) {
+    return encode_route(operation,destination,family,bits,gateway,interface_name,scoped,legacy,pid,sequence,bytes,capacity,length,-1);
+}
+int qz_route_encode_delete(const char *destination,int family,int bits,const char *gateway,const char *interface_name,int scoped,int host,int pid,int sequence,void *bytes,size_t capacity,size_t *length) {
+    if(host!=0 && host!=1)return EINVAL;
+    if(host && bits!=(family==AF_INET ? 32:128))return EINVAL;
+    return encode_route(RTM_DELETE,destination,family,bits,gateway,interface_name,scoped,0,pid,sequence,bytes,capacity,length,host);
 }
 int qz_interface_addresses(char **text,size_t *length) {
     struct ifaddrs *list=NULL;if(getifaddrs(&list))return errno;

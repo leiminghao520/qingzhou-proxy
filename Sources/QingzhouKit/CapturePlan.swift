@@ -58,7 +58,7 @@ public struct NetworkSnapshot:Codable,Equatable,Sendable {
             return ProtectedRoute(destination:prefix,gateway:gateway,interface:interface,scope:fields[2].contains("I") ? interface:nil)
         }
     }
-    public static func read(store:SCDynamicStore,primary:String,routes:String,ownedDNSKey:String?=nil,ownedTunnel:String?=nil,structuredRoutes:[ProtectedRoute]?=nil,lookup:((String,Bool) throws -> String)?=nil) throws -> NetworkSnapshot {
+    public static func read(store:SCDynamicStore,primary:String,routes:@autoclosure () -> String,ownedDNSKey:String?=nil,ownedTunnel:String?=nil,structuredRoutes:[ProtectedRoute]?=nil,lookup:((String,Bool) throws -> String)?=nil) throws -> NetworkSnapshot {
         let keys=(SCDynamicStoreCopyKeyList(store,"State:/Network/Service/.*/DNS" as CFString) as? [String] ?? []).sorted()
         var resolvers:[DNSResolverScope]=[]
         var unavailableDomains:[String]=[]
@@ -93,7 +93,7 @@ public struct NetworkSnapshot:Codable,Equatable,Sendable {
         }
         guard resolvers.contains(where:{$0.interface==primary}) else{throw NetworkEnvironmentNotReady("原系统 DNS 无法完整读取，未接管网络")}
         let proxies=SCDynamicStoreCopyProxies(nil) as? [String:Any] ?? [:]
-        var snapshot=NetworkSnapshot(primaryInterface:primary,routes:(structuredRoutes ?? parseRoutes(routes)).filter{$0.interface != ownedTunnel},resolvers:resolvers.sorted{$0.order == $1.order ? $0.service<$1.service:$0.order<$1.order},proxies:try PropertyListSerialization.data(fromPropertyList:proxies,format:.binary,options:0))
+        var snapshot=NetworkSnapshot(primaryInterface:primary,routes:(structuredRoutes ?? parseRoutes(routes())).filter{$0.interface != ownedTunnel},resolvers:resolvers.sorted{$0.order == $1.order ? $0.service<$1.service:$0.order<$1.order},proxies:try PropertyListSerialization.data(fromPropertyList:proxies,format:.binary,options:0))
         snapshot.unavailableDomains=Array(Set(unavailableDomains)).sorted()
         return snapshot
     }

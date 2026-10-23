@@ -19,14 +19,14 @@ extension Service {
         }?.interface
     }
     func deleteOwnedRoute(_ route:ProtectedRoute) throws {
-        let before=try routeSample().ownershipRoutes
-        let state=CaptureOwnership.recoveryState(expected:route,actual:before)
+        let before=try routeSample().identityIndex
+        let state=before.state(route)
         if state == .absent || state == .replaced {return}
         guard state == .owned else {throw ProxyError("删除前路由身份存在竞争，保留恢复记录")}
 
-        let result=try routeAudit.operation(transaction:routeTransaction,stage:phase,kind:"delete",identity:route.destination+"|"+route.gateway+"|"+route.interface+"|"+(route.scope ?? "global"),result:{if case .applied=$0 {return "confirmed"};return "rejected"}) {try measured("routeWrite") {try routeBackend.write(.delete,route:route,legacy:false,deadline:nil)}}
+        let result=try routeAudit.operation(transaction:routeTransaction,stage:phase,kind:"delete",identity:route.destination+"|"+route.gateway+"|"+route.interface+"|"+(route.scope ?? "global"),result:{if case .applied=$0 {return "confirmed"};return "rejected"}) {try measured("routeWrite") {try before.ownedRecord(route).map{try routeBackend.delete($0,deadline:nil)} ?? routeBackend.write(.delete,route:route,legacy:false,deadline:nil)}}
         if case .rejected(let error)=result {throw RouteBackendError(error)}
-        let remaining=CaptureOwnership.recoveryState(expected:route,actual:try routeSample().ownershipRoutes)
+        let remaining=try routeSample().identityIndex.state(route)
         guard remaining != .owned,remaining != .ambiguous else {throw ProxyError("删除后路由仍存在或存在竞争，保留恢复记录")}
 
     }

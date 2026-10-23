@@ -11,6 +11,9 @@ struct OverviewView: View {
             VStack(alignment: .leading, spacing: 20) {
                 // 首页连接控制区域
                 connectionHeroCard
+                if model.wakeRecoveryStatus.phase != .idle && model.wakeRecoveryStatus.phase != .cancelled {
+                    Text(model.wakeRecoveryStatus.label).font(.callout).foregroundStyle(model.wakeRecoveryStatus.phase == .manual ? .orange:.secondary)
+                }
                 if model.connection == .connecting,let stage=model.startupStage {
                     ConnectionProgressView(stage:stage,startedAt:model.startupStartedAt)
                 }
@@ -189,7 +192,6 @@ struct OverviewView: View {
                     if model.connection == .connected {
                         let allPassed = model.connectivityHealth == .healthy
                         let anyFailed = model.connectivityResults.contains { $0.status == .failed }
-                        let tipText = model.connectivityResults.map(\.summary).joined(separator: "\n")
 
                         HStack(spacing: 4) {
                             Circle()
@@ -201,7 +203,6 @@ struct OverviewView: View {
                                 .lineLimit(1)
                                 .frame(width: 48, alignment: .leading)
 
-                            HelpTip(text: tipText)
                         }
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2.5)

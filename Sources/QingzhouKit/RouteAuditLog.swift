@@ -4,6 +4,7 @@ import Darwin
 
 // 只记录哈希身份和有限枚举字段，不接受命令参数、凭据或原始错误文本。
 public final class RouteAuditLog {
+    public var metrics:RouteOperationMetrics?
     private let directory:URL
     private let maximum:Int
     private let lock=NSLock()
@@ -17,7 +18,9 @@ public final class RouteAuditLog {
         let began=DispatchTime.now().uptimeNanoseconds
         let hash=SHA256.hash(data:Data((transaction.uuidString+identity).utf8)).map{String(format:"%02x",$0)}.joined()
         func record(_ state:String) throws {
-            try append(["timeUnixMs":Int(Date().timeIntervalSince1970*1000),"transaction":transaction.uuidString,"operation":number,"stage":safeStage,"kind":safeKind,"identityHash":hash,"state":state,"elapsedMs":Int((DispatchTime.now().uptimeNanoseconds-began)/1_000_000)])
+            let object:[String:Any]=["timeUnixMs":Int(Date().timeIntervalSince1970*1000),"transaction":transaction.uuidString,"operation":number,"stage":safeStage,"kind":safeKind,"identityHash":hash,"state":state,"elapsedMs":Int((DispatchTime.now().uptimeNanoseconds-began)/1_000_000)]
+            if let metrics {try metrics.measure("routeAuditAppend") {try append(object)}}
+            else {try append(object)}
         }
         // 开始记录落盘失败时不运行操作；结束记录失败仍保留写前恢复意图。
         try record("begin")

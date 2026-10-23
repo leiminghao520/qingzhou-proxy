@@ -8,6 +8,7 @@
 typedef struct {
     char destination[64];
     char gateway[64];
+    char link_layer_address[64];
     char interface_name[32];
     uint32_t flags;
     uint32_t interface_index;
@@ -21,6 +22,9 @@ int qz_route_decode(const void *bytes, size_t length, QZRouteRow *rows, size_t c
 int qz_route_encode(int operation, const char *destination, int family, int prefix_length,
                     const char *gateway, const char *interface_name, int scoped, int legacy,
                     int pid, int sequence, void *bytes, size_t capacity, size_t *length);
+// 删除沿用当前采样的主机或网络身份，不因满长前缀而重新猜测 HOST 标志。
+int qz_route_encode_delete(const char *destination,int family,int prefix_length,const char *gateway,
+    const char *interface_name,int scoped,int host,int pid,int sequence,void *bytes,size_t capacity,size_t *length);
 // 严格验证本组件允许提交的请求；不用于把内核响应当作请求。
 int qz_route_validate(const void *bytes, size_t length);
 // 0 表示无关响应，1 表示匹配响应；负值表示畸形匹配响应。

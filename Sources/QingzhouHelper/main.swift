@@ -33,6 +33,7 @@ final class Service {
     var knownProtectedDomains:Set<String>=[]
     var dnsForwarder:ScopedDNSForwarder?
     var activeRequest:TunRequest?
+    var networkMonitorObservation: ((NetworkMonitorEvent) -> Void)?
     var networkChecks: NetworkCheckScheduler?
     let routeBackend:RouteBackend
     lazy var routeSample: () throws -> NetworkRouteSample = { [unowned self] in try self.routeAudit.operation(transaction:self.routeTransaction,stage:self.phase,kind:"snapshot",identity:"table") {try self.measured("routeTableSample") {try self.routeBackend.snapshot()}} }
@@ -89,7 +90,7 @@ final class Service {
     }
     func save() throws {guard let journal else{return};try measured("routeJournalSave") {try SecureFile.write(JSONEncoder().encode(journal),to:root.appendingPathComponent("recovery.json"),durable:true)}}
     func writeRoute(_ arguments:[String],deadline:Date?) throws -> String {try routeAudit.operation(transaction:routeTransaction,stage:phase,kind:"write",identity:arguments.joined(separator:"|"),result:{CaptureOwnership.routeWriteFailed($0) ? "rejected":"confirmed"}) {try measured("routeWrite") {try RouteBackendAdapter.write(arguments,backend:routeBackend,deadline:deadline,interfaceHint:routeInterfaceHint(arguments))}}}
-    func routeInfo(_ destination:String,ipv6:Bool,scope:String?=nil,deadline:Date?=nil) throws -> String {try routeAudit.operation(transaction:routeTransaction,stage:phase,kind:"query",identity:destination+"|"+(scope ?? "global")) {try measured("routeQuery") {try routeBackend.lookup(destination,ipv6:ipv6,scope:scope,deadline:deadline).queryText}}}
+    func routeInfo(_ destination:String,ipv6:Bool,scope:String?=nil,deadline:Date?=nil) throws -> String {networkMonitorObservation?(.routeQuery);return try routeAudit.operation(transaction:routeTransaction,stage:phase,kind:"query",identity:destination+"|"+(scope ?? "global")) {try measured("routeQuery") {try routeBackend.lookup(destination,ipv6:ipv6,scope:scope,deadline:deadline).queryText}}}
     func field(_ label:String,_ text:String)->String? {
         label=="gateway" ? NetworkInspection.routeGateway(text):NetworkInspection.routeField(label,text)
     }
@@ -130,48 +131,56 @@ return};var issues:[String]=[]
             let old=try record.previousDNS.map{try PropertyListSerialization.propertyList(from:$0,format:nil) as! NSDictionary}
             if current != old && !preserveExternal {issues.append("本次补充 DNS 服务已有外部修改，保留当前值")}
         }
-        let recoveryTable=preserveExternal ? try routeSample().table:""
-        let recoveryRoutes=NetworkSnapshot.parseRoutes(recoveryTable,includeTransient:true)
+        let recoverySample=preserveExternal ? try routeSample():nil
+        let recoveryTable=recoverySample?.table ?? ""
         for route in record.routes.reversed() {
             if preserveExternal {
                 let expectedRoute=ProtectedRoute(destination:route.destination,gateway:route.gateway,interface:route.interface,scope:route.scope)
                 // 已消失或已被外部替换的路由不再认领，仍属于本次记录的路由继续核对后清理。
-                let state=CaptureOwnership.recoveryState(expected:expectedRoute,actual:recoveryRoutes)
-                if state == .ambiguous {issues.append("路由 "+route.destination+" 存在多个同前缀出口，拒绝自动处理");break}
+                let state=try routeSample().identityIndex.state(expectedRoute)
+                if state == .ambiguous {issues.append("路由 "+route.destination+" 存在多个同前缀出口，拒绝自动处理");continue}
                 if state != .owned {
                     guard state == .absent,CaptureOwnership.legacyHostRouteInTable(expectedRoute,table:recoveryTable) else {continue}
                 }
             }
             let info:String
             do {info=try routeInfo(route.destination,ipv6:route.ipv6,scope:route.scope)}
-            catch {issues.append("路由 "+route.destination+" 恢复查询失败："+error.localizedDescription);break}
+            catch {issues.append("路由 "+route.destination+" 恢复查询失败："+error.localizedDescription);continue}
             do {
             let expectedRoute=ProtectedRoute(destination:route.destination,gateway:route.gateway,interface:route.interface,scope:route.scope)
             // 旧版错误路由只能凭当前恢复记录认领，不能根据历史归档推断外部路由所有权。
             if route.ipv6 && route.destination.hasSuffix("/128"),CaptureOwnership.legacyHostRouteInTable(expectedRoute,table:try routeSample().table) {
                 let output=try writeRoute(CaptureOwnership.legacyHostDeletionArguments(expectedRoute),deadline:nil)
-                if CaptureOwnership.routeWriteFailed(output) {issues.append("旧版主机路由恢复失败："+route.destination);break}
-                else if CaptureOwnership.legacyHostRouteInTable(expectedRoute,table:try routeSample().table) {issues.append("旧版主机路由仍存在："+route.destination);break}
+                if CaptureOwnership.routeWriteFailed(output) {issues.append("旧版主机路由恢复失败："+route.destination);continue}
+                else if CaptureOwnership.legacyHostRouteInTable(expectedRoute,table:try routeSample().table) {issues.append("旧版主机路由仍存在："+route.destination);continue}
                 continue
             }
             // 查询可能命中接口缓存；全局路由仍须按完整表中的身份确认后删除。
             if try verifiedRoute(expectedRoute,info:info) {
                 do{try deleteOwnedRoute(ProtectedRoute(destination:route.destination,gateway:route.gateway,interface:route.interface,scope:route.scope))}
-                catch{issues.append("路由 "+route.destination+" 移除失败："+error.localizedDescription);break}
+                catch{issues.append("路由 "+route.destination+" 移除失败："+error.localizedDescription);continue}
             } else if NetworkInspection.routeScopeMatches(route.scope,flags:field("flags",info),interface:field("interface",info)),let current=prefix(info),NetworkInspection.samePrefix(current,route.destination) {
                 if !preserveExternal {issues.append("路由 "+route.destination+" 已有外部修改，保留当前出口 "+(field("interface",info) ?? "未知")+"/"+(field("gateway",info) ?? "未知"))}
             }
-            } catch {issues.append("路由 "+route.destination+" 恢复核验失败："+error.localizedDescription);break}
+            } catch {issues.append("路由 "+route.destination+" 恢复核验失败："+error.localizedDescription);continue}
         }
         if let process,process.isRunning {process.terminate();for _ in 0..<40 {if !process.isRunning{break};usleep(50000)};if process.isRunning{kill(process.processIdentifier,SIGKILL)};process.waitUntilExit()};process=nil;owner=nil
         try? FileManager.default.removeItem(at:root.appendingPathComponent("runtime.json"))
+        if issues.isEmpty {
+            do {
+                let remaining=try routeSample().identityIndex
+                if record.routes.contains(where:{let state=remaining.state(ProtectedRoute(destination:$0.destination,gateway:$0.gateway,interface:$0.interface,scope:$0.scope));return state == .owned || state == .ambiguous}) {
+                    issues.append("恢复后仍有自有或无法确认的路由，保留恢复记录")
+                }
+            } catch {issues.append("恢复后路由采样失败："+error.localizedDescription)}
+        }
         if issues.isEmpty {do{try restoreBypassFirewall()}catch{issues.append(error.localizedDescription)}}
         if !issues.isEmpty {try save();throw ProxyError("网络恢复未完成，已停止核心并保留恢复记录："+issues.prefix(8).joined(separator:"；"))}
         if preserveExternal {
             try verifyNoOwnedProxyEndpoint(record.proxies ?? [])
-            let remaining=NetworkSnapshot.parseRoutes(try self.routeSample().table,includeTransient:true)
+            let remaining=try self.routeSample().identityIndex
             guard record.routes.allSatisfy({route in
-                let state=CaptureOwnership.recoveryState(expected:ProtectedRoute(destination:route.destination,gateway:route.gateway,interface:route.interface,scope:route.scope),actual:remaining)
+                let state=remaining.state(ProtectedRoute(destination:route.destination,gateway:route.gateway,interface:route.interface,scope:route.scope))
                 return state != .owned && state != .ambiguous
             }) else {throw ProxyError("仍有轻舟拥有的路由，保留恢复记录并拒绝完成交接")}
             // 显式交接外部网络时保留完整审计快照，不能直接丢弃恢复证据。
@@ -374,6 +383,8 @@ return};var issues:[String]=[]
     func handle(_ request:TunRequest,fd:Int32)->TunReply {
         let timing=ConnectionTiming()
         routeMetrics=RouteOperationMetrics()
+        (routeBackend as? NativeRouteBackend)?.metrics=routeMetrics
+        routeAudit.metrics=routeMetrics
         if request.progressUpdates==true,["prepare","activate"].contains(request.operation) {
             progressReply={phase in
                 var progress=TunReply(ok:true,message:"连接阶段更新",phase:phase)
@@ -384,11 +395,11 @@ return};var issues:[String]=[]
         if ["prepare","activate","stop","recover"].contains(request.operation) {
             connectionTiming=timing;timing.begin("helperOperation")
         }
-        defer {connectionTiming=nil;routeMetrics=nil;progressReply=nil}
+        defer {connectionTiming=nil;routeMetrics=nil;progressReply=nil;(routeBackend as? NativeRouteBackend)?.metrics=nil;routeAudit.metrics=nil}
         do {
             var reply=try handleOperation(request,fd:fd)
             reply.tunnelInterface=journal?.interface
-            reply.supportsExternalRecovery=true;reply.recoveryPending=journal != nil
+            reply.supportsWakeRecovery=true;reply.supportsExternalRecovery=true;reply.recoveryPending=journal != nil
             if request.operation=="status",request.verifyNetwork==true {reply.safeToQuit=verifyReleasedForQuit()}
             timing.finish()
             reply.stageTimings=timing.samples+(routeMetrics?.samples ?? [])
@@ -397,7 +408,7 @@ return};var issues:[String]=[]
             timing.finish(succeeded:false)
             var reply=TunReply(ok:false,message:"TUN 阶段 "+phase+"："+Redactor.redact(error.localizedDescription),coreDiagnostics:["prepare","activate"].contains(request.operation) ? coreDiagnostics.recent:nil,running:helperIsRunning,phase:phase,networkNotReady:error is NetworkEnvironmentNotReady,stageTimings:timing.samples+(routeMetrics?.samples ?? []))
             reply.tunnelInterface=journal?.interface
-            reply.supportsExternalRecovery=true;reply.recoveryPending=journal != nil
+            reply.supportsWakeRecovery=true;reply.supportsExternalRecovery=true;reply.recoveryPending=journal != nil
             return reply
         }
     }
@@ -405,12 +416,18 @@ return};var issues:[String]=[]
         guard request.preserveExternal != true || request.operation=="recover" else{throw ProxyError("保留外部网络仅用于用户恢复操作")}
         switch request.operation {case "status":
             if request.verifyNetwork==true,let record=journal,process?.isRunning==true {
-                let sample=try routeSample(),index=RouteIdentityIndex(sample.ownershipRoutes)
+                let sample=try routeSample(),index=sample.identityIndex
                 let prefixes=record.captureRoutes ?? CaptureRoutePlan.legacyPrefixes
                 let tunnels=record.routes.filter{$0.interface==record.interface && prefixes.contains($0.destination)}
                 let verified=tunnels.count==prefixes.count && tunnels.allSatisfy{index.state(ProtectedRoute(destination:$0.destination,gateway:$0.gateway,interface:$0.interface,scope:$0.scope)) == .owned}
                 let current=SCDynamicStoreCopyValue(dynamic,record.dnsKey as CFString) as? NSDictionary;let expected=try PropertyListSerialization.propertyList(from:record.expectedDNS,format:nil) as! NSDictionary
-                return TunReply(ok:true,message:networkStatus,coreDiagnostics:coreDiagnostics.recent,running:true,routesVerified:verified,dnsVerified:current==expected,proxyVerified:verifyProxy(),protectionVerified:verifyProtection(sample:sample),protectionSummary:networkSummary,phase:phase)
+                var reply=TunReply(ok:true,message:networkStatus,coreDiagnostics:coreDiagnostics.recent,running:true,routesVerified:verified,dnsVerified:current==expected,proxyVerified:verifyProxy(),protectionVerified:verifyProtection(sample:sample),protectionSummary:networkSummary,phase:phase)
+                let states=record.routes.map{index.state(ProtectedRoute(destination:$0.destination,gateway:$0.gateway,interface:$0.interface,scope:$0.scope))}
+                // 缺失路径与外部替换分开报告，客户端不能把刚唤醒的空路径当作归属冲突。
+                if states.contains(.replaced) || states.contains(.ambiguous) || (activeRequest?.systemProxyPort != nil && !proxyConfigurationIssues().isEmpty) {reply.wakeRecoveryReason = .ownershipConflict}
+                else if current != expected {reply.wakeRecoveryReason = current==nil ? .networkNotReady:.ownershipConflict}
+                else if states.contains(.absent) {reply.wakeRecoveryReason = .networkNotReady}
+                return reply
             }
             return TunReply(ok:true,message:networkStatus+(journal != nil && process==nil ? " · 存在待恢复记录":""),coreDiagnostics:process?.isRunning==true ? coreDiagnostics.recent:nil,running:helperIsRunning,protectionSummary:networkSummary,phase:phase)
         case "pinBypasses":
@@ -423,6 +440,10 @@ return};var issues:[String]=[]
             phase="activation"
             do{try activate();activatePrepared=nil;phase="active";return TunReply(ok:true,message:"TUN 路由及 DNS 已接管；应用连接另行检测",running:true)}catch{let original=error;try rollbackStartup();throw original}
         case "stop","recover":
+            // 与辅助服务的网络重建共用串行队列；检查和恢复之间不允许插入另一轮重建。
+            if request.deferToNetworkResume==true,networkResumeSession != nil {
+                return TunReply(ok:true,message:"辅助服务正在重建，客户端等待核验",running:helperIsRunning,phase:"networkReconnecting")
+            }
             phase="recovery";try stop(preserveExternal:request.preserveExternal==true);phase="restored";lastFailure=nil
             return TunReply(ok:true,message:request.preserveExternal==true ? "轻舟接管已清理，外部网络已保留":"原网络已恢复")
         default:throw ProxyError("只允许状态、启动、停止、恢复操作")}
@@ -437,7 +458,7 @@ func run() throws {
     try service.recoverStartup();umask(0o077)
     let path=HelperPaths.socket;try? FileManager.default.removeItem(atPath:path);let server=socket(AF_UNIX,SOCK_STREAM,0);guard server>=0 else{throw ProxyError("辅助服务套接字失败")};var address=try UnixChannel.address(path);let bound=withUnsafePointer(to:&address){$0.withMemoryRebound(to:sockaddr.self,capacity:1){bind(server,$0,socklen_t(MemoryLayout<sockaddr_un>.size))==0}};guard bound,listen(server,8)==0 else{throw ProxyError("辅助服务监听失败")};chown(path,uid_t(service.manifest.uid),0);chmod(path,0o600)
     signal(SIGTERM,SIG_IGN);signal(SIGINT,SIG_IGN);let termination=DispatchSource.makeSignalSource(signal:SIGTERM,queue:service.queue);termination.setEventHandler{try? service.stop();exit(0)};termination.resume()
-    DispatchQueue.global().async {while true {let fd=accept(server,nil,nil);if fd<0{continue};var option:Int32=1;_=setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&option,socklen_t(MemoryLayout<Int32>.size));DispatchQueue.global().async{defer{service.queue.sync{if service.owner==fd{try? service.stop()}};close(fd)};do{try service.authorize(fd);while true{let data=try UnixChannel.receive(fd:fd);let request=try JSONDecoder().decode(TunRequest.self,from:data);let response=service.queue.sync{service.handle(request,fd:fd)};try UnixChannel.send(JSONEncoder().encode(response),fd:fd)}}catch{}}}}
+    DispatchQueue.global().async {while true {let fd=accept(server,nil,nil);if fd<0{continue};var option:Int32=1;_=setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&option,socklen_t(MemoryLayout<Int32>.size));DispatchQueue.global().async{defer{service.queue.sync{if service.owner==fd{try? service.stop()}};close(fd)};do{do{try service.authorize(fd)}catch{try? UnixChannel.send(JSONEncoder().encode(TunReply(ok:false,message:error.localizedDescription)),fd:fd,deadline:ProcessInfo.processInfo.systemUptime+1);return};while true{let data=try UnixChannel.receive(fd:fd);let request=try JSONDecoder().decode(TunRequest.self,from:data);let response=service.queue.sync{service.handle(request,fd:fd)};try UnixChannel.send(JSONEncoder().encode(response),fd:fd)}}catch{}}}}
     dispatchMain()
 }
 #if !QZ_HELPER_FIXTURE

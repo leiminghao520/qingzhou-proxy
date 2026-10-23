@@ -22,18 +22,16 @@ extension AppModel {
                         guard self.epoch==token,!Task.isCancelled else{return}
                         self.updateHelperNetworkStatus(status)
                         if self.networkReconnecting {try? await Task.sleep(nanoseconds:1_000_000_000);continue}
-                        if !status.running || status.phase == "networkProtectionFailed" {self.log(status.message);self.helperFailureReason=status.message;self.coreFailed=true;self.drainPendingDisconnect();return}
+                        if !status.running || status.phase == "networkProtectionFailed" {self.recordEvent(.network,.failed,.helperFailed);self.log(status.message);self.helperFailureReason=status.message;self.coreFailed=true;self.drainPendingDisconnect();return}
                     }
                     if !self.monitorPaused {
                         let snapshot=try await client.connections();let info=try await client.proxies()
                         guard self.epoch==token,!Task.isCancelled else{return}
                         if let profileID {self.history.receive(snapshot,profileID:profileID)}
-                        self.aggregate(snapshot.connections);self.connections=snapshot.connections;self.uploadTotal=snapshot.uploadTotal;self.downloadTotal=snapshot.downloadTotal
-                        let changed=CoreAPIClient.actualTag(self.proxyInfo) != CoreAPIClient.actualTag(info)
-                        self.proxyInfo=info;self.monitor.connections = .available
+                        let changed=self.publishTelemetry(snapshot,info:info)
                         if changed,self.connectivityResults != ConnectivityResult.pending {Task{await self.checkConnectivity()}}
                     }
-                } catch {if self.epoch==token,!Task.isCancelled{self.monitor.connections = .unavailable}}
+                } catch {if self.epoch==token,!Task.isCancelled,self.monitor.connections != .unavailable{self.monitor.connections = .unavailable}}
                 try? await Task.sleep(nanoseconds:hidden ? 5_000_000_000 : 1_000_000_000)
             }
         }
@@ -56,14 +54,33 @@ extension AppModel {
             })
         }
     }
+    // 返回实际出口是否变化；历史累计仍由每轮原始采样独立接收。
+    @discardableResult func publishTelemetry(_ snapshot:ConnectionSnapshot,info:[String:ProxyInfo]) -> Bool {
+        if connections != snapshot.connections {aggregate(snapshot.connections);connections=snapshot.connections}
+        if uploadTotal != snapshot.uploadTotal {uploadTotal=snapshot.uploadTotal}
+        if downloadTotal != snapshot.downloadTotal {downloadTotal=snapshot.downloadTotal}
+        let changed=CoreAPIClient.actualTag(proxyInfo) != CoreAPIClient.actualTag(info)
+        if changed {recordEvent(.node,.changed,.nodeSelected)}
+        if proxyInfo != info {proxyInfo=info}
+        if monitor.connections != .available {monitor.connections = .available}
+        return changed
+    }
     func updateHelperNetworkStatus(_ status:TunReply) {
-        helperStatus=status.message;protectionSummary=status.protectionSummary ?? []
+        if helperStatus != status.message {helperStatus=status.message}
+        let summary=status.protectionSummary ?? []
+        if protectionSummary != summary {protectionSummary=summary}
         if status.networkReconnecting {
-            if !networkReconnecting {cancelHealthRefresh();connectivityResults=ConnectivityResult.pending;reachability="网络恢复中，正在自动重连";connections=[];log("网络暂未就绪，保留连接意图并等待辅助服务自动重连")}
-            networkReconnecting=true;monitor.connections = .unavailable;monitor.traffic = .unavailable;uploadRate=0;downloadRate=0
+            if !networkReconnecting {recordEvent(.network,.started,.reconnecting);cancelHealthRefresh();connectivityResults=ConnectivityResult.pending;reachability="网络恢复中，正在自动重连";connections=[];log("网络暂未就绪，保留连接意图并等待辅助服务自动重连")}
+            if !networkReconnecting {networkReconnecting=true}
+            if monitor.connections != .unavailable {monitor.connections = .unavailable}
+            if monitor.traffic != .unavailable {monitor.traffic = .unavailable}
+            if uploadRate != 0 {uploadRate=0}
+            if downloadRate != 0 {downloadRate=0}
         } else if networkReconnecting {
+            let healthy=status.running && status.phase != "networkProtectionFailed"
+            recordEvent(.network,healthy ? .succeeded:.failed,healthy ? .reconnected:.helperFailed)
             networkReconnecting=false;failedHealthCycles=0;healthFailures=HealthFailureCounter()
-            if status.running {log("网络自动重连完成，正在复查连通性");scheduleHealthRefresh(delay:0)}
+            if healthy {log("网络自动重连完成，正在复查连通性");scheduleHealthRefresh(delay:0)}
         }
     }
 

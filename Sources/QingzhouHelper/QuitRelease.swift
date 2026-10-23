@@ -20,9 +20,10 @@ extension Service {
                 current=nil
             }
             if let current,current==expected {return false}
-            let actual=try quitRoutesRead?() ?? routeSample().ownershipRoutes
+            let actual:RouteIdentityIndex
+            if let read=quitRoutesRead {actual=RouteIdentityIndex(try read())} else {actual=try routeSample().identityIndex}
             return record.routes.allSatisfy {route in
-                let state=CaptureOwnership.recoveryState(expected:ProtectedRoute(destination:route.destination,gateway:route.gateway,interface:route.interface,scope:route.scope),actual:actual)
+                let state=actual.state(ProtectedRoute(destination:route.destination,gateway:route.gateway,interface:route.interface,scope:route.scope))
                 return state == .absent || state == .replaced
             }
         } catch {return false}

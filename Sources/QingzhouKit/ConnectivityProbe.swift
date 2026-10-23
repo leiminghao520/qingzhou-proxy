@@ -80,6 +80,27 @@ public enum ConnectivityProbe {
             }
         }catch{return ConnectivityResult(title,.failed,ConnectivityResult.category(error))}
     }
+    public static func wakeNode(client:CoreAPIClient,mode:ProxyMode) async -> ConnectivityResult {
+        let title="当前节点通道检测"
+        if mode == .direct {return ConnectivityResult(title,.notApplicable,"全部直连模式")}
+        do {
+            let info=try await client.proxies()
+            guard let tag=CoreAPIClient.actualTag(info) else{return ConnectivityResult(title,.failed,"控制接口缺少实际节点")}
+            if tag=="direct" || tag=="reject" {return ConnectivityResult(title,.notApplicable,"当前策略未选择节点")}
+            guard tag.hasPrefix("node-"),let id=UUID(uuidString:String(tag.dropFirst(5))) else{return ConnectivityResult(title,.failed,"控制接口节点格式")}
+            switch await client.measureNode(id) {
+            case .success(let ms):return ConnectivityResult(title,.passed,"实际节点 HTTPS",milliseconds:ms)
+            case .failure(let errors):
+                if errors.contains("鉴权") {return ConnectivityResult(title,.failed,"鉴权")}
+                // 任一目标超时都不升级为节点失效；两个明确的节点错误才计入连续失败。
+                if errors.count==2 && errors.allSatisfy({$0=="节点通道"}) {return ConnectivityResult(title,.failed,"节点通道")}
+                return ConnectivityResult(title,.failed,errors.contains("超时") ? "超时":"无法确定")
+            }
+        }catch{
+            let category=ConnectivityResult.category(error)
+            return ConnectivityResult(title,.failed,["鉴权","超时","取消"].contains(category) ? category:"无法确定")
+        }
+    }
     public static func all(port:Int?,client:CoreAPIClient,mode:ProxyMode,protocolClasses:[AnyClass]?=nil) async -> [ConnectivityResult] {
         async let rules=https(port:port,entry:false,protocolClasses:protocolClasses)
         async let node=node(client:client,mode:mode)

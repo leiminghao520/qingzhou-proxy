@@ -3,9 +3,25 @@ import Darwin
 
 // 将网络前缀规范为掩码后的地址；接口、网关和作用域仍分别核验，不能只按目标去重。
 public struct RouteIdentityIndex {
+    private var records:[RouteRecord]?
     private var routes:[String:[ProtectedRoute]]=[:]
     public init(_ values:[ProtectedRoute]) {
         for route in values {if let key=Self.key(route.destination) {routes[key,default:[]].append(route)}}
+    }
+    public init(records:[RouteRecord]) {
+        self.init(records.map(\.route));self.records=records
+    }
+    // 仅处理现场组播父项与同接口派生邻居缓存；缺失原始标志时保持保守判断。
+    private func ownershipCandidates(_ expected:ProtectedRoute)->[ProtectedRoute] {
+        let matches=candidates(expected.destination).filter{$0.scope==expected.scope}
+        guard matches.count==2,expected.destination=="239.255.255.250/32",let records else{return matches}
+        let entries=records.filter{Self.key($0.route.destination)==Self.key(expected.destination) && $0.route.scope==expected.scope}
+        let parents=entries.filter{$0.route==expected || ($0.route.gateway==expected.gateway && $0.route.interface==expected.interface)}
+            .filter{$0.flags & UInt32(RTF_MULTICAST|RTF_CLONING)==UInt32(RTF_MULTICAST|RTF_CLONING) && $0.flags & UInt32(RTF_LLINFO|RTF_WASCLONED)==0 && $0.route.gateway.hasPrefix("link#")}
+        guard parents.count==1,entries.count==2 else{return matches}
+        let caches=entries.filter{$0.route.interface==expected.interface && $0.flags & UInt32(RTF_HOST|RTF_LLINFO|RTF_MULTICAST)==UInt32(RTF_HOST|RTF_LLINFO|RTF_MULTICAST) && $0.flags & UInt32(RTF_GATEWAY)==0 && ($0.linkLayerAddress ?? $0.route.gateway).lowercased()=="1:0:5e:7f:ff:fa"}
+        guard caches.count==1 else{return matches}
+        return [parents[0].route]
     }
     private static func key(_ prefix:String)->String? {
         let parts=prefix.split(separator:"/",omittingEmptySubsequences:false)
@@ -23,10 +39,29 @@ public struct RouteIdentityIndex {
     }
     public func candidates(_ destination:String)->[ProtectedRoute] {guard let key=Self.key(destination) else{return []};return routes[key] ?? []}
     public func state(_ expected:ProtectedRoute)->CaptureOwnership.RecoveryRouteState {
-        let matches=candidates(expected.destination).filter{$0.scope==expected.scope}
+        let matches=ownershipCandidates(expected)
         guard !matches.isEmpty else{return .absent}
+        // 满长父项删除后，内核可能保留同 link# 的邻居缓存；必须由当前整表中的组播父网段证明来源。
+        if let records,expected.destination=="239.255.255.250/32",candidates(expected.destination).filter({$0.scope==expected.scope}).count==1,
+           let cache=records.first(where:{$0.route.destination==expected.destination && $0.route.scope==expected.scope && $0.route.interface==expected.interface && $0.route.gateway==expected.gateway && $0.flags & UInt32(RTF_LLINFO) != 0}) {
+            let parents=records.filter{$0.route.destination=="224.0.0.0/4" && $0.route.scope==expected.scope}
+            let cacheFlags=UInt32(RTF_UP|RTF_HOST|RTF_LLINFO|RTF_MULTICAST)
+            let parentFlags=UInt32(RTF_UP|RTF_MULTICAST|RTF_CLONING)
+            if cache.flags & cacheFlags==cacheFlags,cache.flags & UInt32(RTF_GATEWAY)==0,
+               cache.linkLayerAddress?.lowercased()=="1:0:5e:7f:ff:fa",expected.gateway.hasPrefix("link#"),
+               parents.count==1,let parent=parents.first,parent.route.interface==expected.interface,parent.route.gateway==expected.gateway,
+               parent.flags & parentFlags==parentFlags,parent.flags & UInt32(RTF_HOST|RTF_LLINFO|RTF_WASCLONED|RTF_GATEWAY)==0 {
+                return .replaced
+            }
+            return .ambiguous
+        }
         guard matches.contains(where:{$0.gateway==expected.gateway && $0.interface==expected.interface}) else{return .replaced}
         return matches.count==1 ? .owned:.ambiguous
+    }
+    // 只向已通过所有权核验的删除提供原始身份；缺少标志的旧快照仍使用兼容入口。
+    public func ownedRecord(_ expected:ProtectedRoute)->RouteRecord? {
+        guard state(expected) == .owned else{return nil}
+        return records?.first {Self.key($0.route.destination)==Self.key(expected.destination) && $0.route.gateway==expected.gateway && $0.route.interface==expected.interface && $0.route.scope==expected.scope && !$0.isTransient}
     }
     public func contains(_ expected:ProtectedRoute)->Bool {
         candidates(expected.destination).contains{$0.gateway==expected.gateway && $0.interface==expected.interface && $0.scope==expected.scope}

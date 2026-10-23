@@ -13,18 +13,28 @@ import QingzhouKit
     @Published var bypassApplyFailure:String?
     @Published var pendingMode:ProxyMode?
     @Published var state=AppState()
-    @Published var connection=Connection.disconnected
+    @Published var connection=Connection.disconnected {didSet{if connection != oldValue {invalidateDiagnostic()}}}
     @Published var startupStage:String?
     @Published var startupStartedAt:TimeInterval?
     private(set) var startupGeneration=UUID()
     private var startupClient:CoreAPIClient?
     private var startupProbeTask:Task<[ConnectivityResult],Never>?
+    @Published var wakeRecoveryStatus=WakeRecoveryStatus(.idle)
+    var wakeRecovery=WakeRecoveryCoordinator()
+    var wakeIntent:(id:UUID,session:UUID,profile:UUID?,epoch:UUID)?
+    var wakeRebuilding=false
+    var wakeNeedsRebuild=false
+    var wakeCheckOverride:(() async -> WakeRecoveryCheck)?
+    var wakeHTTPSProbe:(Int?) async -> ConnectivityResult = {await ConnectivityProbe.https(port:$0,entry:false)}
+    var wakeNetworkReady:()->Bool = {BypassNetworkService.read().contains{$0.active && !CapturePlan.isVPN($0.interface) && $0.interface != "lo0"}}
+    var wakeRebuildOverride:(() async -> WakeRecoveryCheck)?
     @Published var reachability="尚未检测"
     @Published var connectivityResults:[ConnectivityResult]=[]
     var connectivityHealth:ConnectivityHealth {ConnectivityHealth.evaluate(connectivityResults)}
-    @Published var networkReconnecting = false
+    @Published var networkReconnecting = false {didSet{if networkReconnecting != oldValue {invalidateDiagnostic()}}}
     var networkRechecking:Bool {networkReconnecting || (connection == .connected && state.captureMode.usesTunnel && helperStatus == "网络变化，正在重新检查")}
     var connectionSummary:String {
+        if wakeRecovery.active || wakeRecoveryStatus.phase == .manual {return wakeRecoveryStatus.label}
         if connection == .connecting {return "连接中 · "+(startupStage ?? "准备网络与核心")}
         if networkReconnecting {return "网络恢复中 · 正在自动重连"}
         if networkRechecking {return "已连接 · 网络变化，正在重新检查"}
@@ -54,6 +64,14 @@ import QingzhouKit
     private let shortcuts=ShortcutController()
     @Published var diagnosticRows:[DiagnosticResult]=[]
     @Published var diagnosing=false
+    @Published var diagnosticSession:DiagnosticSession?
+    var diagnosticTask:Task<DiagnosticSession,Never>?
+    @Published var diagnosticGeneration=UUID()
+    @Published var historyStatus:String?
+    lazy var profileHistory=ProfileHistoryStore(directory:directory.appendingPathComponent("ProfileHistory"),credentials:store?.credentials ?? credentials,now:dependencies.now)
+    let timeline:NetworkTimelineModel
+    var eventSessionID=UUID()
+    var activeHistoryTransactionID:UUID?
     var fallbackStates:[UUID:FallbackController]=[:]
     var healthTask:Task<Void,Never>?
     var failedHealthCycles=0
@@ -72,7 +90,7 @@ import QingzhouKit
     var uploadRateText: String { monitor.rateLabel(uploadRate, paused: monitorPaused, format: formatRate) }
     var downloadRateText: String { monitor.rateLabel(downloadRate, paused: monitorPaused, format: formatRate) }
     private(set) var store:NodeStore?
-    let credentials=KeychainStore()
+    let credentials:any CredentialStore
     let core:CoreController
     let proxy:SystemProxyController
     let directory:URL
@@ -84,10 +102,11 @@ import QingzhouKit
     var telemetryTask:Task<Void,Never>?
     var trafficTask:Task<Void,Never>?
     private var maintenanceTask:Task<Void,Never>?
+    var nextHistoryMaintenance=Date.distantPast
     private var measurementTask:Task<Void,Never>?
     private var temporaryCore:CoreController?
     private var temporaryAPI:CoreAPIClient?
-    var epoch=UUID()
+    var epoch=UUID() {didSet {if epoch != oldValue {invalidateDiagnostic();if !wakeRebuilding {cancelWakeRecovery()}}}}
     private var networkChanged=false
     var coreFailed=false
     var helperFailureReason:String?
@@ -108,10 +127,13 @@ import QingzhouKit
     let history:TrafficHistoryModel
     init(dependencies:AppDependencies = AppDependencies()) {
         self.dependencies=dependencies
+        var isolated=false
         // 独立测试目录由启动参数显式指定，不改变日常配置位置。
         if let index=CommandLine.arguments.firstIndex(of:"--test-directory"),index+1<CommandLine.arguments.count,CommandLine.arguments[index+1].hasPrefix("/") {
-            directory=URL(fileURLWithPath:CommandLine.arguments[index+1])
+            directory=URL(fileURLWithPath:CommandLine.arguments[index+1]);isolated=true
         }else{directory=FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("Qingzhou")}
+        credentials=dependencies.makeCredentials(isolated)
+        timeline=NetworkTimelineModel(url:directory.appendingPathComponent("network-events.jsonl"),now:dependencies.now,autoload:false)
         history=TrafficHistoryModel(url:directory.appendingPathComponent("traffic-history.sqlite"),now:dependencies.now,makeStore:dependencies.makeHistory)
         core=CoreController(directory:directory);proxy=SystemProxyController(journal:directory.appendingPathComponent("proxy-recovery.json"))
         do {
@@ -121,14 +143,16 @@ import QingzhouKit
             guard sessionLockFD>=0,flock(sessionLockFD,LOCK_EX|LOCK_NB)==0 else {throw ProxyError("应用已经运行")}
             store=try dependencies.makeStore(directory.appendingPathComponent("state.json"),credentials);state=store!.state
         } catch {loadingFailed=true;errorMessage="配置无法读取或应用已运行，未覆盖原文件。";return}
+        timeline.activate()
+        if let store {store.history=profileHistory;do{try profileHistory.initialize(store.catalog)}catch{historyStatus=profileHistory.lastError}}
         logBuffer.configure(url:directory.appendingPathComponent("diagnostic.log"))
         log("应用启动，正在检查上次恢复记录")
         recoveryPending=proxy.hasRecovery
         core.log={ [weak self] in self?.log($0) }
         proxy.log={ [weak self] in self?.log($0) }
-        core.onUnexpectedExit={ [weak self] in guard let self else{return};self.stopTelemetry();self.coreFailed=true;self.cancelMeasurement();self.drainPendingDisconnect() }
-        proxy.onNetworkChange={ [weak self] in guard let self,self.connection == .connected || self.connection == .connecting else{return};self.networkChanged=true;self.cancelMeasurement();self.drainPendingDisconnect() }
-        proxy.onEnvironmentChange={ [weak self] in self?.dependencies.downloader.networkEnvironmentChanged();self?.latencyInvalidatedAt=Date();self?.scheduleHealthRefresh() }
+        core.onUnexpectedExit={ [weak self] in guard let self else{return};self.recordEvent(.connection,.failed,.coreExited);if self.wakeIntent==nil && !self.wakeRecovery.active {self.stopTelemetry()};self.coreFailed=true;self.cancelMeasurement();self.drainPendingDisconnect() }
+        proxy.onNetworkChange={ [weak self] in guard let self,self.connection == .connected || self.connection == .connecting else{return};self.cancelWakeRecovery();self.recordEvent(.network,.changed,.ownershipChanged);self.networkChanged=true;self.cancelMeasurement();self.drainPendingDisconnect() }
+        proxy.onEnvironmentChange={ [weak self] in self?.recordEvent(.network,.changed,.environmentChanged);self?.dependencies.downloader.networkEnvironmentChanged();self?.latencyInvalidatedAt=Date();self?.scheduleHealthRefresh() }
         proxy.startMonitoring()
         for (name,event) in [(NSWorkspace.willSleepNotification,HealthPowerEvent.willSleep),
                              (NSWorkspace.didWakeNotification,.didWake),
@@ -150,6 +174,7 @@ import QingzhouKit
     // 测速或配置更新期间的退出和网络变更延后串行恢复，避免被操作锁跳过。
     func drainPendingDisconnect() {
         guard !busy,!measuring,!loadingFailed else{return}
+        if (wakeRecovery.active || wakeIntent != nil) && !stopRequested && !pendingRecovery && !networkChanged {return}
         if pendingRecovery {pendingRecovery=false;Task{await self.performRecovery()};return}
         if stopRequested {busy=true;Task{defer{stopRequested=false;busy=false};do{try await disconnectInternal()}catch{report(error)}};return}
         guard connection == .connected,!recovering else{return}
@@ -169,7 +194,11 @@ import QingzhouKit
     }
     func log(_ text:String) {logBuffer.append(text,secrets:core.secrets)}
     func report(_ error:Error) {if error is CancellationError{return};errorMessage=Redactor.redact(error.localizedDescription);log(errorMessage!)}
-    func persist(_ next:AppState) throws {guard let store else {throw ProxyError("配置未加载")};try store.commit(next);state=store.state}
+    func persist(_ next:AppState) throws {
+        guard let store else {throw ProxyError("配置未加载")}
+        defer {historyStatus=profileHistory.lastError}
+        try store.commit(next);state=store.state
+    }
     private func secrets(_ next:AppState,_ control:CoreControlContext) -> [String] {[control.secret]+next.nodes.flatMap{[(try? credentials.get($0.credentialRef)) ?? "",(try? credentials.get($0.credentialRef+".obfs")) ?? ""]}}
     func checkStartup(_ generation:UUID) throws {
         try Task.checkCancellation()
@@ -183,7 +212,8 @@ import QingzhouKit
         try checkStartup(generation)
         return results
     }
-    private func startService(_ next:AppState,profileID:UUID?=nil) async throws {
+    func startService(_ next:AppState,profileID:UUID?=nil) async throws {
+        invalidateDiagnostic();eventSessionID=UUID();recordEvent(.connection,.started,.userRequest,profileID:profileID)
         let generation=UUID();startupGeneration=generation
         let total=DispatchTime.now().uptimeNanoseconds
         startupStartedAt=ProcessInfo.processInfo.systemUptime
@@ -191,6 +221,7 @@ import QingzhouKit
         var succeeded=false
         defer {
             networkReconnecting=false;startupStage=nil;startupStartedAt=nil
+            recordEvent(.connection,succeeded ? .succeeded:.failed,succeeded ? .connected:.startFailed,profileID:profileID)
             log(ConnectionStageTiming(stage:"connectionTotal",milliseconds:Int((DispatchTime.now().uptimeNanoseconds-total)/1_000_000),succeeded:succeeded).summary+" attempts=\(attempts)")
         }
         try await NetworkPreparationRetry.run(operation:{
@@ -215,9 +246,9 @@ import QingzhouKit
     private func startServiceAttempt(_ next:AppState,generation:UUID,profileID:UUID?) async throws {
         let timing=ConnectionTiming(),attemptBegan=ProcessInfo.processInfo.systemUptime
         timing.begin("corePreparation");startupStage="准备网络与核心"
-        defer {timing.finish(succeeded:false);for sample in timing.samples {log(sample.summary)}}
+        defer {timing.finish(succeeded:false);for sample in timing.samples {log(sample.summary);if !sample.succeeded,let phase=NetworkEventPhase(rawValue:sample.stage) {recordEvent(.connection,.failed,.startFailed,profileID:profileID,phase:phase)}}}
         if next.captureMode == .systemProxy {try NetworkSafety.check()}
-        NSApplication.shared.activate(ignoringOtherApps:true)
+        if !wakeRebuilding {NSApplication.shared.activate(ignoringOtherApps:true)}
         let control=try CoreControlContext.make();try PolicyValidator.validate(next)
         core.secrets=secrets(next,control);networkChanged=false;coreFailed=false;helperFailureReason=nil
         await capture.helper.setTimingObserver { [weak self] samples in
@@ -240,7 +271,7 @@ import QingzhouKit
             try await capture.start(next,credentials:credentials,control:control)
             try self.checkStartup(generation)
             timing.begin("fallback");startupStage="检查代理通道"
-            _=try await client.proxies()
+            try await client.waitUntilReady()
             try self.checkStartup(generation)
             try await client.initializeFallbacks(state: next)
             try self.checkStartup(generation)
@@ -249,7 +280,7 @@ import QingzhouKit
             try self.checkStartup(generation)
             connectivityResults=results;reachability=ConnectivityResult.combinedSummary(results)
             for result in results {log(result.summary)}
-            guard ConnectivityHealth.evaluate(results) == .healthy else {throw ProxyError("启动连通性检查失败："+reachability)}
+            guard ConnectivityHealth.evaluate(results) == .healthy else {throw wakeStartupError(results)}
             guard !networkChanged,!coreFailed else {throw ProxyError("启动期间核心或网络发生变化")}
             timing.begin("captureActivation");startupStage="应用接管"
             try await capture.activateTunnel()
@@ -264,7 +295,7 @@ import QingzhouKit
                 let status=try await capture.helperStatus()
                 try self.checkStartup(generation)
                 guard status.running else {throw ProxyError("TUN 保护流程已停止核心："+status.message)}
-                guard ConnectivityHealth.evaluate(captured) == .healthy else {throw ProxyError("TUN 实际接管路径检查失败："+reachability)}
+                guard ConnectivityHealth.evaluate(captured) == .healthy else {throw wakeStartupError(captured)}
             }
             timing.begin("systemProxyActivation")
             try capture.activateSystemProxy(port:next.listenPort,exceptions:next.bypassProxyExceptions)
@@ -289,16 +320,19 @@ import QingzhouKit
         }
     }
     // 元数据和凭据仅在新配置实际应用成功后提交；失败时恢复原运行配置。
-    func apply(_ tx:StoreTransaction,reconfigure:Bool=true) async throws {
+    func apply(_ tx:StoreTransaction,reconfigure:Bool=true,source:String="配置修改",affectedProfileID:UUID?=nil) async throws {
         guard let store else {throw ProxyError("配置未加载")}
+        cancelWakeRecovery();invalidateDiagnostic();tx.historySource=source
+        defer {activeHistoryTransactionID=nil;historyStatus=profileHistory.lastError}
         do {
             try await RuntimeTransaction.apply(tx,connected:reconfigure && connection == .connected,validate:{
                 try PolicyValidator.validate(tx.next)
+                try store.prepareHistory(tx);self.activeHistoryTransactionID=tx.historyTransactionID
                 if reconfigure && self.connection == .connected && !tx.next.nodes.isEmpty {let context=try CoreControlContext.make();try await self.core.validate(config:ConfigBuilder.build(state:tx.next,credentials:self.credentials,control:context))}
-            },stop:{if self.capture.running || self.proxy.hasRecovery || self.connection == .connected {try await self.disconnectInternal()}},start:{try await self.startService($0,profileID:tx.nextCatalog?.currentProfileID ?? store.catalog.currentProfileID)},commit:{try store.commit(tx)},abort:{store.abort(tx)},restartPrevious:{try await self.startService($0,profileID:store.catalog.currentProfileID)})
-            state=store.state;synchronizeShortcut()
+            },stop:{if self.capture.running || self.proxy.hasRecovery || self.connection == .connected {try await self.disconnectInternal()}},start:{try await self.startService($0,profileID:tx.nextCatalog?.currentProfileID ?? store.catalog.currentProfileID)},commit:{tx.connectionVerified=reconfigure && self.connection == .connected;try store.commit(tx)},abort:{store.abort(tx)},restartPrevious:{try await self.startService($0,profileID:store.catalog.currentProfileID)})
+            state=store.state;synchronizeShortcut();recordEvent(.configuration,.succeeded,.configurationApplied,profileID:affectedProfileID)
             if reconfigure && connection == .connected{log("配置已更新，连通性检查通过")};if connection != .connected{connectivityResults=[]}
-        }catch{state=store.state;report(error);throw error}
+        }catch{state=store.state;recordEvent(.configuration,.failed,.configurationFailed,profileID:affectedProfileID);report(error);throw error}
     }
 
     func saveManual(_ candidate:Candidate,editingID:UUID?) async {guard !locked,let store else{return};busy=true;defer{busy=false};do{let tx=try store.prepareImport([candidate],replacingID:editingID);try await apply(tx);log("节点已保存")}catch{report(error)}}
@@ -306,18 +340,23 @@ import QingzhouKit
     func deleteSubscription(_ id:UUID) async {guard !locked,let store else{return};busy=true;defer{busy=false};do{try await apply(store.prepareDeleteSubscription(id))}catch{report(error)}}
     func select(_ id:UUID?) async {guard let id else{return};await selectPolicy(.node(id))}
     func selectPolicy(_ ref:PolicyReference) async {
-        guard !locked,ref != state.activePolicy,PolicyValidator.exists(ref,in:state),ref != .selected,ref != .reject else{return};busy=true;defer{busy=false}
+        guard !locked,ref != state.activePolicy,PolicyValidator.exists(ref,in:state),ref != .selected,ref != .reject else{return};cancelWakeRecovery();busy=true;defer{busy=false}
+        invalidateDiagnostic()
         let old=state.activePolicy
+        var next=state;next.selectedPolicy=ref;if case .node(let id)=ref {next.selectedID=id;next.recentUse[id.uuidString]=Date()}
+        guard let store else{return};let tx=store.prepareChange(next);tx.historySource="节点选择"
+        defer {historyStatus=profileHistory.lastError}
         do {
+            try store.prepareHistory(tx)
             if let api,connection == .connected {
                 try await api.select(ref)
                 let checked=await ConnectivityProbe.all(port:state.captureMode.usesTunnel ? nil:state.listenPort,client:api,mode:state.mode)
                 guard ConnectivityHealth.evaluate(checked) == .healthy else {if let old{try? await api.select(old)};throw ProxyError("新节点连通性检查失败，已恢复原选择")}
             }
-            var next=state;next.selectedPolicy=ref;if case .node(let id)=ref {next.selectedID=id;next.recentUse[id.uuidString]=Date()}
-            do{try persist(next)}catch{if let api,let old{try? await api.select(old)};throw error}
+            do{tx.connectionVerified=connection == .connected;try store.commit(tx);state=store.state}catch{if let api,let old{try? await api.select(old)};throw error}
+            recordEvent(.node,.changed,.nodeSelected)
             log("已选择 \(state.label(ref))，已有连接保留");if connection == .connected{await checkConnectivity()}
-        } catch {report(error)}
+        } catch {store.abort(tx);report(error)}
     }
     func setMode(_ mode:ProxyMode,confirmed:Bool=false) async {
         if state.captureMode == .compatible,connection == .connected,!confirmed {pendingMode=mode;return}
@@ -330,10 +369,20 @@ import QingzhouKit
     func saveGroup(_ group:PolicyGroup) async {guard !locked,let store else{return};busy=true;defer{busy=false};do{var next=state;next.groups.removeAll{$0.id==group.id};next.groups.append(group);try PolicyValidator.validate(next);try await apply(store.prepareChange(next))}catch{report(error)}}
     func deleteGroup(_ id:UUID) async {guard !locked,let store else{return};busy=true;defer{busy=false};do{var next=state;next.groups.removeAll{$0.id==id};PolicyValidator.repair(&next);try await apply(store.prepareChange(next))}catch{report(error)}}
     func selectMember(_ group:PolicyGroup,_ ref:PolicyReference) async {
-        guard !locked,group.kind == .select,group.members.contains(ref) else{return};busy=true;defer{busy=false}
-        do {if let api{try await api.select(ref,group:PolicyReference.group(group.id).tag)};var next=state;guard let i=next.groups.firstIndex(where:{$0.id==group.id}) else{return};next.groups[i].selected=ref;do{try persist(next)}catch{if let api,let previous=group.selected{try? await api.select(previous,group:PolicyReference.group(group.id).tag)};throw error}}catch{report(error)}
+        guard !locked,group.kind == .select,group.members.contains(ref),let store else{return}
+        cancelWakeRecovery();invalidateDiagnostic();busy=true;defer{busy=false;historyStatus=profileHistory.lastError}
+        var next=state;guard let i=next.groups.firstIndex(where:{$0.id==group.id}) else{return};next.groups[i].selected=ref
+        let tx=store.prepareChange(next);tx.historySource="策略组选择"
+        do {
+            try store.prepareHistory(tx)
+            if let api {try await api.select(ref,group:PolicyReference.group(group.id).tag)}
+            do {try store.commit(tx);state=store.state}
+            catch {if let api,let previous=group.selected {try? await api.select(previous,group:PolicyReference.group(group.id).tag)};throw error}
+            recordEvent(.node,.changed,.nodeSelected)
+        }catch {store.abort(tx);report(error)}
     }
     func connect() async {
+        cancelWakeRecovery()
         guard !locked,state.activePolicy != nil || state.mode == .direct else{return};busy=true;connection = .connecting;reachability="尚未检测";connectivityResults=ConnectivityResult.pending;defer{busy=false}
         do {guard !recoveryPending,!proxy.hasRecovery else {throw ProxyError("请先恢复原代理")};try await startService(state);guard capture.running,!networkChanged else {throw ProxyError("连接期间核心退出或网络变化")};if state.captureMode.usesTunnel && !reachability.contains("正常"){try await disconnectInternal();throw ProxyError("公网接管 HTTPS 验收失败，原网络已恢复；请查看诊断中的具体检测结果")};log(reachability)}catch {
             let original=error
@@ -341,8 +390,9 @@ import QingzhouKit
             stopTelemetry();connection = .error;report(original)
         }
     }
-    private func disconnectInternal() async throws {activeBypasses=nil;startupGeneration=UUID();startupStage=nil;stopTelemetry();connection = .disconnecting;do{try await capture.stop();dependencies.downloader.networkEnvironmentChanged()}catch{recoveryPending=true;connection = .error;throw error};recoveryPending=proxy.hasRecovery;connection = .disconnected;connectivityResults=[];reachability="尚未检测";log("本次连接已停止；本地代理恢复完成，辅助服务是否恢复取决于本次接管状态")}
+    func disconnectInternal() async throws {invalidateDiagnostic();activeBypasses=nil;startupGeneration=UUID();startupStage=nil;stopTelemetry();connection = .disconnecting;do{try await capture.stop();dependencies.downloader.networkEnvironmentChanged()}catch{recoveryPending=true;connection = .error;throw error};recoveryPending=proxy.hasRecovery;connection = .disconnected;connectivityResults=[];reachability="尚未检测";recordEvent(.connection,.succeeded,.disconnected);log("本次连接已停止；本地代理恢复完成，辅助服务是否恢复取决于本次接管状态")}
     func disconnect() async {
+        cancelWakeRecovery()
         guard canStop else{return}
         startupGeneration=UUID();startupStage=nil;startupProbeTask?.cancel()
         if let startupClient {Task {await startupClient.shutdown()}}
@@ -364,8 +414,8 @@ import QingzhouKit
         log("应急恢复开始：核对本地代理及已安装辅助服务，与当前模式无关")
         do {
             try await capture.emergencyRecover(preserveExternal:true);stopTelemetry();protectionSummary=[];recoveryPending=false;connection = .disconnected
-            connectivityResults=[];helperStatus="轻舟接管已清理，外部网络已保留并核对";reachability="尚未检测";errorMessage=nil;log(helperStatus)
-        }catch {stopTelemetry();recoveryPending=true;connection = .error;helperStatus="恢复未完成，请查看错误及恢复记录";report(error)}
+            connectivityResults=[];helperStatus="轻舟接管已清理，外部网络已保留并核对";reachability="尚未检测";errorMessage=nil;log(helperStatus);recordEvent(.recovery,.succeeded,.recoverySucceeded)
+        }catch {stopTelemetry();recoveryPending=true;connection = .error;helperStatus="恢复未完成，请查看错误及恢复记录";recordEvent(.recovery,.failed,.recoveryConflict);report(error)}
     }
     func startupRecovery() async {
         guard !started,!loadingFailed else{return};started=true
@@ -447,13 +497,14 @@ import QingzhouKit
             await capture.helper.closeChannel()
             let status=try await HelperReadiness.wait {try await self.capture.helperStatus()}
             guard status.protocolVersion==5 else{throw ProxyError("安装后辅助服务协议仍不匹配")}
-            try await capture.emergencyRecover();recoveryPending=false;connection = .disconnected;helperStatus="辅助服务更新完成并已核对";log(helperStatus)
+            try await capture.emergencyRecover(preserveExternal:true);recoveryPending=false;connection = .disconnected;helperStatus="辅助服务更新完成并已核对";log(helperStatus)
         }catch {helperStatus="辅助服务安装/核对未完成";report(error)}
     }
     func inspectHelper() async {do{helperStatus=try await capture.helperStatus().message}catch{helperStatus=error.localizedDescription}}
     var profiles:[ClientProfile]{store?.catalog.profiles ?? []}
     var currentProfileID:UUID?{store?.catalog.currentProfileID}
     func changeProfile(_ id:UUID) async {
+        await cancelWakeRecoveryAndWait()
         guard !locked,let store,id != currentProfileID else{return}
         guard drafts.allowLeaving("切换配置",profile:currentProfileID) else{return};busy=true;defer{busy=false}
         do{try await apply(store.prepareCatalog(ProfileStore.switchTo(id,in:store.catalog)));log("配置切换完成")}catch{report(error)}
@@ -483,11 +534,17 @@ import QingzhouKit
     func batchFavorite(_ ids:Set<UUID>,value:Bool){guard !locked else{return};do{var next=state;if value{next.favorites.formUnion(ids)}else{next.favorites.subtract(ids)};try persist(next)}catch{report(error)}}
     func batchDelete(_ ids:Set<UUID>) async{guard !locked,let store else{return};busy=true;defer{busy=false};do{try await apply(store.prepareDeleteNodes(ids))}catch{report(error)}}
     func handleHealthPowerEvent(_ event:HealthPowerEvent) {
+        if case .willSleep=event,!healthPower.systemSleeping {
+            let connected=connection == .connected || wakeRebuilding
+            cancelWakeRecovery()
+            if connected {let id=UUID();wakeIntent=(id,eventSessionID,currentProfileID,epoch);recordEvent(.network,.changed,.systemSleep,recoveryID:id,originalSessionID:eventSessionID)}
+        }
         guard healthPower.receive(event,uptime:healthPowerUptime()) else{return}
+        if healthPower.suspended {wakeRecovery.cancel()}
         cancelHealthRefresh()
         failedHealthCycles=0;healthFailures=HealthFailureCounter();fallbackStates=[:]
         latencyInvalidatedAt=Date()
-        guard connection == .connected else{return}
+        guard connection == .connected || wakeIntent != nil else{return}
         connectivityResults=ConnectivityResult.pending
         if healthPower.suspended {
             monitor.health="睡眠期间暂停节点健康检查"
@@ -495,11 +552,11 @@ import QingzhouKit
         } else {
             monitor.health="唤醒后等待网络稳定"
             log("系统与屏幕已唤醒，等待 15 秒运行时间后重新检查节点")
-            scheduleHealthRefresh()
+            if wakeIntent != nil {beginWakeRecovery()} else {scheduleHealthRefresh()}
         }
     }
     func healthResultIsCurrent(_ generation:UUID)->Bool {
-        healthPower.generation==generation && healthPower.canProbe(uptime:healthPowerUptime()) && healthDisplayAwake()
+        !wakeRecovery.active && wakeRecoveryStatus.phase != .manual && healthPower.generation==generation && healthPower.canProbe(uptime:healthPowerUptime()) && healthDisplayAwake()
     }
     func recordNodeHealth(_ statuses:[ProbeStatus],powerGeneration:UUID)->Bool {
         guard healthResultIsCurrent(powerGeneration) else{return false}
@@ -507,7 +564,7 @@ import QingzhouKit
     }
     func cancelHealthRefresh() {healthScheduler.cancel();healthChecking=false;connectivityEpoch=UUID()}
     func scheduleHealthRefresh(delay:UInt64=1_000_000_000) {
-        guard connection == .connected else{return}
+        guard connection == .connected,!wakeRecovery.active else{return}
         guard !healthPower.suspended else{healthRefreshPending=true;return}
         guard !locked,let client=api else{healthRefreshPending=true;return}
         let delay=max(delay,UInt64(healthPower.remaining(uptime:healthPowerUptime())*1_000_000_000))
@@ -585,24 +642,8 @@ import QingzhouKit
         reachability=ConnectivityResult.combinedSummary(results)
         for result in results {log(result.summary+(result.milliseconds.map{" 耗时=\($0)ms"} ?? ""))}
     }
-    func diagnose() async {
-        guard !locked,!diagnosing else{return};diagnosing=true;defer{diagnosing=false}
-        diagnosticRows=DiagnosticService.local(state:state,corePath:core.binary.path,connected:connection == .connected)
-        let effective=(SCDynamicStoreCopyProxies(nil) as? [String:Any])?["ExceptionsList"] as? [String] ?? []
-        let expected=state.bypassProxyExceptions
-        let bypassStatus:String
-        if state.captureMode != .systemProxy || connection != .connected {bypassStatus="未验证"}
-        else {bypassStatus=expected.allSatisfy{effective.contains($0)} ? "通过":"失败"}
-        let configuredDomains=(state.bypassDomains+state.bypassExactDomains).joined(separator:",")
-        let effectiveExceptions=effective.joined(separator:",")
-        let explanation="配置："+configuredDomains+"；系统例外："+effectiveExceptions
-        diagnosticRows.append(DiagnosticResult("企业域名系统代理绕过",bypassStatus,explanation+"。核心 DIRECT 仍经过 sing-box；显式指定代理的命令可能不遵循系统例外。"))
-        if state.captureMode.usesTunnel{do{let status=try await capture.helper.request(TunRequest(operation:"status",verifyNetwork:true));diagnosticRows.append(DiagnosticResult("管理员权限/辅助服务","通过","已通过固定客户端身份认证："+status.message));diagnosticRows.append(DiagnosticResult("TUN 路由",status.routesVerified==true ? "通过":status.running ? "失败":"未验证",status.running ? "核对四条接管路由及其接口、网关":"未启用接管"));protectionSummary=status.protectionSummary ?? [];diagnosticRows.append(DiagnosticResult("内网保护",status.protectionVerified==true ? "通过":status.running ? "失败":"未验证",protectionSummary.joined(separator:"；")));if state.captureMode == .compatible {diagnosticRows.append(DiagnosticResult("代理入口",status.proxyVerified==true ? "通过":"失败","核对兼容接管拥有的系统代理字段"))};diagnosticRows.append(DiagnosticResult("TUN DNS",status.dnsVerified==true ? "通过":status.running ? "失败":"未验证","核对当前 DNS 与本次所有权记录"))}catch{diagnosticRows.append(DiagnosticResult("管理员权限/辅助服务","失败",Redactor.redact(error.localizedDescription)))}}else{diagnosticRows.append(DiagnosticResult("系统代理权限","未验证","需要在连接时完成系统管理员授权；诊断不会自动申请"))}
-        diagnosticRows.append(DiagnosticResult("系统代理恢复",proxy.hasRecovery ? "需检查":"通过",proxy.hasRecovery ? "保留恢复记录，可使用恢复入口":"没有待恢复记录"))
-        if let node=selected ?? state.nodes.first{diagnosticRows.append(await DiagnosticService.dns(node.server))}else{diagnosticRows.append(DiagnosticResult("节点 DNS","未验证","尚未选择节点"))}
-        if connection == .connected {await checkConnectivity();diagnosticRows += connectivityResults.map{DiagnosticResult($0.title,$0.status.rawValue,$0.category)}}else{diagnosticRows.append(DiagnosticResult("TLS / HTTPS","未验证","请连接后检测真实代理路径；诊断不会自动接管网络"))}
-    }
     func quit() async -> Bool {
+        await cancelWakeRecoveryAndWait()
         guard !busy else {errorMessage="正在更新配置，请稍后退出";return false}
         guard drafts.allowLeaving("退出轻舟",all:true) else{return false}
         if loadingFailed{return true}
@@ -621,6 +662,7 @@ import QingzhouKit
                 self.log("退出时已确认轻舟不再接管；恢复记录留待下次处理："+Redactor.redact(error.localizedDescription))
             })
             connection = .disconnected
+            await timeline.drain()
             return true
         } catch {report(error);return false}
     }

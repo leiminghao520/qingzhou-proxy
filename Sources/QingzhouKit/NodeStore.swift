@@ -6,6 +6,10 @@ public final class StoreTransaction {
     public var nextCatalog:ProfileCatalog?
     fileprivate let created:[String]
     fileprivate let retired:[String]
+    public var historySource="配置修改"
+    public var connectionVerified=false
+    public fileprivate(set) var historyTransactionID:UUID?
+    fileprivate var historyPrepared=false
     fileprivate var finished=false
     fileprivate init(previous:AppState,next:AppState,created:[String]=[],retired:[String]=[]) {self.previous=previous;self.next=next;self.created=created;self.retired=retired}
 }
@@ -13,6 +17,7 @@ public final class NodeStore {
     public private(set) var state:AppState
     public private(set) var catalog:ProfileCatalog
     public let credentials:CredentialStore
+    public var history:ProfileHistoryStore?
     public let file:URL
     public init(file:URL,credentials:CredentialStore) throws {
         self.file=file;self.credentials=credentials;state=AppState();catalog=ProfileCatalog()
@@ -34,7 +39,16 @@ public final class NodeStore {
             do {let backup=file.deletingLastPathComponent().appendingPathComponent("migration-v3.qzb");try SecureFile.write(BackupService.encrypt(snapshot,password:password),to:backup);try SecureFile.write(Data(ref.utf8),to:file.deletingLastPathComponent().appendingPathComponent("migration-v3.keyref"));catalog.backupIndex.append(BackupIndex(fileName:"migration-v3.qzb"));try SecureFile.write(JSONEncoder().encode(catalog),to:file)}catch{try? credentials.remove(ref);throw error}
         }
     }
-    public func commit(_ next:AppState) throws {guard next.schemaVersion==2 else {throw ProxyError("不能保存未知配置版本")};var root=catalog;root.updateActive(next);try root.validate();try SecureFile.write(JSONEncoder().encode(root),to:file);catalog=root;state=next}
+    public func commit(_ next:AppState) throws {
+        let tx=prepareChange(next)
+        do {try commit(tx)}catch{abort(tx);throw error}
+    }
+    public func prepareHistory(_ tx:StoreTransaction) throws {
+        guard !tx.historyPrepared else{return}
+        var root=tx.nextCatalog ?? catalog;root.updateActive(tx.next);try root.validate()
+        tx.historyTransactionID=try history?.prepare(previous:catalog,next:root,source:tx.historySource)
+        tx.historyPrepared=true
+    }
     public func prepareCatalog(_ root:ProfileCatalog) throws -> StoreTransaction {try root.validate();let tx=StoreTransaction(previous:state,next:root.active,retired:Array(catalog.credentialRefs.subtracting(root.credentialRefs)));tx.nextCatalog=root;return tx}
     public func prepareRestore(_ snapshot:BackupSnapshot) throws -> StoreTransaction {
         var root=snapshot.catalog;var created:[String]=[]
@@ -46,10 +60,45 @@ public final class NodeStore {
     }
     public func prepareChange(_ next:AppState) -> StoreTransaction {StoreTransaction(previous:state,next:next)}
     public func commit(_ tx:StoreTransaction) throws {
-        guard !tx.finished else {throw ProxyError("更新事务已经结束")};if var root=tx.nextCatalog {root.updateActive(tx.next);try root.validate();try SecureFile.write(JSONEncoder().encode(root),to:file);catalog=root;state=root.active}else{try commit(tx.next)};tx.finished=true
+        guard !tx.finished else {throw ProxyError("更新事务已经结束")}
+        try prepareHistory(tx)
+        var root=tx.nextCatalog ?? catalog;root.updateActive(tx.next);try root.validate()
+        if let id=tx.historyTransactionID {root.lastHistoryTransactionID=id}
+        try SecureFile.write(JSONEncoder().encode(root),to:file,durable:tx.historyTransactionID != nil)
+        catalog=root;state=root.active;tx.finished=true
+        if let id=tx.historyTransactionID {
+            do {try history?.finish(id,verified:tx.connectionVerified)}catch{history?.noteFinalizationFailure()}
+        }
         for ref in tx.retired where !catalog.credentialRefs.contains(ref) {try? credentials.remove(ref)}
     }
-    public func abort(_ tx:StoreTransaction) {guard !tx.finished else{return};tx.finished=true;for ref in tx.created {try? credentials.remove(ref)}}
+    public func abort(_ tx:StoreTransaction) {
+        guard !tx.finished else{return};tx.finished=true
+        if let id=tx.historyTransactionID {try? history?.abort(id)}
+        for ref in tx.created {try? credentials.remove(ref)}
+    }
+    public func prepareProfileRestore(_ snapshot:ProfileHistorySnapshot) throws -> StoreTransaction {
+        var profile=snapshot.profile,created:[String]=[]
+        if !catalog.profiles.contains(where:{$0.id==profile.id}) {profile.id=UUID();profile.name=String(profile.name.prefix(80))+"（历史恢复）"}
+        do {
+            var mapping:[String:String]=[:]
+            let state=profile.configuration
+            let bases=Set(state.nodes.map(\.credentialRef)+state.subscriptions.map(\.sourceRef)+state.remoteRules.map(\.sourceRef))
+            for ref in bases {
+                guard let value=snapshot.credentials[ref] else {throw ProxyError("历史凭据不完整")}
+                let fresh=UUID().uuidString;mapping[ref]=fresh;created.append(fresh);try credentials.set(value,for:fresh)
+                if let obfs=snapshot.credentials[ref+".obfs"] {created.append(fresh+".obfs");try credentials.set(obfs,for:fresh+".obfs")}
+            }
+            for i in profile.configuration.nodes.indices {profile.configuration.nodes[i].credentialRef=mapping[profile.configuration.nodes[i].credentialRef]!}
+            for i in profile.configuration.subscriptions.indices {profile.configuration.subscriptions[i].sourceRef=mapping[profile.configuration.subscriptions[i].sourceRef]!;profile.configuration.subscriptions[i].autoUpdate=false;profile.configuration.subscriptions[i].retryCount=0;profile.configuration.subscriptions[i].retryAfter=nil;profile.configuration.subscriptions[i].pendingReview=false;profile.configuration.subscriptions[i].lastError=nil}
+            for i in profile.configuration.remoteRules.indices {profile.configuration.remoteRules[i].sourceRef=mapping[profile.configuration.remoteRules[i].sourceRef]!;profile.configuration.remoteRules[i].autoUpdate=false;profile.configuration.remoteRules[i].retryCount=0;profile.configuration.remoteRules[i].retryAfter=nil;profile.configuration.remoteRules[i].lastError=nil}
+            profile.configuration.latency=[:];profile.configuration.recentUse=[:]
+            var root=catalog
+            if let i=root.profiles.firstIndex(where:{$0.id==profile.id}) {root.profiles[i]=profile}else{root.profiles.append(profile)}
+            try root.validate()
+            let tx=StoreTransaction(previous:self.state,next:root.active,created:created,retired:Array(catalog.credentialRefs.subtracting(root.credentialRefs)))
+            tx.nextCatalog=root;tx.historySource="历史恢复";return tx
+        }catch {for ref in created {try? credentials.remove(ref)};throw error}
+    }
     public func prepareImport(_ candidates:[Candidate],subscription:Subscription?=nil,source:String?=nil,replacingID:UUID?=nil,profile:ImportPreview?=nil,scope:ImportScope = .nodes) throws -> StoreTransaction {
         guard !candidates.isEmpty else {throw ProxyError("没有可导入节点")}
         var next=state,created:[String]=[],retired:[String]=[];var mapping:[UUID:UUID]=[:];var seen:[String:Candidate]=[:]

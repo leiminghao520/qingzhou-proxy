@@ -8,7 +8,12 @@ resources="$app/Contents/Resources"
 for file in QingzhouHelper sing-box; do test -f "$resources/$file"; test ! -L "$resources/$file"; test -x "$resources/$file"; done
 root=/Library/PrivilegedHelperTools/cn.qingzhou.proxy
 plist=/Library/LaunchDaemons/cn.qingzhou.proxy.helper.plist
-if [ -f "$root/recovery.json" ]; then echo '仍有恢复记录，保留旧恢复服务并拒绝覆盖。请先恢复网络。'; exit 1; fi
+# 已授权更新时，用随包恢复器先处理旧记录，解除旧客户端身份导致的恢复死锁。
+if [ -f "$root/recovery.json" ]; then
+    test -x "$resources/recover-helper.sh"
+    /bin/bash "$resources/recover-helper.sh" "$app" --for-update
+    if [ -f "$root/recovery.json" ]; then echo '安全恢复未完成，保留旧组件并取消更新。'; exit 1; fi
+fi
 stage=$(/usr/bin/mktemp -d /Library/PrivilegedHelperTools/qingzhou-install.XXXXXX)
 installed=0
 stopped=0

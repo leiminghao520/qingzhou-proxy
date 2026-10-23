@@ -3,6 +3,7 @@ import Darwin
 import SystemConfiguration
 
 public struct TunRequest:Codable,Sendable {
+    public var deferToNetworkResume:Bool?
     public var progressUpdates:Bool?
     public var preserveExternal:Bool?
     public var protocolVersion:Int? = 5
@@ -16,6 +17,8 @@ public struct TunRequest:Codable,Sendable {
     public init(operation:String,state:AppState?=nil,credentials:[String:String]?=nil,control:CoreControlContext?=nil,verifyNetwork:Bool=false,httpCompatibilityPort:Int?=nil,systemProxyPort:Int?=nil,preserveExternal:Bool=false){self.preserveExternal=preserveExternal;self.systemProxyPort=systemProxyPort;self.httpCompatibilityPort=httpCompatibilityPort;self.verifyNetwork=verifyNetwork;self.operation=operation;self.state=state;self.credentials=credentials;self.control=control}
 }
 public struct TunReply: Codable, Sendable {
+    public var wakeRecoveryReason:WakeRecoveryReason?
+    public var supportsWakeRecovery:Bool?
     public var isProgress:Bool?
     public var tunnelInterface:String?
     public var supportsExternalRecovery: Bool?
@@ -106,6 +109,10 @@ public enum UnixChannel {
     }
     public static func address(_ path:String) throws -> sockaddr_un {var address=sockaddr_un();address.sun_family=sa_family_t(AF_UNIX);address.sun_len=UInt8(MemoryLayout<sockaddr_un>.size);let bytes=Array(path.utf8)+[0];guard bytes.count<=MemoryLayout.size(ofValue:address.sun_path) else{throw ProxyError("控制通道路径过长")};withUnsafeMutableBytes(of:&address.sun_path){$0.copyBytes(from:bytes)};return address}
 }
+public struct HelperRequestBusy:Error,LocalizedError,Sendable {
+    public init() {}
+    public var errorDescription:String? {"辅助服务请求正在处理，未重复提交"}
+}
 public struct HelperConnectionError:Error,LocalizedError,Sendable {
     public let code:Int32
     public init(code:Int32){self.code=code}
@@ -136,7 +143,7 @@ public actor PrivilegedServiceClient {
     public func setProgressObserver(_ observer:(@Sendable (String)->Void)?) {onProgress=observer}
     public func setTimingObserver(_ observer: (@Sendable ([ConnectionStageTiming]) -> Void)?) {onStageTimings=observer}
     public func request(_ request:TunRequest) async throws -> TunReply {
-        guard !requestInFlight else {throw ProxyError("辅助服务请求正在处理，未重复提交")}
+        guard !requestInFlight else {throw HelperRequestBusy()}
         requestInFlight=true;defer{requestInFlight=false}
         if channel==nil {let descriptor=socket(AF_UNIX,SOCK_STREAM,0);guard descriptor>=0 else{throw ProxyError("无法创建辅助服务控制通道")};var option:Int32=1;_ = setsockopt(descriptor,SOL_SOCKET,SO_NOSIGPIPE,&option,socklen_t(MemoryLayout<Int32>.size));var timeout=timeval(tv_sec:60,tv_usec:0);_ = setsockopt(descriptor,SOL_SOCKET,SO_RCVTIMEO,&timeout,socklen_t(MemoryLayout<timeval>.size));_ = setsockopt(descriptor,SOL_SOCKET,SO_SNDTIMEO,&timeout,socklen_t(MemoryLayout<timeval>.size));var address=try UnixChannel.address(HelperPaths.socket);let connected=withUnsafePointer(to:&address){$0.withMemoryRebound(to:sockaddr.self,capacity:1){Darwin.connect(descriptor,$0,socklen_t(MemoryLayout<sockaddr_un>.size))==0}};guard connected else{let code=errno;close(descriptor);throw HelperConnectionError(code:code)};channel=HelperRequestChannel(descriptor:descriptor)}
         do {

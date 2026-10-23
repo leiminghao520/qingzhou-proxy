@@ -11,10 +11,11 @@ public struct ClientProfile:Codable,Identifiable,Sendable {
 }
 public struct BackupIndex:Codable,Identifiable,Sendable {public var id=UUID();public var date=Date();public var fileName:String;public init(fileName:String){self.fileName=fileName}}
 public struct ProfileCatalog:Codable,Sendable {
+    public var lastHistoryTransactionID:UUID?
     public var schemaVersion=3;public var profiles:[ClientProfile];public var currentProfileID:UUID;public var backupIndex:[BackupIndex]=[]
     public init(state:AppState=AppState()){let profile=ClientProfile(name:"默认配置",configuration:state);profiles=[profile];currentProfileID=profile.id}
-    enum CodingKeys:String,CodingKey{case schemaVersion,profiles,currentProfileID,backupIndex}
-    public init(from decoder:Decoder) throws{let c=try decoder.container(keyedBy:CodingKeys.self);schemaVersion=try c.decode(Int.self,forKey:.schemaVersion);profiles=try c.decode([ClientProfile].self,forKey:.profiles);currentProfileID=try c.decode(UUID.self,forKey:.currentProfileID);backupIndex=try c.decodeIfPresent([BackupIndex].self,forKey:.backupIndex) ?? []}
+    enum CodingKeys:String,CodingKey{case schemaVersion,profiles,currentProfileID,backupIndex,lastHistoryTransactionID}
+    public init(from decoder:Decoder) throws{let c=try decoder.container(keyedBy:CodingKeys.self);lastHistoryTransactionID=try c.decodeIfPresent(UUID.self,forKey:.lastHistoryTransactionID);schemaVersion=try c.decode(Int.self,forKey:.schemaVersion);profiles=try c.decode([ClientProfile].self,forKey:.profiles);currentProfileID=try c.decode(UUID.self,forKey:.currentProfileID);backupIndex=try c.decodeIfPresent([BackupIndex].self,forKey:.backupIndex) ?? []}
     public var active:AppState {profiles.first{$0.id==currentProfileID}!.configuration}
     public mutating func updateActive(_ state:AppState){if let i=profiles.firstIndex(where:{$0.id==currentProfileID}){profiles[i].configuration=state}}
     public func validate() throws {

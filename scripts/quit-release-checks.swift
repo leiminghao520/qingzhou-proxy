@@ -1,5 +1,6 @@
 import Foundation
 import SystemConfiguration
+import Darwin
 import QingzhouKit
 
 // 链接正式退出核验，只注入快照和代理核验；夹具禁止写入真实网络。
@@ -61,6 +62,17 @@ final class Service {
         check(!service.verifyReleasedForQuit(),"核验失败不能当作已释放")
         service.quitRoutesRead={[foreign]};service.journal?.expectedDNS=Data("invalid".utf8)
         check(!service.verifyReleasedForQuit(),"损坏记录不能当作已释放")
+        let parent=ProtectedRoute(destination:"239.255.255.250/32",gateway:"link#11",interface:"en0")
+        let parentRecord=RouteRecord(route:parent,flags:UInt32(RTF_UP|RTF_MULTICAST|RTF_CLONING))
+        let cacheRecord=RouteRecord(route:parent,flags:UInt32(RTF_UP|RTF_HOST|RTF_MULTICAST|RTF_LLINFO),linkLayerAddress:"1:0:5e:7f:ff:fa")
+        service.journal=Journal(expectedDNS:try PropertyListSerialization.data(fromPropertyList:dns,format:.binary,options:0),routes:[parent])
+        service.quitRoutesRead=nil;service.quitDNSRead={_ in nil}
+        service.routeSample={NetworkRouteSample(records:[parentRecord,cacheRecord])}
+        check(!service.verifyReleasedForQuit(),"父项与派生缓存共存仍属于自有路由，不得提前退出")
+        service.routeSample={NetworkRouteSample(records:[cacheRecord])}
+        check(!service.verifyReleasedForQuit(),"父项消失后孤立缓存来源不明，恢复和退出都保留记录")
+        service.routeSample={NetworkRouteSample(records:[])}
+        check(service.verifyReleasedForQuit(),"父项和缓存均释放后允许退出")
         let process=Process();process.executableURL=URL(fileURLWithPath:"/bin/sleep");process.arguments=["10"];try process.run()
         defer{if process.isRunning {process.terminate();process.waitUntilExit()}}
         service.process=process;service.journal=nil

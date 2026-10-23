@@ -119,6 +119,14 @@ final class Transport:RouteTransport {
         let same=valid.withUnsafeBytes{qz_route_match($0.baseAddress,$0.count,RTM_ADD,123,456,&kernel)}
         check(same==1 && kernel==0,"确认匹配 PID 与序列")
         let t=Transport(),backend=NativeRouteBackend(transport:t)
+        t.data=valid;let metrics=RouteOperationMetrics();backend.metrics=metrics
+        let measuredSample=try backend.snapshot()
+        _=measuredSample.identityIndex;_=measuredSample.identityIndex
+        _=measuredSample.table;_=measuredSample.table
+        for stage in ["routeDump","routeDecode","routeSampleBuild","routeIdentityIndex","routeTableText"] {
+            check(metrics.samples.first{$0.stage==stage}?.count==1,"采样、解析和惰性构建计数独立且无重复")
+        }
+        backend.metrics=nil
         let r=ProtectedRoute(destination:"192.0.2.7/32",gateway:"127.0.0.1",interface:"lo0",scope:"lo0")
         check(try backend.write(.add,route:r) == .applied,"注入后端确认成功")
         t.error=EEXIST

@@ -11,7 +11,7 @@ extension Service {
         var issues:[String]=[]
         if current != expected {issues.append("本次补充 DNS 服务与应用值不一致")}
         let takeover=record.routes.filter{$0.interface==record.interface || $0.destination.hasSuffix("/1")}.map{ProtectedRoute(destination:$0.destination,gateway:$0.gateway,interface:$0.interface,scope:$0.scope)}
-        issues += CaptureOwnership.routeIssues(expected:takeover,actual:sample.ownershipRoutes)
+        issues += CaptureOwnership.routeIssues(expected:takeover,index:sample.identityIndex)
         return issues
     }
     func reconciledNetworkIssues(_ fresh:CapturePlan,sample:NetworkRouteSample) throws -> [String] {

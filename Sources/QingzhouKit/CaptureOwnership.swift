@@ -71,9 +71,13 @@ public enum CaptureOwnership {
         return NetworkInspection.routeGateway(info)==expected.gateway && NetworkInspection.routeField("interface",info)==expected.interface && NetworkInspection.routeScopeMatches(expected.scope,flags:NetworkInspection.routeField("flags",info),interface:NetworkInspection.routeField("interface",info))
     }
     public static func routeIssues(expected:[ProtectedRoute],actual:[ProtectedRoute])->[String] {
+        guard !expected.isEmpty else{return []}
+        return routeIssues(expected:expected,index:RouteIdentityIndex(actual))
+    }
+    public static func routeIssues(expected:[ProtectedRoute],index:RouteIdentityIndex)->[String] {
         var issues:[String]=[]
         for route in expected {
-            let candidates=actual.filter{NetworkInspection.samePrefix($0.destination,route.destination)}
+            let candidates=index.candidates(route.destination)
             if candidates.contains(where:{$0.interface==route.interface && $0.gateway==route.gateway && $0.scope==route.scope}) {continue}
             let state=candidates.prefix(3).map{$0.interface+"/"+$0.gateway+"/scope="+($0.scope ?? "global")}.joined(separator:"；")
             issues.append("路由 "+route.destination+"：期望 "+route.interface+"/"+route.gateway+"/scope="+(route.scope ?? "global")+"，实际 "+(state.isEmpty ? "未发现同前缀项":state))

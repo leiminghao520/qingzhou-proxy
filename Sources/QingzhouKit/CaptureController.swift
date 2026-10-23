@@ -71,6 +71,25 @@ import Foundation
         try await restoreAll(includeHelper:needsHelper)
     }
     public func helperStatus() async throws -> TunReply {let status=try await requestHelper(TunRequest(operation:"status"));helperRunning=status.running;return status}
+    public func wakeStatus() async throws -> TunReply {try await requestHelper(TunRequest(operation:"status",verifyNetwork:true))}
+    // 原子地让辅助服务优先完成已有重建；旧辅助服务不支持该语义时停止自动处理。
+    public func recoverForWake() async throws -> Bool {
+        if activeMode?.usesTunnel == true || helperRunning {
+            let status:TunReply
+            do {status=try await requestHelper(TunRequest(operation:"status"))} catch is HelperRequestBusy {return false}
+            if status.networkReconnecting {return false}
+            guard status.supportsWakeRecovery==true else {throw WakeRecoveryError(.configuration)}
+            var request=TunRequest(operation:"recover",preserveExternal:true);request.deferToNetworkResume=true
+            let reply:TunReply
+            do {reply=try await requestHelper(request)} catch is HelperRequestBusy {return false}
+            if reply.networkReconnecting {return false}
+            guard !reply.running,reply.recoveryPending != true else {throw WakeRecoveryError(.configuration)}
+            try await restoreAll(includeHelper:false,preserveExternal:true)
+            return true
+        }
+        try await emergencyRecover(preserveExternal:true)
+        return true
+    }
     public func recoverHelper() async throws {try await restoreAll(includeHelper:true)}
     public func emergencyRecover(preserveExternal:Bool=false) async throws {
         // 应急入口不依赖当前选择的模式；安装的辅助服务可能仍保留另一会话的恢复记录。

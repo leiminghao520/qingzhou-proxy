@@ -5,7 +5,8 @@ import CQingzhouRoute
 public struct RouteRecord:Equatable,Sendable {
     public var route:ProtectedRoute
     public var flags:UInt32
-    public init(route:ProtectedRoute,flags:UInt32) {self.route=route;self.flags=flags}
+    public var linkLayerAddress:String?
+    public init(route:ProtectedRoute,flags:UInt32,linkLayerAddress:String?=nil) {self.route=route;self.flags=flags;self.linkLayerAddress=linkLayerAddress}
     public var isTransient:Bool {flags & UInt32(RTF_WASCLONED|RTF_LLINFO) != 0}
     public var queryText:String {
         let parts=route.destination.split(separator:"/")
@@ -29,9 +30,13 @@ public struct RouteBackendError:Error,LocalizedError,Sendable {
     public var errorDescription:String? {"原生路由操作失败（\(code)：\(String(cString:strerror(code)))）；"+(outcomeUnknown ? "写入结果未知，保留恢复记录":"未确认提交")}
 }
 public protocol RouteBackend:AnyObject {
+    func delete(_ record:RouteRecord,deadline:Date?) throws -> RouteWriteResult
     func snapshot() throws -> NetworkRouteSample
     func lookup(_ destination:String,ipv6:Bool,scope:String?,deadline:Date?) throws -> RouteRecord
     func write(_ operation:NetworkInspection.RouteOperation,route:ProtectedRoute,legacy:Bool,deadline:Date?) throws -> RouteWriteResult
+}
+public extension RouteBackend {
+    func delete(_ record:RouteRecord,deadline:Date?) throws -> RouteWriteResult {try write(.delete,route:record.route,legacy:false,deadline:deadline)}
 }
 public struct RouteExchangeResult {
     public var reply:Data
@@ -78,6 +83,7 @@ public final class NativeRouteBackend:RouteBackend {
         sequence = sequence == Int32.max ? 1:sequence+1
         return sequence
     }
+    public var metrics:RouteOperationMetrics?
     public var cancelled:()->Bool={false}
     public init(transport:RouteTransport=DarwinRouteTransport()) {self.transport=transport}
     public static func decode(_ data:Data) throws -> [RouteRecord] {
@@ -91,21 +97,31 @@ public final class NativeRouteBackend:RouteBackend {
             var value=value
             let destination=withUnsafePointer(to:&value.destination){$0.withMemoryRebound(to:CChar.self,capacity:64){String(cString:$0)}}
             let gateway=withUnsafePointer(to:&value.gateway){$0.withMemoryRebound(to:CChar.self,capacity:64){String(cString:$0)}}
+            let link=withUnsafePointer(to:&value.link_layer_address){$0.withMemoryRebound(to:CChar.self,capacity:64){String(cString:$0)}}
             let interface=withUnsafePointer(to:&value.interface_name){$0.withMemoryRebound(to:CChar.self,capacity:32){String(cString:$0)}}
-            return RouteRecord(route:ProtectedRoute(destination:destination+"/\(value.prefix_length)",gateway:gateway,interface:interface,scope:value.flags & UInt32(RTF_IFSCOPE) != 0 ? interface:nil),flags:value.flags)
+            return RouteRecord(route:ProtectedRoute(destination:destination+"/\(value.prefix_length)",gateway:gateway,interface:interface,scope:value.flags & UInt32(RTF_IFSCOPE) != 0 ? interface:nil),flags:value.flags,linkLayerAddress:link.isEmpty ? nil:link)
         }
     }
     public func snapshot() throws -> NetworkRouteSample {
         lock.lock();defer{lock.unlock()}
         guard !cancelled() else {throw CancellationError()}
-        let rows=try Self.decode(transport.dump())
+        let data:Data
+        if let metrics {data=try metrics.measure("routeDump") {try transport.dump()}}
+        else {data=try transport.dump()}
+        let rows: [RouteRecord]
+        if let metrics {rows=try metrics.measure("routeDecode") {try Self.decode(data)}}
+        else {rows=try Self.decode(data)}
         guard !cancelled() else {throw CancellationError()}
+        if let metrics {return metrics.measure("routeSampleBuild") {NetworkRouteSample(records:rows,metrics:metrics)}}
         return NetworkRouteSample(records:rows)
     }
-    private func encoded(_ operation:Int32,destination:String,ipv6:Bool,bits:Int,gateway:String,interface:String,scoped:Bool,legacy:Bool,pid:Int32,sequence:Int32) throws -> Data {
+    private func encoded(_ operation:Int32,destination:String,ipv6:Bool,bits:Int,gateway:String,interface:String,scoped:Bool,legacy:Bool,pid:Int32,sequence:Int32,hostOverride:Bool?=nil) throws -> Data {
         var packet=Data(count:2048),size=0
         let error=packet.withUnsafeMutableBytes {buffer in
-            qz_route_encode(operation,destination,ipv6 ? AF_INET6:AF_INET,Int32(bits),gateway,interface,scoped ? 1:0,legacy ? 1:0,pid,sequence,buffer.baseAddress,buffer.count,&size)
+            if let hostOverride,operation==RTM_DELETE {
+                return qz_route_encode_delete(destination,ipv6 ? AF_INET6:AF_INET,Int32(bits),gateway,interface,scoped ? 1:0,hostOverride ? 1:0,pid,sequence,buffer.baseAddress,buffer.count,&size)
+            }
+            return qz_route_encode(operation,destination,ipv6 ? AF_INET6:AF_INET,Int32(bits),gateway,interface,scoped ? 1:0,legacy ? 1:0,pid,sequence,buffer.baseAddress,buffer.count,&size)
         }
         guard error==0 else {throw RouteBackendError(error)}
         packet.count=size;return packet
@@ -120,11 +136,11 @@ public final class NativeRouteBackend:RouteBackend {
             catch {throw ProxyError("路由整批编码预检第 \(ordinal+1) 项失败（\(route.ipv6 ? "IPv6":"IPv4") /\(prefix.bits)，\(route.scope==nil ? "全局":"作用域")）；未发送路由请求："+error.localizedDescription)}
         }
     }
-    private func exchange(_ operation:Int32,destination:String,ipv6:Bool,bits:Int,gateway:String,interface:String,scoped:Bool,legacy:Bool,deadline:Date?) throws -> RouteExchangeResult {
+    private func exchange(_ operation:Int32,destination:String,ipv6:Bool,bits:Int,gateway:String,interface:String,scoped:Bool,legacy:Bool,deadline:Date?,hostOverride:Bool?=nil) throws -> RouteExchangeResult {
         guard !cancelled() else {throw CancellationError()}
         let budget=NetworkCommandBudget(deadline:deadline,uptime:ProcessInfo.processInfo.systemUptime)
         let seq=Self.nextSequence(),pid=getpid()
-        let packet=try encoded(operation,destination:destination,ipv6:ipv6,bits:bits,gateway:gateway,interface:interface,scoped:scoped,legacy:legacy,pid:pid,sequence:seq)
+        let packet=try encoded(operation,destination:destination,ipv6:ipv6,bits:bits,gateway:gateway,interface:interface,scoped:scoped,legacy:legacy,pid:pid,sequence:seq,hostOverride:hostOverride)
         let remaining=budget.remaining(wallTime:Date(),uptime:ProcessInfo.processInfo.systemUptime)
         guard remaining>0 else {throw RouteBackendError(ETIMEDOUT)}
         let result=try transport.exchange(packet,timeout:remaining,cancelled:cancelled)
@@ -141,12 +157,18 @@ public final class NativeRouteBackend:RouteBackend {
         guard let route=try Self.decode(result.reply).first else {throw RouteBackendError(EPROTO)}
         return route
     }
+    public func delete(_ record:RouteRecord,deadline:Date?=nil) throws -> RouteWriteResult {
+        try write(.delete,route:record.route,legacy:false,deadline:deadline,hostOverride:record.flags & UInt32(RTF_HOST) != 0)
+    }
     public func write(_ operation:NetworkInspection.RouteOperation,route:ProtectedRoute,legacy:Bool=false,deadline:Date?=nil) throws -> RouteWriteResult {
+        try write(operation,route:route,legacy:legacy,deadline:deadline,hostOverride:nil)
+    }
+    private func write(_ operation:NetworkInspection.RouteOperation,route:ProtectedRoute,legacy:Bool,deadline:Date?,hostOverride:Bool?) throws -> RouteWriteResult {
         lock.lock();defer{lock.unlock()}
         guard operation != .get,route.scope==nil || route.scope==route.interface,let prefix=IPPrefix(route.destination) else {throw RouteBackendError(EINVAL)}
         let address=legacy ? String(route.destination.split(separator:"/")[0]):prefix.address
         do {
-            let result=try exchange(operation == .add ? RTM_ADD:RTM_DELETE,destination:address,ipv6:route.ipv6,bits:prefix.bits,gateway:route.gateway,interface:route.interface,scoped:route.scope != nil,legacy:legacy,deadline:deadline)
+            let result=try exchange(operation == .add ? RTM_ADD:RTM_DELETE,destination:address,ipv6:route.ipv6,bits:prefix.bits,gateway:route.gateway,interface:route.interface,scoped:route.scope != nil,legacy:legacy,deadline:deadline,hostOverride:hostOverride)
             return result.kernelError==0 ? .applied:.rejected(result.kernelError)
         } catch let error as RouteBackendError where !error.outcomeUnknown && [EEXIST,ESRCH,EPERM,EACCES,ENETUNREACH,EHOSTUNREACH].contains(error.code) {
             return .rejected(error.code)

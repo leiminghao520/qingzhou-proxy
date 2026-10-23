@@ -8,6 +8,7 @@ struct Journal { var captureRoutes:[String]?=nil; var address4="100.64.1.1/30"; 
 final class Service {
     var routeBackend:RouteBackend=LegacyRouteBackend(command:{_,_,_ in throw ProxyError("夹具禁止真实命令")})
     func checkRouteOwner() throws {}
+    func measured<T>(_ name:String,_ body:() throws -> T) rethrows -> T {try body()}
     func sampledRoutes() throws -> NetworkRouteSample {try routeSample()}
     func verifyBypassFirewall() throws {}
     let queue = DispatchQueue(label: "cn.qingzhou.monitor.fixture")
@@ -28,6 +29,7 @@ final class Service {
     var networkTimer: DispatchSourceTimer?
     var networkStore: SCDynamicStore?
     var routeEvents: DispatchSourceRead?
+    var networkMonitorObservation: ((NetworkMonitorEvent) -> Void)?
     var networkChecks: NetworkCheckScheduler?
     var routeSample: () throws -> NetworkRouteSample = { throw ProxyError("必须注入采样") }
     var networkDNSRead: ((String) -> NSDictionary?)?
@@ -58,6 +60,7 @@ final class Service {
     var writeRouteHook: (([String]) throws -> String)?
     var routeWrites = 0
     func routeInfo(_ destination:String,ipv6:Bool,scope:String?=nil,deadline:Date?=nil) throws -> String {
+        networkMonitorObservation?(.routeQuery)
         if let routeLookupHook {return try routeLookupHook(destination,ipv6,scope)}
         guard let routeInfoHook else {throw ProxyError("夹具必须注入路由查询")}
         return try routeInfoHook()
@@ -466,6 +469,37 @@ final class Service {
                 check(live.journal!.captureRoutes==prefixes && actual.contains{$0.destination=="0.0.0.0/1"},"失败保留旧捕获与恢复意图")
             }
         }
+
+        // 使用正式网络检查生成查询响应，比较旧入口和过滤入口是否会自行补查。
+        func packet(_ type:Int32) -> Data {
+            var header=rt_msghdr();header.rtm_msglen=UInt16(MemoryLayout<rt_msghdr>.size)
+            header.rtm_version=UInt8(RTM_VERSION);header.rtm_type=UInt8(type)
+            return withUnsafeBytes(of:&header){Data($0)}
+        }
+        func feedback(filtered:Bool) throws -> (Int,Int) {
+            let service=try fixture()
+            var jobs:[()->Void]=[],packets=[packet(RTM_ADD)],runs=0,queries=0
+            service.networkMonitorObservation={event in if event == .checkExecuted {runs+=1};if event == .routeQuery {queries+=1}}
+            service.routeInfoHook={packets.append(packet(RTM_GET));return ""}
+            service.networkSnapshotRead={sample in
+                _=try service.routeInfo("192.0.2.53",ipv6:false)
+                return NetworkSnapshot(primaryInterface:"en0",routes:NetworkSnapshot.parseRoutes(sample.table),resolvers:[resolver])
+            }
+            let scheduler=NetworkCheckScheduler(enqueue:{jobs.append($0)},operation:{service.checkNetworkChange()})
+            for _ in 0..<20 {
+                if filtered {
+                    RouteEventPump.drain(read:{packets.isEmpty ? .wouldBlock:.packet(packets.removeFirst())},request:{scheduler.request()})
+                } else if !packets.isEmpty {packets=[];scheduler.request()}
+                if !jobs.isEmpty {jobs.removeFirst()()}
+                if packets.isEmpty && jobs.isEmpty {break}
+            }
+            scheduler.cancel()
+            return (runs,queries)
+        }
+        let baselineFeedback=try feedback(filtered:false),candidateFeedback=try feedback(filtered:true)
+        check(baselineFeedback.0==20 && baselineFeedback.1==20,"旧入口可在无外部变化时由查询响应持续触发检查")
+        check(candidateFeedback.0==1 && candidateFeedback.1==1,"过滤入口只核验真实变化，查询响应不触发下一轮")
+        print("ROUTE_FEEDBACK baselineChecks=\(baselineFeedback.0) baselineQueries=\(baselineFeedback.1) candidateChecks=\(candidateFeedback.0) candidateQueries=\(candidateFeedback.1)")
 
         var queued: [() -> Void] = [], cycles = 0
         let burst = try fixture()

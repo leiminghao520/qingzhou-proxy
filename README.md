@@ -173,3 +173,9 @@ bash scripts/optimization-benchmark.sh
 ## 0.10.0 VPS 联动候选版
 
 新增服务端状态、设备用量、腾讯云账单与套餐、设备查看、受限带宽测试、双端加密备份和联合诊断。采用订阅同源能力发现及一次性配对，附加功能失效不阻断普通代理。实现与部署边界见 [联动说明](docs/vps-client-integration.md)，本轮结果见 [验收记录](docs/verification-vps-client.md)。当前为候选包，未安装或部署。
+
+## 诊断、配置历史与事件时间线候选
+
+诊断提供综合检查、目标路径和事件时间线。诊断会话可取消，DNS 同步调用使用两个共享槽位；取消或超时不关闭代理控制通道。配置历史默认开启，独立加密保存单份配置及必要凭据；恢复前预览差异，当前运行配置需确认重连，恢复后暂停订阅和远程规则自动更新。网络事件按会话与原因记录，独立发布、有界写入并提供脱敏导出。
+
+运行 `bash scripts/diagnostics-history-events-checks.sh`、`bash scripts/diagnostic-ui-checks.sh`、`bash scripts/diagnostic-feature-coverage.sh` 和 `python3 scripts/diagnostic-feature-mutations.py` 获取隔离证据。历史格式、事务崩溃对账、故障修复方式及质量门禁限制见[候选验收记录](docs/verification-diagnostics-history-events.md)。候选构建不代表已安装版本或真实企业网络已验收。

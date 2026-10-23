@@ -72,46 +72,39 @@ private struct SettingsContent:View,Equatable {
                 }
             }
             OptimizationSettings(model:model)
-            Section("界面外观") {
+            Section {
                 AppearanceSetting()
-                Text("立即生效，并记住你的选择。跟随系统会随 macOS 外观自动切换。")
-                    .font(.caption).foregroundStyle(.secondary)
+            } header: {
+                HStack(spacing:4) {Text("界面外观");HelpTip(text:"立即生效，并记住你的选择。跟随系统会随 macOS 外观自动切换。")}
             }
 
             Section {
-                Picker("接管方式", selection: $draft.network.capture) {
+                Picker(selection: $draft.network.capture) {
                     Text("系统代理（默认）").tag(CaptureMode.systemProxy)
                     Text("TUN 虚拟网卡（管理员辅助服务）").tag(CaptureMode.tun)
                     Text("完整接管（TUN＋系统代理，需管理员权限）").tag(CaptureMode.compatible)
-                }
+                } label: {settingLabel("接管方式",help:"系统代理覆盖遵循系统代理设置的应用；TUN 和完整接管需要管理员辅助服务，并需独立进行网络恢复及实网验收。")}
                 .disabled(model.locked)
 
-                Picker("目的地址协议",selection:$draft.network.family) {
+                Picker(selection:$draft.network.family) {
                     ForEach(AddressFamilyPolicy.allCases,id:\.self){policy in Text(policy.label).tag(policy)}
-                }.disabled(model.locked)
-                if model.state.addressFamilyPolicy == nil {Text("旧配置已使用仅 IPv4，避免节点 IPv6 不可达；可在此调整。").font(.caption).foregroundStyle(.secondary)}
-                Toggle("HTTP 兼容模式（User-Agent / URL 重写）",isOn:$draft.network.http).disabled(model.locked || model.state.shadowrocket == nil)
-                if model.state.shadowrocket != nil && !model.state.httpCompatibilityEnabled {Text("当前由核心直接代理；User-Agent 和 URL 重写已保留但未启用。兼容模式仅处理明文 HTTP，不能读取 HTTPS/SOCKS 的加密内容。").font(.caption).foregroundStyle(.orange)}
-                Text("TUN 与兼容接管仍需独立验收；开启 HTTP 兼容模式后才使用兼容入口。").font(.caption).foregroundStyle(.secondary)
-                Picker("DNS 解析策略", selection: $draft.network.dns) {
+                } label: {settingLabel("目的地址协议",help:model.state.addressFamilyPolicy == nil ? "旧配置已使用仅 IPv4，避免节点 IPv6 不可达；可在此调整。":"选择核心处理目的地址时使用的 IP 协议。节点 IPv6 不可达时可改为仅 IPv4。")}
+                .disabled(model.locked)
+                Toggle(isOn:$draft.network.http) {
+                    settingLabel("HTTP 兼容模式（User-Agent / URL 重写）",help:(model.state.shadowrocket != nil && !model.state.httpCompatibilityEnabled ? "当前由核心直接代理；User-Agent 和 URL 重写已保留但未启用。":"")+"兼容模式仅处理明文 HTTP，不能读取 HTTPS/SOCKS 的加密内容。开启 HTTP 兼容模式后才使用兼容入口；TUN 与兼容接管仍需独立验收。")
+                }.disabled(model.locked || model.state.shadowrocket == nil)
+                Picker(selection: $draft.network.dns) {
                     Text("经代理的 HTTPS DNS").tag(DNSPreference.httpsProxy)
                     Text("原系统原生解析").tag(DNSPreference.system)
-                }
+                } label: {settingLabel("DNS 解析策略",help:"可选择经代理的 HTTPS DNS 或原系统解析；企业域名继续沿用现有网络保护和作用域解析逻辑。")}
                 .disabled(model.locked)
 
                 HStack {
-                    Text("网络绕过：已启用 \(model.state.enabledBypasses.count) / \(model.state.effectiveBypasses.count) 项")
+                    settingLabel("网络绕过：已启用 \(model.state.enabledBypasses.count) / \(model.state.effectiveBypasses.count) 项",help:"域名、IP 和网段统一在分流规则页维护，支持批量导入及指定网络出口。系统代理模式下，保护域名绕过轻舟，交给系统网络及企业 VPN；所有运行模式均优先保护。核心 DIRECT 仍经过本地核心，与系统代理绕过不同。显式指定 HTTP/SOCKS 代理的命令不一定遵循此清单；TUN 仍使用原有内网保护逻辑。")
                     Spacer()
                     Button("管理网络绕过…") {showingBypasses=true}.disabled(model.locked)
                 }
-                Text("域名、IP 和网段统一在分流规则页维护，支持批量导入及指定网络出口。")
-                    .font(.caption).foregroundStyle(.secondary)
-                Text("上述接管、DNS、地址族和 HTTP 兼容只编辑草稿，点击应用才生效。")
-                    .font(.caption).foregroundStyle(.secondary)
                 if draft.network.capture == .compatible {
-                    Text("规则模式：本机 → 企业 VPN → 显式规则 → 国内域名/IP 直连 → 未知公网代理。保存时默认未命中策略改为当前代理选择。固定国内规则："+DomesticRouting.version).font(.caption)
-                    Text("完整接管尚需管理员恢复和实网验收，不会自动启用。节点、原用户规则顺序不变。")
-                        .font(.caption).foregroundStyle(.orange)
                     DisclosureGroup("国内目标被显式规则覆盖（需人工确认）",isExpanded:$showingDomesticConflicts) {
                         if showingDomesticConflicts {ForEach(DomesticRouting.conflictingRules(model.state)) {rule in Text(rule.value+" → "+model.state.label(rule.target ?? .selected)).font(.caption)}}
                     }
@@ -123,11 +116,9 @@ private struct SettingsContent:View,Equatable {
                         if await model.applyCaptureSettings(mode:draft.network.capture,dns:draft.network.dns,family:draft.network.family,httpCompatibility:draft.network.http) {draft.acceptNetwork(model.state)}
                     }
                 }.disabled(model.locked)
-                Text("系统代理模式下，保护域名绕过轻舟，交给系统网络及企业 VPN；所有运行模式均优先保护。核心 DIRECT 仍经过本地核心，与系统代理绕过不同。显式指定 HTTP/SOCKS 代理的命令不一定遵循此清单；TUN 仍使用原有内网保护逻辑。")
-                    .font(.caption).foregroundStyle(.secondary)
                 if !model.protectionSummary.isEmpty {DisclosureGroup("生效的内网绕过项") {ForEach(model.protectionSummary,id:\.self){Text($0).font(.caption)}}}
                 HStack {
-                    Text("辅助服务状态：")
+                    settingLabel("辅助服务状态：",help:"TUN 模式需要通过辅助服务获取路由权限。重新构建应用后，需要再次授权更新辅助服务以登记客户端代码身份。")
                     Text(model.helperStatus)
                         .foregroundStyle(model.helperStatus.contains("通过") ? Theme.connectedGreen : Theme.amberAccent)
                     Spacer()
@@ -141,9 +132,10 @@ private struct SettingsContent:View,Equatable {
                     Button("复制卸载命令") { copyHelperCommand("uninstall-helper.sh") }
                 }
             } header: {
-                Label("网络接管与管理员辅助服务", systemImage: "shield.lefthalf.filled")
-            } footer: {
-                Text("TUN 模式需要通过辅助服务获取路由权限。重新构建应用后需要在终端再次批准更新。")
+                HStack(spacing:4) {
+                    Label("网络接管与管理员辅助服务",systemImage:"shield.lefthalf.filled")
+                    HelpTip(text:"接管、DNS、地址族和 HTTP 兼容只编辑草稿，点击应用才生效。"+(draft.network.capture == .compatible ? "规则模式：本机 → 企业 VPN → 显式规则 → 国内域名/IP 直连 → 未知公网代理。保存时默认未命中策略改为当前代理选择。固定国内规则："+DomesticRouting.version+"。完整接管不会自动启用，仍需管理员恢复和实网验收；节点、原用户规则顺序不变。":""))
+                }
             }
 
             Section {
@@ -194,9 +186,7 @@ private struct SettingsContent:View,Equatable {
                 Button("恢复原始系统网络与代理设置") { Task { await model.recover() } }
                     .disabled(model.loadingFailed || model.recovering)
             } header: {
-                Label("应急恢复", systemImage: "arrow.counterclockwise")
-            } footer: {
-                Text("关闭窗口后菜单栏仍常驻运行。正常退出时将自动清理系统代理。")
+                HStack(spacing:4) {Label("应急恢复",systemImage:"arrow.counterclockwise");HelpTip(text:"关闭窗口后菜单栏仍常驻运行。正常退出时将自动清理系统代理。")}
             }
         }
         .sheet(isPresented:$showingBypasses) {
@@ -207,6 +197,10 @@ private struct SettingsContent:View,Equatable {
         .formStyle(.grouped)
         .onAppear {draft.sync(model.state)}
         .onChange(of:revision) {_,_ in draft.sync(model.state)}
+    }
+
+    private func settingLabel(_ title:String,help:String) -> some View {
+        HStack(spacing:4) {Text(title);HelpTip(text:help)}
     }
 
     private func copyHelperCommand(_ script: String) {

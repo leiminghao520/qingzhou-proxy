@@ -133,6 +133,11 @@ struct ProxyJournal: Codable { var records: [ProxyRecord] }
             if let service=SCNetworkServiceCopy(preferences,record.serviceID as CFString),let proto=SCNetworkServiceCopyProtocol(service,kSCNetworkProtocolTypeProxies),SCNetworkProtocolGetEnabled(proto),let current=SCNetworkProtocolGetConfiguration(proto) as? [String:Any],ProxyRecovery.pointsToOwnedEndpoint(current:current,applied:applied) {throw ProxyError("网络服务仍指向轻舟入口，尚不能退出")}
         }
     }
+    // 唤醒复查只读核对代理和原 DNS 保护，不能因状态文字而认领当前入口。
+    public func verifyWakeOwnership() async throws {
+        try await verifyApplied()
+        guard let changes=ownershipChanges(),changes.isEmpty else {throw WakeRecoveryError(.ownershipConflict)}
+    }
     public func verifyApplied() async throws {
         for _ in 0..<30 {
             guard hasRecovery,let changes=ownershipChanges(),changes.isEmpty else {throw ProxyError("系统代理提交后的持久配置核对失败")}

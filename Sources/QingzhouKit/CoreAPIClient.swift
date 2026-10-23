@@ -3,11 +3,13 @@ import CFNetwork
 
 public struct CoreAPIError:LocalizedError,Sendable {
     public let category:String
+    public let transportCode:Int?
+    public var retryableDuringStartup:Bool {transportCode.map{[URLError.cannotConnectToHost.rawValue,URLError.networkConnectionLost.rawValue,URLError.timedOut.rawValue].contains($0)} ?? false}
     public var errorDescription:String? {"核心检测失败："+category}
-    public init(_ category:String){self.category=category}
+    public init(_ category:String,transportCode:Int?=nil){self.category=category;self.transportCode=transportCode}
 }
-public struct ProxyInfo:Decodable,Sendable {
-    public struct History:Decodable,Sendable {public var delay:Int}
+public struct ProxyInfo:Decodable,Sendable,Equatable {
+    public struct History:Decodable,Sendable,Equatable {public var delay:Int}
     public var type:String;public var name:String;public var now:String?;public var all:[String]?;public var history:[History]?
 }
 public struct TransferRate:Decodable,Sendable {public var up:Int64;public var down:Int64}
@@ -42,10 +44,16 @@ public actor CoreAPIClient {
             guard (200...299).contains(http.statusCode) else {throw CoreAPIError(http.statusCode==401 || http.statusCode==403 ? "鉴权":http.statusCode==408 || http.statusCode==504 ? "超时":request.url?.path.hasSuffix("/delay")==true && http.statusCode>=500 ? "节点通道":"控制接口")}
             guard response.expectedContentLength<=2*1024*1024 else {throw ProxyError("核心响应过大")}
             var data=Data();for try await byte in bytes {guard data.count<2*1024*1024 else {throw ProxyError("核心响应超过限制")};data.append(byte)};return data
-        } catch is CancellationError {throw CancellationError()} catch let error as CoreAPIError {throw error} catch let error as URLError {throw CoreAPIError(ConnectivityResult.category(error))} catch {throw CoreAPIError("控制接口")}
+        } catch is CancellationError {throw CancellationError()} catch let error as CoreAPIError {throw error} catch let error as URLError {throw CoreAPIError(ConnectivityResult.category(error),transportCode:error.code.rawValue)} catch {throw CoreAPIError("控制接口")}
     }
-    private func decode<T:Decodable>(_ type:T.Type,path:String) async throws -> T {let data=try await send(request(path));do {return try JSONDecoder().decode(type,from:data)} catch {throw CoreAPIError("控制接口响应格式")}}
-    public func proxies() async throws -> [String:ProxyInfo] {struct Response:Decodable{var proxies:[String:ProxyInfo]};return try await decode(Response.self,path:"/proxies").proxies}
+    private func decode<T:Decodable>(_ type:T.Type,path:String,timeout:TimeInterval?=nil) async throws -> T {var query=try request(path);if let timeout {query.timeoutInterval=timeout};let data=try await send(query);do {return try JSONDecoder().decode(type,from:data)} catch {throw CoreAPIError("控制接口响应格式")}}
+    private struct ProxyResponse:Decodable {var proxies:[String:ProxyInfo]}
+    public func proxies() async throws -> [String:ProxyInfo] {try await decode(ProxyResponse.self,path:"/proxies").proxies}
+    public func waitUntilReady(timeout:TimeInterval=5) async throws {
+        try await CoreAPIReadiness.wait(timeout:timeout) {budget in
+            _ = try await self.decode(ProxyResponse.self,path:"/proxies",timeout:budget)
+        }
+    }
     public func connections() async throws -> ConnectionSnapshot {try await decode(ConnectionSnapshot.self,path:"/connections")}
     public func select(_ target:PolicyReference,group:String="proxy") async throws {
         guard group=="proxy" || group.hasPrefix("group-"),target != .selected,target != .reject else {throw ProxyError("策略选择无效")}

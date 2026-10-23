@@ -22,7 +22,7 @@ extension AppModel {
             if sub==nil,let source=preview.source {sub=state.subscriptions.first{(try? credentials.get($0.sourceRef))==source} ?? Subscription(name:"订阅 \(state.subscriptions.count+1)")}
             let effectiveScope:ImportScope=preview.fullConfiguration != nil ? .profile:scope
             let tx=try store.prepareImport(preview.candidates,subscription:sub,source:preview.source,profile:preview,scope:effectiveScope)
-            try await apply(tx);self.preview=nil;pendingSubscription=nil;log("导入已完成")
+            try await apply(tx,source:"订阅更新");self.preview=nil;pendingSubscription=nil;log("导入已完成")
         } catch {report(error)}
     }
     func cancelPreview(){preview=nil;previewDiff=nil;pendingSubscription=nil}
@@ -45,12 +45,13 @@ extension AppModel {
             if insecure || UpdateDiff.compare(old:state,preview:result,subscriptionID:id,credentials:credentials).requiresReview || (sub.scope == .profile && !result.unsupported.isEmpty) || (sub.scope == .nodes && !result.unsupported.filter{!$0.hasPrefix("完整导入") && !$0.hasPrefix("规则") && !$0.hasPrefix("策略")}.isEmpty) {
                 var next=state;if let i=next.subscriptions.firstIndex(where:{$0.id==id}){next.subscriptions[i].pendingReview=true;next.subscriptions[i].lastError="更新需要人工预览确认"};try persist(next);log("订阅更新需要人工确认，保留旧节点");return
             }
-            let tx=try store.prepareImport(result.candidates,subscription:sub,source:result.source,profile:result,scope:result.fullConfiguration != nil ? .profile:sub.scope);try await apply(tx);log("订阅自动更新成功")
+            let tx=try store.prepareImport(result.candidates,subscription:sub,source:result.source,profile:result,scope:result.fullConfiguration != nil ? .profile:sub.scope);try await apply(tx,source:"订阅更新");log("订阅自动更新成功")
         }catch{recordSubscriptionFailure(id,error:error);log("订阅自动更新失败，保留旧节点")}
     }
     func maintenance() async {
         latencyClock=Date()
         guard !locked else{return}
+        maintainHistory()
         let subs=state.subscriptions.filter{UpdateSchedule.due(updatedAt:$0.updatedAt,enabled:$0.autoUpdate,pending:$0.pendingReview,retryCount:$0.retryCount,retryAfter:$0.retryAfter)}.map(\.id)
         for id in subs {if Task.isCancelled{return};await automaticRefresh(id)}
         let sources=state.remoteRules.filter{UpdateSchedule.due(updatedAt:$0.updatedAt,enabled:$0.autoUpdate,retryCount:$0.retryCount,retryAfter:$0.retryAfter)}.map(\.id)

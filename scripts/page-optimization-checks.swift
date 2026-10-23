@@ -36,6 +36,46 @@ final class ClosingProtocol:URLProtocol {
         }
         return try JSONDecoder().decode([CoreConnection].self,from:JSONSerialization.data(withJSONObject:rows))
     }
+    @MainActor static func telemetryChecks(_ model:AppModel) throws {
+        let rows=try connections(2)
+        let snapshot=ConnectionSnapshotFixture.make(rows:rows,up:7,down:11)
+        let proxies=try JSONDecoder().decode([String:ProxyInfo].self,from:Data(#"{"proxy":{"type":"Selector","name":"proxy","now":"node-a"},"node-a":{"type":"VLESS","name":"node-a","history":[{"delay":20}]}}"#.utf8))
+        var status=TunReply(ok:true,message:"隔离正常",running:true,phase:"active")
+        status.protectionSummary=["隔离保护"]
+        try check(model.publishTelemetry(snapshot,info:proxies),"首个出口发布仍报告变化")
+        model.updateHelperNetworkStatus(status)
+        var publications=0
+        let subscription=model.objectWillChange.sink {publications+=1}
+        for _ in 0..<20 {
+            try check(!model.publishTelemetry(snapshot,info:proxies),"相同遥测不报告出口变化")
+            model.updateHelperNetworkStatus(status)
+        }
+        try check(publications==0,"相同连接、策略和保护摘要连续二十轮不发布更新")
+        _=model.publishTelemetry(ConnectionSnapshotFixture.make(rows:rows,up:9,down:13),info:proxies)
+        try check(publications==2 && model.uploadTotal==9 && model.downloadTotal==13,"连接不变时累计计数仍独立更新")
+        var historyChanged=proxies;historyChanged["node-a"]!.history![0].delay=35
+        publications=0
+        try check(!model.publishTelemetry(snapshot,info:historyChanged) && publications==3,"延迟历史变化仍发布策略信息，不误报出口切换")
+        var targetChanged=historyChanged;targetChanged["proxy"]!.now="node-b"
+        try check(model.publishTelemetry(snapshot,info:targetChanged),"实际出口切换仍触发连通性复查信号")
+        var updatedRows=rows;updatedRows[0].upload+=5
+        _=model.publishTelemetry(ConnectionSnapshotFixture.make(rows:updatedRows,up:12,down:13),info:targetChanged)
+        try check(model.connections[0].upload==updatedRows[0].upload && model.trafficByNode["node-0"]==7,"连接计数变化仍更新列表及节点流量增量")
+        _=model.publishTelemetry(ConnectionSnapshotFixture.make(rows:[],up:12,down:13),info:targetChanged)
+        try check(model.connections.isEmpty && model.observedConnections.isEmpty,"连接消失仍清除列表及累计基线")
+        _=model.publishTelemetry(snapshot,info:targetChanged)
+        status.protectionSummary=["保护发生变化"];publications=0
+        model.updateHelperNetworkStatus(status)
+        try check(publications==1,"保护变化立即发布")
+        status.phase="networkReconnecting"
+        model.updateHelperNetworkStatus(status);publications=0
+        model.updateHelperNetworkStatus(status)
+        try check(publications==0 && model.networkReconnecting && model.connections.isEmpty,"重连期间重复状态不重绘，首次仍清理旧连接")
+        subscription.cancel()
+        // 仅重置隔离模型，不访问辅助服务或真实核心。
+        model.networkReconnecting=false;model.proxyInfo=[:];model.connections=[];model.observedConnections=[:]
+        model.trafficByNode=[:];model.trafficByTarget=[:]
+    }
     @MainActor static func run() async throws {
         let output=URL(fileURLWithPath:CommandLine.arguments[CommandLine.arguments.firstIndex(of:"--output")!+1])
         try FileManager.default.createDirectory(at:output,withIntermediateDirectories:true)
@@ -206,6 +246,7 @@ final class ClosingProtocol:URLProtocol {
         RunLoop.main.add(discardTimer,forMode:.modalPanel)
         try check(defaultConfirmation.confirm("隔离丢弃确认检查"),"默认确认框明确丢弃才继续")
         let model=AppModel();try check(!model.loadingFailed,"隔离应用模型初始化")
+        try telemetryChecks(model)
         await model.createProfile(name:"隔离第二配置",copy:false)
         let secondProfile=model.profiles.last!.id
         let profile=model.currentProfileID
@@ -277,5 +318,14 @@ final class ClosingProtocol:URLProtocol {
         var closePrompts=0;model.drafts.confirmDiscard={_ in closePrompts+=1;return false}
         window.close()
         try check(closePrompts==0 && model.drafts.hasDirty(all:true),"关闭主窗口保留草稿且不触发退出")
+    }
+}
+
+private enum ConnectionSnapshotFixture {
+    static func make(rows:[CoreConnection],up:Int64,down:Int64) -> ConnectionSnapshot {
+        let data=try! JSONSerialization.data(withJSONObject:["uploadTotal":up,"downloadTotal":down,"connections":rows.map {row in
+            ["id":row.id,"metadata":["host":row.metadata.host ?? ""],"upload":row.upload,"download":row.download,"start":row.start,"chains":row.chains] as [String:Any]
+        }])
+        return try! JSONDecoder().decode(ConnectionSnapshot.self,from:data)
     }
 }

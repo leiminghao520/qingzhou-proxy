@@ -3,6 +3,14 @@ import QingzhouKit
 
 // 应用入口统一装配依赖；测试可以替换下载、时钟和存储而不触碰日常数据。
 struct AppDependencies {
+    var makeCredentials:(Bool)->any CredentialStore = {$0 ? MemoryCredentials():KeychainStore()}
+    var diagnosticExecutor=DiagnosticExecutor()
+    var diagnosticDNS:(String) async -> DiagnosticResult = {await DiagnosticService.dns($0)}
+    var diagnosticHelper:() async throws -> TunReply = {
+        let client=PrivilegedServiceClient()
+        defer {Task {await client.closeChannel()}}
+        return try await client.request(TunRequest(operation:"status",verifyNetwork:true))
+    }
     var downloader: any DownloadClient = ExternalDownloadClient.shared
     var trafficStream:(CoreAPIClient) async throws -> AsyncThrowingStream<TransferRate,Error> = {try await $0.traffic()}
     var now: () -> Date = Date.init

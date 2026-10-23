@@ -4,8 +4,8 @@ import QingzhouKit
 extension Service {
     // 路由查询可能命中同目标的接口缓存项；完整表中按作用域核对真实静态路由。
     func verifiedRoute(_ expected:ProtectedRoute,info:String) throws -> Bool {
-        let actual=try sampledRoutes().ownershipRoutes
-        let state=CaptureOwnership.recoveryState(expected:expected,actual:actual)
+        let sample=try sampledRoutes()
+        let state=measured("routeVerification") {sample.identityIndex.state(expected)}
         if state == .owned {return true}
         if state == .absent {return CaptureOwnership.matchesQuery(expected,info:info)}
         return false
@@ -22,7 +22,7 @@ extension Service {
         let expected=ProtectedRoute(destination:destination,gateway:gateway,interface:interface,scope:scope)
         let beforeSample=try sampledRoutes()
         let before=beforeSample.ownershipRoutes
-        let previous=CaptureOwnership.recoveryState(expected:expected,actual:before)
+        let previous=measured("routeVerification") {beforeSample.identityIndex.state(expected)}
         // 查询可能命中缓存，写入前仍须防止认领完整表中已存在的外部路由。
         if previous == .owned {return}
         if previous == .replaced || previous == .ambiguous {throw ProxyError("路由前缀已有其他出口，未写入或认领："+destination)}

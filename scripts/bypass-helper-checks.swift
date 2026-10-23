@@ -19,6 +19,7 @@ final class Service {
     var routeTransaction=UUID()
     func configureRouteCancellation(_ fd:Int32) {}
     func checkRouteOwner() throws {}
+    func measured<T>(_ name:String,_ body:() throws -> T) rethrows -> T {try body()}
     func sampledRoutes() throws -> NetworkRouteSample {try routeSample()}
     let root:URL
     let queue=DispatchQueue(label:"qingzhou.bypass.fixture")

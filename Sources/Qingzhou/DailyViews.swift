@@ -11,6 +11,8 @@ struct ProfilesView: View {
     @State private var office = ""
     @State private var copy = false
     @State private var backup = false
+    @State private var historyProfile: UUID?
+    @State private var showingHistory = false
     @State private var renaming: ClientProfile?
     @State private var rename = ""
     
@@ -25,7 +27,9 @@ struct ProfilesView: View {
                 backup = true
             }
             
-            // Profiles List Cards
+            // 单份配置的历史入口
+            Button("查看全部历史（含已删除配置）") { historyProfile=nil;showingHistory=true }
+            // 配置列表
             ScrollView {
                 LazyVStack(spacing: 12) {
                     ForEach(model.profiles) { profile in
@@ -70,6 +74,7 @@ struct ProfilesView: View {
                                     .controlSize(.small)
                                 }
                                 
+                                Button("查看历史") {historyProfile=profile.id;showingHistory=true}
                                 Button("重命名") {
                                     rename = profile.name
                                     renaming = profile
@@ -98,6 +103,7 @@ struct ProfilesView: View {
                 }
             }
             .frame(minHeight: 180)
+            .sheet(isPresented:$showingHistory) {ProfileHistoryView(model:model,profileID:historyProfile)}
             
             // Create Profile Card
             VStack(alignment: .leading, spacing: 14) {
@@ -332,8 +338,8 @@ struct BackupView: View {
     }
 }
 
-// MARK: - Diagnostics View
-struct DiagnosticsView: View {
+// 综合诊断界面
+struct ComprehensiveDiagnosticsView: View {
     @ObservedObject var model: AppModel
     
     var body: some View {
@@ -352,6 +358,8 @@ struct DiagnosticsView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(model.locked || model.diagnosing)
                 
+                Button("停止诊断") {model.cancelDiagnostic()}.disabled(!model.diagnosing)
+                Button("导出 JSON") {exportDiagnostic(json:true)}.disabled(model.diagnosticSession==nil)
                 Button("恢复原网络设置") {
                     Task { await model.recover() }
                 }
@@ -361,16 +369,7 @@ struct DiagnosticsView: View {
                 Spacer()
                 
                 Button {
-                    let panel = NSSavePanel()
-                    panel.nameFieldStringValue = "轻舟诊断报告.txt"
-                    panel.begin { response in
-                        if response == .OK, let url = panel.url {
-                            try? SecureFile.write(
-                                Data(model.diagnosticRows.map { Redactor.redact("\($0.stage) · \($0.status)：\($0.detail)") }.joined(separator: "\n").utf8),
-                                to: url
-                            )
-                        }
-                    }
+                    exportDiagnostic(json:false)
                 } label: {
                     Label("导出脱敏报告", systemImage: "square.and.arrow.up")
                 }
@@ -412,6 +411,7 @@ struct DiagnosticsView: View {
                                             .background(statusColor(row.status).opacity(0.12))
                                             .clipShape(Capsule())
                                     }
+                                    Text(row.checkedAt.formatted()+" · "+(row.milliseconds.map{String($0)+" ms"} ?? "耗时未取得")).font(.caption2).foregroundStyle(.secondary)
                                     Text(row.detail)
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
@@ -432,6 +432,10 @@ struct DiagnosticsView: View {
         }
     }
     
+    private func exportDiagnostic(json:Bool) {
+        guard let session=model.diagnosticSession else{return}
+        saveDiagnosticData(try? session.export(json:json),name:"轻舟诊断报告."+(json ? "json":"txt"))
+    }
     private func statusColor(_ status: String) -> Color {
         switch status {
         case "通过": return Theme.connectedGreen

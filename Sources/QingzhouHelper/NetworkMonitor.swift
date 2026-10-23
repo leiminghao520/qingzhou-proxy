@@ -54,6 +54,7 @@ extension Service {
     }
     func startNetworkMonitor() {
         networkTimer?.cancel()
+        routeEvents?.cancel()
         networkChecks?.cancel()
         let checks=NetworkCheckScheduler(enqueue: { [weak self] operation in self?.queue.async(execute: operation) }, operation: { [weak self] in self?.checkNetworkChange() })
         networkChecks=checks
@@ -64,9 +65,14 @@ extension Service {
         if let networkStore {SCDynamicStoreSetNotificationKeys(networkStore,nil,["State:/Network/Global/.*","State:/Network/Service/.*/(DNS|IPv4|IPv6)","State:/Network/Interface/.*/.*"] as CFArray);SCDynamicStoreSetDispatchQueue(networkStore,queue)}
         let descriptor=socket(PF_ROUTE,SOCK_RAW,0)
         if descriptor>=0 {
-            _=fcntl(descriptor,F_SETFL,O_NONBLOCK)
             let source=DispatchSource.makeReadSource(fileDescriptor:descriptor,queue:queue);routeEvents=source
-            source.setEventHandler{[weak checks] in var buffer=[UInt8](repeating:0,count:8192);while recv(descriptor,&buffer,buffer.count,0)>0 {};checks?.request()}
+            source.setEventHandler { [weak self, weak checks] in
+                guard let self, let checks else { return }
+                let listening=RouteEventPump.drain(read:{RouteEventPump.receive(descriptor)},
+                    cancelled:{self.networkChecks !== checks},
+                    observe:{self.networkMonitorObservation?($0)},request:{checks.request()})
+                if !listening {self.routeEvents?.cancel()}
+            }
             source.setCancelHandler{close(descriptor)};source.resume()
         }
         let timer=DispatchSource.makeTimerSource(queue:queue);networkTimer=timer
@@ -74,6 +80,7 @@ extension Service {
         timer.setEventHandler{[weak checks] in checks?.request()};timer.resume()
     }
     func checkNetworkChange() {
+        networkMonitorObservation?(.checkExecuted)
         guard ["active","networkRetry"].contains(phase),let previous=capturePlan,let request=activeRequest,let fd=owner else{return}
         // 每轮重新采样；所有权和重规划共享本轮路由，退避期间也核对外部改写。
         let sample: NetworkRouteSample

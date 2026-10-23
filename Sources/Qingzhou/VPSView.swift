@@ -178,19 +178,22 @@ struct VPSView: View {
         SimpleCard {
             HStack {
                 Text("联合诊断").font(.headline);Spacer()
-                Button("开始诊断"){Task{await model.diagnose();await center.refresh();diagnosticDate=Date()}}.disabled(model.diagnosing || center.busy)
+                Button("停止诊断"){model.cancelDiagnostic()}.disabled(!model.diagnosing)
+                Button("开始诊断"){Task{await model.diagnose();guard let session=model.diagnosticSession,!session.results.contains(where:{$0.code=="cancelled" || $0.code=="timeout"}) else{return};await center.refresh();guard model.diagnosticSession?.id==session.id else{return};diagnosticDate=Date()}}.disabled(model.diagnosing || center.busy)
             }
             if let diagnosticDate {
                 Text("检查时间："+diagnosticDate.formatted()).font(.caption)
                 ForEach(model.diagnosticRows){row in Text(row.stage+" · "+row.status+" · "+row.detail).font(.callout)}
                 ForEach(jointRows){row in Text(row.stage+" · "+row.status+" · "+row.detail).font(.callout)}
+                Button("导出 JSON") {if var session=model.diagnosticSession {session.results += jointRows;saveDiagnosticData(try? session.export(json:true),name:"轻舟联合诊断.json")}}
                 Text("服务端："+(center.status["state"].string=="fresh" ? "使用上述最新状态":"未知，管理通道不可达不能据此判定代理故障"))
                 Button("导出脱敏诊断") {
                     let panel=NSSavePanel();panel.nameFieldStringValue="轻舟联合诊断.txt"
                     if panel.runModal() == .OK,let url=panel.url {
-                        let privateNames=model.state.protectedDomains+model.state.nodes.map(\.server)
-                        let rows=(model.diagnosticRows+jointRows).map{Redactor.redact($0.stage+" · "+$0.status+" · "+$0.detail,secrets:privateNames)}.joined(separator:"\n")
-                        try? SecureFile.write(Data((diagnosticDate.formatted()+"\n"+rows+"\n服务端状态："+Redactor.redact(center.status.pretty,secrets:privateNames)).utf8),to:url)
+                        if var session=model.diagnosticSession {
+                            session.results += jointRows
+                            try? SecureFile.write(session.export(json:false),to:url)
+                        }
                     }
                 }
             }else{Text("诊断不会自动连接、修复或重启核心。")}
