@@ -5,15 +5,17 @@ extension AppModel {
     func bypassRevision() throws -> Data {
         let encoder=JSONEncoder();encoder.outputFormatting=[.sortedKeys]
         var result=try encoder.encode(state.effectiveBypasses)
+        result.append(try encoder.encode(state.trustedCorporateDNS ?? []))
         result.append(try encoder.encode(state.rules));result.append(Data((currentProfileID?.uuidString ?? "").utf8))
         return result
     }
-    func applyBypassDraft(_ items:[NetworkBypass],converted:Set<UUID>,revision:Data) async -> Bool {
+    func applyBypassDraft(_ items:[NetworkBypass],converted:Set<UUID>,revision:Data,corporateDNS:[TrustedCorporateDNS]?=nil) async -> Bool {
         guard !locked,let store else{return false}
         busy=true;defer{busy=false}
         do {
             guard try bypassRevision()==revision else {throw ProxyError("绕过配置、普通规则或当前配置已变化，请重新载入草稿")}
             var next=state;try next.setBypasses(items)
+            if let corporateDNS {next.trustedCorporateDNS=try TrustedCorporateDNS.normalize(corporateDNS)}
             for id in converted {
                 guard let rule=next.rules.first(where:{$0.id==id}) else {throw ProxyError("待转换规则已变化")}
                 let item=try NetworkBypassPolicy.convert(rule)

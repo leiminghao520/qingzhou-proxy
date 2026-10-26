@@ -28,6 +28,7 @@ public struct DNSResolverScope:Codable,Equatable,Sendable {
     public var protectedDomains:[String] {Array(Set((domains+searchDomains).map{$0.lowercased().trimmingCharacters(in:CharacterSet(charactersIn:"."))})).filter{!$0.isEmpty}.sorted()}
 }
 public struct NetworkSnapshot:Codable,Equatable,Sendable {
+    public var primaryService:String?
     public var primaryInterface:String
     public var routes:[ProtectedRoute]
     public var resolvers:[DNSResolverScope]
@@ -36,9 +37,10 @@ public struct NetworkSnapshot:Codable,Equatable,Sendable {
     public init(primaryInterface:String,routes:[ProtectedRoute],resolvers:[DNSResolverScope],proxies:Data=Data()) {
         self.primaryInterface=primaryInterface;self.routes=routes;self.resolvers=resolvers;self.proxies=proxies
     }
-    private enum CodingKeys:String,CodingKey {case primaryInterface,routes,resolvers,proxies,unavailableDomains}
+    private enum CodingKeys:String,CodingKey {case primaryService,primaryInterface,routes,resolvers,proxies,unavailableDomains}
     public init(from decoder:Decoder) throws {
         let values=try decoder.container(keyedBy:CodingKeys.self)
+        primaryService=try values.decodeIfPresent(String.self,forKey:.primaryService)
         primaryInterface=try values.decode(String.self,forKey:.primaryInterface)
         routes=try values.decode([ProtectedRoute].self,forKey:.routes)
         resolvers=try values.decode([DNSResolverScope].self,forKey:.resolvers)
@@ -100,6 +102,7 @@ public struct NetworkSnapshot:Codable,Equatable,Sendable {
         guard resolvers.contains(where:{$0.interface==primary}) else{throw NetworkEnvironmentNotReady("原系统 DNS 无法完整读取，未接管网络")}
         let proxies=SCDynamicStoreCopyProxies(nil) as? [String:Any] ?? [:]
         var snapshot=NetworkSnapshot(primaryInterface:primary,routes:(structuredRoutes ?? parseRoutes(routes())).filter{$0.interface != ownedTunnel},resolvers:resolvers.sorted{$0.order == $1.order ? $0.service<$1.service:$0.order<$1.order},proxies:try PropertyListSerialization.data(fromPropertyList:proxies,format:.binary,options:0))
+        snapshot.primaryService=(SCDynamicStoreCopyValue(store,"State:/Network/Global/IPv4" as CFString) as? [String:Any])?["PrimaryService"] as? String
         snapshot.unavailableDomains=Array(Set(unavailableDomains)).sorted()
         return snapshot
     }
@@ -112,7 +115,12 @@ public struct CapturePlan:Codable,Equatable,Sendable {
     public var exclusions:[String]
     public var exactDomains:[String]?
     public var userDomainSuffixes:[String]?
-    public var summary:[String] {protectedRoutes.map{$0.destination+" → "+$0.interface}+domains.map{$0+" → 原作用域 DNS"}}
+    public var trustedCorporateDNS:[TrustedCorporateDNS]?
+    public var pinnedDomainRoutes:[ProtectedRoute]?
+    public var summary:[String] {protectedRoutes.map{$0.destination+" → "+$0.interface}+domains.map{$0+" → 原作用域 DNS"}+(trustedCorporateDNS ?? []).map {entry in
+        let matched=entry.domains.allSatisfy{!trustedResolvers(for:$0).isEmpty}
+        return entry.name+"："+(matched ? "公司网络 DNS 已匹配":"公司网络 DNS 未匹配，服务或 DNS 变化后请重新确认")
+    }}
     public static func isVPN(_ interface:String)->Bool {interface.hasPrefix("utun") || interface.hasPrefix("ppp") || interface.hasPrefix("ipsec")}
     // 原始快照保留全部作用域；核心按目的地址分流，只能使用已确认的单一出口。
     public static func effectiveRoutes(_ routes:[ProtectedRoute],resolvers:[DNSResolverScope]) throws -> [ProtectedRoute] {
@@ -167,6 +175,9 @@ public struct CapturePlan:Codable,Equatable,Sendable {
     }
     public static func make(snapshot:NetworkSnapshot,state:AppState,pinned:[ProtectedRoute]=[]) throws -> CapturePlan {
         var plan=try make(snapshot:snapshot,extraCIDRs:state.bypassCIDRs,extraDomains:state.bypassDomains)
+        plan.trustedCorporateDNS=try TrustedCorporateDNS.normalize(state.trustedCorporateDNS ?? [])
+        plan.pinnedDomainRoutes=pinned
+        plan.domains=Array(Set(plan.domains+(plan.trustedCorporateDNS ?? []).flatMap(\.domains))).sorted()
         plan.exactDomains=state.bypassExactDomains;plan.userDomainSuffixes=state.enabledBypasses.filter{$0.kind == .suffix && $0.legacyProtection != true}.map(\.value)
         for item in state.enabledBypasses where item.kind == .cidr {
             if item.value.hasPrefix("ff") {continue}
@@ -193,18 +204,25 @@ public struct CapturePlan:Codable,Equatable,Sendable {
     }
     public func domainRoute(address:String,resolver:DNSResolverScope,host:String?=nil) throws -> ProtectedRoute {
         let loopback=["127.0.0.0/8","::1/128"].contains{RuleEvaluator.matches(RoutingRule(kind:.cidr,value:$0,action:.direct),host:address,ip:address)==true}
-        let candidates=snapshot.routes.filter{($0.interface==resolver.interface || (loopback && $0.interface=="lo0")) && RuleEvaluator.matches(RoutingRule(kind:.cidr,value:$0.destination,action:.direct),host:address,ip:address)==true}
-        let longest=candidates.compactMap{Int($0.destination.split(separator:"/").last ?? "0")}.max()
+        func matches(_ route:ProtectedRoute)->Bool {RuleEvaluator.matches(RoutingRule(kind:.cidr,value:route.destination,action:.direct),host:address,ip:address)==true}
+        // 指定出口优先；其余答案按原系统最长前缀选择，DNS 查询接口不决定业务出口。
+        let pinned=(pinnedDomainRoutes ?? []).filter(matches)
+        let global=snapshot.routes.filter{$0.scope==nil && matches($0)}
+        let scoped=snapshot.routes.filter{$0.scope==$0.interface && $0.interface==resolver.interface && matches($0)}
+        let candidates = !pinned.isEmpty ? pinned : !global.isEmpty ? global : scoped
+        guard let longest=candidates.compactMap({Int($0.destination.split(separator:"/").last ?? "0")}).max() else {throw CorporateDNSRouteError.unavailable}
         let best=candidates.filter{Int($0.destination.split(separator:"/").last ?? "0")==longest}
-        let preferred=best.contains(where:{$0.scope==nil}) ? best.filter{$0.scope==nil}:best
-        guard let original=preferred.first,preferred.allSatisfy({$0.gateway==original.gateway && $0.scope==original.scope}) else {throw ProxyError("保护域名解析地址的原路径无法确认，拒绝返回未保护地址")}
-        // 原物理网卡的局域网及回环同样需要保留，不能因为不是 VPN 而误拒绝本地设备。
+        guard let original=best.first else {throw CorporateDNSRouteError.unavailable}
+        guard best.allSatisfy({$0.interface==original.interface && $0.gateway==original.gateway && $0.scope==original.scope}) else {throw CorporateDNSRouteError.conflict}
+        if loopback && original.interface != "lo0" {throw CorporateDNSRouteError.notProtected}
         let local=Self.localCIDRs.contains{RuleEvaluator.matches(RoutingRule(kind:.cidr,value:$0,action:.direct),host:address,ip:address)==true}
-        let effective=protectedRoutes.first{RuleEvaluator.matches(RoutingRule(kind:.cidr,value:$0.destination,action:.direct),host:address,ip:address)==true}
+        let allowed=protectedRoutes.contains{matches($0) && $0.interface==original.interface && $0.gateway==original.gateway}
         let explicit=host.map {name in (exactDomains ?? []).contains(name) || (userDomainSuffixes ?? []).contains{name==$0 || name.hasSuffix("."+$0)}} ?? false
-        let userPhysical=original.interface==snapshot.primaryInterface && original.scope==nil && explicit
-        guard loopback || userPhysical || (effective.map{$0.interface==original.interface && $0.gateway==original.gateway} ?? (local && original.interface==snapshot.primaryInterface && original.scope==nil)) else {throw ProxyError("企业解析地址与已确认的核心出口不一致，拒绝返回未保护地址")}
-        guard userPhysical || Self.isVPN(original.interface) || local || (loopback && original.interface=="lo0") else {throw ProxyError("企业解析地址的原 VPN 路径无法确认，拒绝返回未保护地址")}
+        let trusted=host.map{!trustedResolvers(for:$0).isEmpty} ?? false
+        let physical=original.interface==snapshot.primaryInterface && original.scope==nil
+        let userPhysical=physical && explicit
+        guard loopback || !pinned.isEmpty || userPhysical || allowed || (physical && local && trusted) else {throw CorporateDNSRouteError.notProtected}
+        guard loopback || !pinned.isEmpty || userPhysical || Self.isVPN(original.interface) || (physical && local) else {throw CorporateDNSRouteError.notProtected}
         return ProtectedRoute(destination:address+(address.contains(":") ? "/128":"/32"),gateway:original.gateway,interface:original.interface,source:"企业域名动态保护")
     }
     public func originalInterface(for address:String)->String {
@@ -219,6 +237,12 @@ public struct CapturePlan:Codable,Equatable,Sendable {
             guard interfaces.count==1 else{throw ProxyError("节点原出口不唯一或没有可用地址，未接管网络")};result[host]=interfaces.first
         }
         return result
+    }
+    public func trustedResolvers(for domain:String)->[DNSResolverScope] {
+        let name=domain.lowercased().trimmingCharacters(in:CharacterSet(charactersIn:"."))
+        return snapshot.resolvers.filter {resolver in
+            snapshot.primaryService==resolver.service && (trustedCorporateDNS ?? []).contains{$0.matches(resolver,primary:snapshot.primaryInterface,domain:name)}
+        }
     }
     public func selectResolvers(for domain:String) throws -> [DNSResolverScope] {
         let name=domain.lowercased().trimmingCharacters(in:CharacterSet(charactersIn:"."))
@@ -243,6 +267,11 @@ public struct CapturePlan:Codable,Equatable,Sendable {
             return [first]
         }
         if protects(name) {
+            let trusted=trustedResolvers(for:name)
+            if let first=trusted.first {
+                guard trusted.allSatisfy({$0.interface==first.interface && $0.servers==first.servers}) else {throw CorporateDNSSelectionError.ambiguous}
+                return [first]
+            }
             // 无明确域名作用域时，只允许唯一企业出口；不能按优先级猜测其他 VPN。
             let corporate=snapshot.resolvers.filter{Self.isVPN($0.interface) && !$0.servers.isEmpty}
             guard let first=corporate.first else {throw CorporateDNSSelectionError.unavailable}

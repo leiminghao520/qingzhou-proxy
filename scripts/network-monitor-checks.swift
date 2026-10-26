@@ -20,6 +20,7 @@ final class Service {
     var captureNodeAddresses:[String:[String]]=[:]
     var captureNodeInterfaces:[String:String]=[:]
     var knownProtectedDomains:Set<String>=[]
+    var dynamicAnswerRoutes:[String:ProtectedRoute]=[:]
     var dnsForwarder:ScopedDNSForwarder?
     var domainRouteSummary:[String]=[]
     var journal: Journal?
@@ -425,6 +426,42 @@ final class Service {
         withdrawn.routeSample={try NetworkRouteSample(read:{table+"10.22/16 10.22.0.2 UGSc utun8\n"})}
         let replacedOK=try withdrawn.applyCorporatePlan(withdrawalPlan,sample:withdrawn.routeSample())
         check(replacedOK && withdrawn.routeWrites == 0,"企业保护项已被其他 VPN 替换时只放弃认领，不能删除新出口")
+
+        // 动态答案主机路由必须随计划撤回，物理接口也不能遗留；外部替换保持原样。
+        for status in ["owned","absent","replaced"] {
+            let answer=try fixture()
+            let route=ProtectedRoute(destination:"203.0.113.9/32",gateway:"192.168.1.1",interface:"en0")
+            answer.dynamicRules=try DynamicCaptureRules(directory:directory.appendingPathComponent("answer-"+status),plan:answer.capturePlan!)
+            answer.dynamicAnswerRoutes=[route.destination:route]
+            answer.journal!.routes.append(OwnedRoute(destination:route.destination,gateway:route.gateway,interface:route.interface))
+            var row=status=="absent" ? "":"203.0.113.9 "+(status=="owned" ? route.gateway:"192.168.1.2")+" UGHS en0\n"
+            answer.routeSample={try NetworkRouteSample(read:{table+row})}
+            answer.writeRouteHook={args in check(args.contains("delete") && args.contains("203.0.113.9"),"只撤回拥有的动态答案路由");row="";return "已删除"}
+            let done=try answer.applyCorporatePlan(withdrawalPlan,sample:answer.routeSample())
+            check(done && answer.routeWrites==(status=="owned" ? 1:0),"动态答案消失或被替换时不删除外部路由")
+            check(answer.dynamicAnswerRoutes.isEmpty && !answer.journal!.routes.contains{$0.destination==route.destination},"动态答案路由和恢复记录一并撤回")
+            if status=="replaced" {check(!row.isEmpty,"保留外部替换的动态目标路由")}
+        }
+        let office=try fixture()
+        var officeState=AppState();officeState.trustedCorporateDNS=[TrustedCorporateDNS(name:"隔离公司",serviceID:resolver.service,servers:resolver.servers,domains:["office.test"])]
+        var officePrimary=resolver.service
+        var officeDNS=resolver
+        office.networkSnapshotRead={sample in
+            var value=NetworkSnapshot(primaryInterface:"en0",routes:NetworkSnapshot.parseRoutes(sample.table),resolvers:[officeDNS])
+            value.primaryService=officePrimary
+            return value
+        }
+        office.activeRequest?.state=officeState
+        office.capturePlan=try CapturePlan.make(snapshot:office.currentSnapshot(),state:officeState)
+        office.dynamicRules=try DynamicCaptureRules(directory:directory.appendingPathComponent("office-switch"),plan:office.capturePlan!)
+        var officeTick=100.0;office.networkUptime={officeTick}
+        check(office.capturePlan!.resolvers(for:"app.office.test").first?.service==resolver.service,"公司 Wi-Fi 初始匹配")
+        officeDNS.servers=["192.168.99.1"];office.checkNetworkChange();officeTick += 1;office.checkNetworkChange()
+        check(office.capturePlan!.resolvers(for:"app.office.test").isEmpty && office.starts==0,"DNS 变化撤销信任，企业域名不退回未知 DNS")
+        officeDNS=resolver;officeTick += 1;office.checkNetworkChange();officeTick += 1;office.checkNetworkChange()
+        check(office.capturePlan!.resolvers(for:"app.office.test").first?.service==resolver.service && office.starts==0,"公司 DNS 恢复后重新匹配")
+        officePrimary="other-network-service";officeTick += 1;office.checkNetworkChange();officeTick += 1;office.checkNetworkChange()
+        check(office.capturePlan!.resolvers(for:"app.office.test").isEmpty && office.starts==0,"仅主服务身份变化也必须撤销公司 DNS 信任")
 
         var unstable=withdrawalPlan
         unstable.protectedRoutes.append(ProtectedRoute(destination:"10.44.0.0/16",gateway:"10.44.0.1",interface:"utun6"))

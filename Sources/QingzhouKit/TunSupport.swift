@@ -18,6 +18,7 @@ public struct TunRequest:Codable,Sendable {
 }
 public struct TunReply: Codable, Sendable {
     public var wakeRecoveryReason:WakeRecoveryReason?
+    public var supportsTrustedCorporateDNS:Bool?
     public var supportsWakeRecovery:Bool?
     public var isProgress:Bool?
     public var tunnelInterface:String?

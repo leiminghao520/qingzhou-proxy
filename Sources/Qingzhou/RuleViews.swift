@@ -231,7 +231,7 @@ struct RuleView: View {
             }
         }
         .sheet(item:$conversion) {rule in
-            DraftEditorSheet(draft:model.drafts.bypass(profile:model.currentProfileID,items:model.state.effectiveBypasses,revision:try? model.bypassRevision()),store:model.drafts,title:"转换网络绕过") {
+            DraftEditorSheet(draft:model.drafts.bypass(profile:model.currentProfileID,items:model.state.effectiveBypasses,revision:try? model.bypassRevision(),corporateDNS:model.state.trustedCorporateDNS ?? []),store:model.drafts,title:"转换网络绕过") {
                 NetworkBypassView(model:model,conversion:rule)
             }.padding(20).frame(minWidth:850,minHeight:650)
         }

@@ -37,6 +37,23 @@ import QingzhouKit
         let stale=await model.applyBypassDraft([],converted:[],revision:revision)
         try check(!stale && model.state.effectiveBypasses.count==4001,"过期草稿覆盖了新配置")
         model.bypassApplyFailure=nil
+        let company=TrustedCorporateDNS(name:"隔离公司网络",serviceID:"fixture-wifi",servers:["10.57.82.100","10.57.82.101"],domains:["tongdun.me","tongdun.cn","tongdun.net"])
+        let companyRevision=try model.bypassRevision()
+        let companySaved=await model.applyBypassDraft(model.state.effectiveBypasses,converted:[],revision:companyRevision,corporateDNS:[company])
+        try check(companySaved && model.state.trustedCorporateDNS==[company],"公司 DNS 随正式配置事务保存")
+        let companyDraft=model.drafts.bypass(profile:model.currentProfileID,items:model.state.effectiveBypasses,revision:try model.bypassRevision(),corporateDNS:[company])
+        companyDraft.corporateDNS=[]
+        try check(companyDraft.dirty,"移除公司 DNS 形成待保存草稿")
+        companyDraft.discard()
+        try check(companyDraft.corporateDNS==[company] && !companyDraft.dirty,"撤销恢复公司 DNS 草稿")
+        var capabilityState=AppState();capabilityState.trustedCorporateDNS=[company]
+        var oldHelper=TunReply(ok:true,message:"隔离旧辅助服务")
+        do {try CaptureController.validateCorporateDNSCapability(state:capabilityState,status:oldHelper);throw ProxyError("旧辅助服务错误地接受公司 DNS")} catch {
+            try check(error.localizedDescription.contains("更新辅助服务"),"旧辅助服务必须明确拒绝新能力")
+        }
+        oldHelper.supportsTrustedCorporateDNS=true
+        try CaptureController.validateCorporateDNSCapability(state:capabilityState,status:oldHelper)
+        try check(true,"新辅助服务接受公司 DNS 能力")
         let window=NSWindow(contentRect:NSRect(x:0,y:0,width:1080,height:740),styleMask:[.titled,.resizable],backing:.buffered,defer:false)
         let host=NSHostingView(rootView:AnyView(NetworkBypassView(model:model).padding(24)))
         window.contentView=host;window.appearance=NSAppearance(named:.aqua);window.orderFront(nil)

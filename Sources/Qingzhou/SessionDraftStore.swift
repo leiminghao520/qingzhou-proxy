@@ -68,24 +68,28 @@ struct ShortcutSettingsDraft:Equatable {
 
 @MainActor final class BypassDraft:ObservableObject,SessionDraft {
     @Published var items:[NetworkBypass]
+    @Published var corporateDNS:[TrustedCorporateDNS]=[]
+    private(set) var originalDNS:[TrustedCorporateDNS]=[]
+    private var latestDNS:[TrustedCorporateDNS]=[]
     @Published var converted=Set<UUID>()
     private(set) var original:[NetworkBypass]
     var revision:Data?
     private var latest:[NetworkBypass]
     private var latestRevision:Data?
-    init(items:[NetworkBypass],revision:Data?) {self.items=items;original=items;latest=items;self.revision=revision;latestRevision=revision}
-    var dirty:Bool {items != original || !converted.isEmpty}
-    func sync(items:[NetworkBypass],revision:Data?) {
-        latest=items;latestRevision=revision
+    init(items:[NetworkBypass],revision:Data?,corporateDNS:[TrustedCorporateDNS]=[]) {self.items=items;original=items;latest=items;self.revision=revision;latestRevision=revision;self.corporateDNS=corporateDNS;originalDNS=corporateDNS;latestDNS=corporateDNS}
+    var dirty:Bool {items != original || corporateDNS != originalDNS || !converted.isEmpty}
+    func sync(items:[NetworkBypass],revision:Data?,corporateDNS:[TrustedCorporateDNS]?=nil) {
+        latest=items;latestRevision=revision;if let corporateDNS {latestDNS=corporateDNS}
         if !dirty {discard()}
     }
     func discard() {
         if dirty || items != latest {objectWillChange.send()}
-        original=latest;revision=latestRevision
+        original=latest;revision=latestRevision;originalDNS=latestDNS
+        if corporateDNS != latestDNS {corporateDNS=latestDNS}
         if items != latest {items=latest}
         if !converted.isEmpty {converted=[]}
     }
-    func accept(items:[NetworkBypass],revision:Data?) {latest=items;latestRevision=revision;discard()}
+    func accept(items:[NetworkBypass],revision:Data?,corporateDNS:[TrustedCorporateDNS]?=nil) {latest=items;latestRevision=revision;if let corporateDNS {latestDNS=corporateDNS};discard()}
 }
 
 @MainActor final class EditorValueDraft<Value:Equatable>:ObservableObject,SessionDraft {
@@ -134,10 +138,10 @@ struct ShortcutSettingsDraft:Equatable {
         if let value=ruleEntries[key] {return value}
         let value=RulesDraft();ruleEntries[key]=value;return value
     }
-    func bypass(profile:UUID?,items:[NetworkBypass],revision:Data?)->BypassDraft {
+    func bypass(profile:UUID?,items:[NetworkBypass],revision:Data?,corporateDNS:[TrustedCorporateDNS]?=nil)->BypassDraft {
         let key=key(profile)
         if let value=bypassEntries[key] {return value}
-        let value=BypassDraft(items:items,revision:revision);bypassEntries[key]=value;return value
+        let value=BypassDraft(items:items,revision:revision,corporateDNS:corporateDNS ?? []);bypassEntries[key]=value;return value
     }
     private func entries(profile:UUID?,all:Bool)->[any SessionDraft] {
         if all {return targetEntries.values.map{$0 as any SessionDraft}+editors.values.map{$0.1}+settingsEntries.values.map{$0 as any SessionDraft}+ruleEntries.values.map{$0 as any SessionDraft}+bypassEntries.values.map{$0 as any SessionDraft}}

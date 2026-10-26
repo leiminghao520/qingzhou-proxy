@@ -78,6 +78,7 @@ public struct RemoteRuleSource:Codable,Identifiable,Sendable {
 }
 public struct AppState: Codable, Sendable {
     public var savedDiagnosticTargets:[SavedDiagnosticTarget]?
+    public var trustedCorporateDNS:[TrustedCorporateDNS]?
     public var networkBypasses:[NetworkBypass]?
     public var httpCompatibilityEnabled=false
     public var usesHTTPCompatibility:Bool {httpCompatibilityEnabled && shadowrocket != nil}
@@ -89,7 +90,7 @@ public struct AppState: Codable, Sendable {
     public var rulesEnabled:Bool {get {mode == .rule} set {mode = newValue ? .rule : .global}}
     public var activePolicy:PolicyReference? {selectedPolicy ?? selectedID.map(PolicyReference.node)}
     public init() {}
-    enum CodingKeys:String,CodingKey {case savedDiagnosticTargets,networkBypasses,httpCompatibilityEnabled,protectedDomains,addressFamilyPolicy,shadowrocket,shortcutEnabled,shortcutKey,shortcutModifiers,tunExcludedCIDRs,captureMode,dnsPreference,notes,recentUse,compactNodes,schemaVersion,nodes,subscriptions,rules,mode,listenPort,selectedID,selectedPolicy,groups,remoteRules,favorites,latency,ruleFinal,autoConnect,loginAtStartup}
+    enum CodingKeys:String,CodingKey {case trustedCorporateDNS,savedDiagnosticTargets,networkBypasses,httpCompatibilityEnabled,protectedDomains,addressFamilyPolicy,shadowrocket,shortcutEnabled,shortcutKey,shortcutModifiers,tunExcludedCIDRs,captureMode,dnsPreference,notes,recentUse,compactNodes,schemaVersion,nodes,subscriptions,rules,mode,listenPort,selectedID,selectedPolicy,groups,remoteRules,favorites,latency,ruleFinal,autoConnect,loginAtStartup}
     enum LegacyKeys:String,CodingKey {case rulesEnabled}
     public init(from decoder:Decoder) throws {
         let c=try decoder.container(keyedBy:CodingKeys.self);savedDiagnosticTargets=try c.decodeIfPresent([SavedDiagnosticTarget].self,forKey:.savedDiagnosticTargets);try SavedDiagnosticTarget.validate(savedDiagnosticTargets ?? []);httpCompatibilityEnabled=try c.decodeIfPresent(Bool.self,forKey:.httpCompatibilityEnabled) ?? false;shadowrocket=try c.decodeIfPresent(ShadowrocketConfiguration.self,forKey:.shadowrocket);schemaVersion=try c.decodeIfPresent(Int.self,forKey:.schemaVersion) ?? 1
@@ -99,6 +100,7 @@ public struct AppState: Codable, Sendable {
         groups=try c.decodeIfPresent([PolicyGroup].self,forKey:.groups) ?? [];remoteRules=try c.decodeIfPresent([RemoteRuleSource].self,forKey:.remoteRules) ?? [];favorites=try c.decodeIfPresent(Set<UUID>.self,forKey:.favorites) ?? [];latency=try c.decodeIfPresent([String:LatencyResult].self,forKey:.latency) ?? [:];ruleFinal=try c.decodeIfPresent(PolicyReference.self,forKey:.ruleFinal)
         addressFamilyPolicy=try c.decodeIfPresent(AddressFamilyPolicy.self,forKey:.addressFamilyPolicy);captureMode=try c.decodeIfPresent(CaptureMode.self,forKey:.captureMode) ?? .systemProxy;dnsPreference=try c.decodeIfPresent(DNSPreference.self,forKey:.dnsPreference) ?? .httpsProxy;notes=try c.decodeIfPresent([String:String].self,forKey:.notes) ?? [:];recentUse=try c.decodeIfPresent([String:Date].self,forKey:.recentUse) ?? [:];compactNodes=try c.decodeIfPresent(Bool.self,forKey:.compactNodes) ?? false;shortcutEnabled=try c.decodeIfPresent(Bool.self,forKey:.shortcutEnabled) ?? false;shortcutKey=try c.decodeIfPresent(UInt32.self,forKey:.shortcutKey) ?? 35;shortcutModifiers=try c.decodeIfPresent(UInt32.self,forKey:.shortcutModifiers) ?? 2304;protectedDomains=try c.decodeIfPresent([String].self,forKey:.protectedDomains) ?? [];tunExcludedCIDRs=try c.decodeIfPresent([String].self,forKey:.tunExcludedCIDRs) ?? []
         if let items=try c.decodeIfPresent([NetworkBypass].self,forKey:.networkBypasses) {networkBypasses=try NetworkBypassPolicy.normalize(items)}
+        if let values=try c.decodeIfPresent([TrustedCorporateDNS].self,forKey:.trustedCorporateDNS) {trustedCorporateDNS=try TrustedCorporateDNS.normalize(values)}
         autoConnect=try c.decodeIfPresent(Bool.self,forKey:.autoConnect) ?? false;loginAtStartup=try c.decodeIfPresent(Bool.self,forKey:.loginAtStartup) ?? false
     }
     public func label(_ ref:PolicyReference?) -> String {

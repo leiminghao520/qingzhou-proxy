@@ -23,7 +23,7 @@ if args.count==2 && args[1]=="experience-checks" {
 }
 if args.count==2 && args[1]=="corporate-dns-checks" {
     let t=CorporateDNSTests()
-    do {try t.testSelection();try t.testResponses();try t.testTransactions()} catch {CheckHarness.failure(error.localizedDescription,file:#filePath,line:#line)}
+    do {try t.testSelection();try t.testResponses();try t.testTransactions();try t.testOfficeWiFi()} catch {CheckHarness.failure(error.localizedDescription,file:#filePath,line:#line)}
     print("RESULT corporate_dns_assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
     exit(CheckHarness.failures==0 ? 0:1)
 }
@@ -368,7 +368,7 @@ do{let tests=FullSubscriptionTests();run("FullSubscriptionTests.localRulesAndRol
 do{let t=NetworkSafetyTests();run("NetworkSafety.proxyOwnership",t){t.testPersistentProxyOwnership()};run("NetworkSafety.conflicts",t){t.testConflictDetection()};run("NetworkSafety.deadProxyOwnership",t){t.testDeadProxyRestorationAndOwnership()};run("NetworkSafety.unknownHealth",t){t.testUnknownHealthDoesNotMeanNodeFailure()};run("NetworkSafety.privateLog",t){try t.testBoundedPrivateLogAndRedaction()}}
 do{let t=NetworkPolicyTests();run("NetworkPolicy.preparationRace",t){try t.testPreparationRaceAndDNSBudget()};run("NetworkPolicy.tunAddresses",t){try t.testTunAddressAllocation()};run("NetworkPolicy.corporateRoutes",t){t.testSpecificCorporateRoutesAndSystemTunnels()};run("NetworkPolicy.migration",t){try t.testMigrationAndImport()};run("NetworkPolicy.coreMatrix",t){try t.testCoreNetworkMatrix()}}
 do {let t=DynamicVPNTests();run("DynamicVPN.optionalDNSAndGeneration",t){try t.testOptionalDNSAndGeneration()};run("DynamicVPN.stableWindowAndPartitions",t){try t.testStableWindowAndPartitions()};run("DynamicVPN.multiInterfaceRoutes",t){try t.testMultiInterfaceRoutes()}}
-do {let t=CorporateDNSTests();run("CorporateDNS.selection",t){try t.testSelection()};run("CorporateDNS.responses",t){try t.testResponses()};run("CorporateDNS.transactions",t){try t.testTransactions()}}
+do {let t=CorporateDNSTests();run("CorporateDNS.selection",t){try t.testSelection()};run("CorporateDNS.responses",t){try t.testResponses()};run("CorporateDNS.transactions",t){try t.testTransactions()};run("CorporateDNS.officeWiFi",t){try t.testOfficeWiFi()}}
 do{let t=CapturePlanTests();run("CapturePlan.protection",t){try t.testProtectionAndResolverSelection()};run("CapturePlan.loopback",t){try t.testLoopbackRelay()};run("CapturePlan.dnsRetries",t){try t.testDNSRetriesAndNoPublicFallback()};run("CapturePlan.routesOwnership",t){try t.testRouteParsingAndOwnership()};run("CapturePlan.core",t){try t.testCoreConfigurationProtectionPrecedence()}}
 do{let t=KeychainUXTests();run("KeychainUX.authorization",t){try t.testAuthorizationRetryAndCache()};run("KeychainUX.errors",t){try t.testDistinctErrorsAndAtomicCache()}}
 do{let t=StabilityTests();run("Stability.snapshotRetryAndLatency",t){t.testSnapshotRetryAndLatency()};run("Stability.dnsQueueBoundsBudgetAndStop",t){t.testDNSQueueBoundsBudgetAndStop()};run("Stability.subscriptionClassificationAndRetry",t){t.testSubscriptionClassificationAndRetry()}}

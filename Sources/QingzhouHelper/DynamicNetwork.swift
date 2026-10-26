@@ -17,6 +17,7 @@ extension Service {
         let optional=record.routes.filter {route in
             guard route.interface != record.interface,!route.destination.hasSuffix("/1") else{return false}
             if activeRequest?.state?.pinnedBypasses.contains(where:{NetworkInspection.samePrefix($0.value,route.destination)}) == true {return true}
+            if dynamicAnswerRoutes[route.destination] != nil {return true}
             if plannedPathWithdrawn(route,fresh:fresh),CaptureOwnership.recoveryState(expected:ProtectedRoute(destination:route.destination,gateway:route.gateway,interface:route.interface,scope:route.scope),actual:sample.ownershipRoutes) == .absent {return true}
             if CapturePlan.isVPN(route.interface) {return true}
             let address=String(route.destination.split(separator:"/")[0])
@@ -51,6 +52,7 @@ extension Service {
         guard nodeInterfaces==captureNodeInterfaces else{return false}
         // 新保护和新捕获必须先建立；同前缀竞争出口无法无缝新增时保留旧保护并等待重规划。
         let expected=record.routes.filter {owned in
+            if dynamicAnswerRoutes[owned.destination] != nil {return true}
             guard owned.interface != record.interface,!owned.destination.hasSuffix("/1") else{return false}
             let address=String(owned.destination.split(separator:"/")[0])
             let migrated=fresh.protectedRoutes.contains {route in
@@ -116,6 +118,7 @@ extension Service {
             try save()
         }
         if record.captureRoutes != nil {journal?.captureRoutes=capture.prefixes}
+        dynamicAnswerRoutes=[:]
         journal?.preservedRoutes=bypass.preservedRoutes
         try save()
         try rules.update(fresh)

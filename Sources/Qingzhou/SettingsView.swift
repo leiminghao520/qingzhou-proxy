@@ -190,7 +190,7 @@ private struct SettingsContent:View,Equatable {
             }
         }
         .sheet(isPresented:$showingBypasses) {
-            DraftEditorSheet(draft:model.drafts.bypass(profile:model.currentProfileID,items:model.state.effectiveBypasses,revision:try? model.bypassRevision()),store:model.drafts,title:"网络绕过") {
+            DraftEditorSheet(draft:model.drafts.bypass(profile:model.currentProfileID,items:model.state.effectiveBypasses,revision:try? model.bypassRevision(),corporateDNS:model.state.trustedCorporateDNS ?? []),store:model.drafts,title:"网络绕过") {
                 NetworkBypassView(model:model)
             }.padding(20).frame(minWidth:850,minHeight:650)
         }

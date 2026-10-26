@@ -31,6 +31,7 @@ final class Service {
     var captureNodeAddresses:[String:[String]]=[:]
     var captureNodeInterfaces:[String:String]=[:]
     var knownProtectedDomains:Set<String>=[]
+    var dynamicAnswerRoutes:[String:ProtectedRoute]=[:]
     var dnsForwarder:ScopedDNSForwarder?
     var activeRequest:TunRequest?
     var networkMonitorObservation: ((NetworkMonitorEvent) -> Void)?
@@ -116,7 +117,7 @@ final class Service {
         if !performingNetworkResume {cancelNetworkResume()}
         pinnedMonitor?.cancel();pinnedMonitor=nil;pinnedPaths=[]
         coreOutput?.fileHandleForReading.readabilityHandler=nil;coreOutput=nil
-        captureGeneration=UUID();domainRouteSummary=[];activatePrepared=nil;activeRequest=nil;networkChecks?.cancel();networkChecks=nil;networkTimer?.cancel();networkTimer=nil;if let networkStore {SCDynamicStoreSetDispatchQueue(networkStore,nil)};networkStore=nil;routeEvents?.cancel();routeEvents=nil;pendingNetworkChange=nil;snapshotRetry.reset();dnsForwarder?.stop();dnsForwarder=nil;capturePlan=nil;proxyMismatchSince=nil;dynamicRules=nil;changeWindow.reset();protectedQueriesSuspended=false;captureNodeAddresses=[:];captureNodeInterfaces=[:];knownProtectedDomains=[]
+        captureGeneration=UUID();dynamicAnswerRoutes=[:];domainRouteSummary=[];activatePrepared=nil;activeRequest=nil;networkChecks?.cancel();networkChecks=nil;networkTimer?.cancel();networkTimer=nil;if let networkStore {SCDynamicStoreSetDispatchQueue(networkStore,nil)};networkStore=nil;routeEvents?.cancel();routeEvents=nil;pendingNetworkChange=nil;snapshotRetry.reset();dnsForwarder?.stop();dnsForwarder=nil;capturePlan=nil;proxyMismatchSince=nil;dynamicRules=nil;changeWindow.reset();protectedQueriesSuspended=false;captureNodeAddresses=[:];captureNodeInterfaces=[:];knownProtectedDomains=[]
         guard let record=journal else{        if let process,process.isRunning {process.terminate();for _ in 0..<40 {if !process.isRunning{break};usleep(50000)};if process.isRunning{kill(process.processIdentifier,SIGKILL)};process.waitUntilExit()};process=nil;owner=nil;try? FileManager.default.removeItem(at:root.appendingPathComponent("runtime.json"))
 return};var issues:[String]=[]
         // 用户显式恢复时也只清理仍属于轻舟的入口，不能覆盖后来接管的代理。
@@ -255,6 +256,7 @@ return};var issues:[String]=[]
                         if !CaptureOwnership.hasEquivalentHostPath(route,actual:existingProtection) {
                             guard (self.journal?.routes.count ?? 0)<4096 else {throw ProxyError("动态保护路由超过上限")}
                             try self.addRoute(route.destination,route.gateway,route.interface,ipv6:route.ipv6,deadline:deadline)
+                            self.dynamicAnswerRoutes[route.destination]=route
                         }
                         let info=try self.routeInfo(address,ipv6:route.ipv6,deadline:deadline)
                         guard self.field("interface",info)==route.interface else {throw ProxyError("企业动态路由接口核验失败")}
@@ -391,7 +393,7 @@ return};var issues:[String]=[]
         do {
             var reply=try handleOperation(request,fd:fd)
             reply.tunnelInterface=journal?.interface
-            reply.supportsWakeRecovery=true;reply.supportsExternalRecovery=true;reply.recoveryPending=journal != nil
+            reply.supportsTrustedCorporateDNS=true;reply.supportsWakeRecovery=true;reply.supportsExternalRecovery=true;reply.recoveryPending=journal != nil
             if request.operation=="status",request.verifyNetwork==true {reply.safeToQuit=verifyReleasedForQuit()}
             timing.finish()
             reply.corporateDNSDiagnostics=dnsForwarder?.diagnosticResults
@@ -401,7 +403,7 @@ return};var issues:[String]=[]
             timing.finish(succeeded:false)
             var reply=TunReply(ok:false,message:"TUN 阶段 "+phase+"："+Redactor.redact(error.localizedDescription),coreDiagnostics:["prepare","activate"].contains(request.operation) ? coreDiagnostics.recent:nil,running:helperIsRunning,phase:phase,networkNotReady:error is NetworkEnvironmentNotReady,stageTimings:timing.samples+(routeMetrics?.samples ?? []))
             reply.tunnelInterface=journal?.interface
-            reply.supportsWakeRecovery=true;reply.supportsExternalRecovery=true;reply.recoveryPending=journal != nil
+            reply.supportsTrustedCorporateDNS=true;reply.supportsWakeRecovery=true;reply.supportsExternalRecovery=true;reply.recoveryPending=journal != nil
             return reply
         }
     }

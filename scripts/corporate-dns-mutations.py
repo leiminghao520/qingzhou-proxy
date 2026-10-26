@@ -10,6 +10,10 @@ for folder in ['Vendor','Resources']:
 shutil.copy2(root/'Package.swift',stage/'Package.swift')
 mutations=[
     ('歧义解析器任意选择','CapturePlan.swift','guard corporate.allSatisfy({$0.interface==first.interface && $0.servers==first.servers})','guard true'),
+    ('忽略主网络服务身份','CapturePlan.swift','snapshot.primaryService==resolver.service && (trustedCorporateDNS','true && (trustedCorporateDNS'),
+    ('信任未批准DNS','TrustedCorporateDNS.swift','Set(resolver.servers).isSubset(of:Set(servers))','true'),
+    ('恢复DNS与业务接口绑定','CapturePlan.swift','let global=snapshot.routes.filter{$0.scope==nil && matches($0)}','let global=snapshot.routes.filter{$0.scope==nil && $0.interface==resolver.interface && matches($0)}'),
+    ('放行任意物理公网答案','CapturePlan.swift','let userPhysical=physical && explicit','let userPhysical=physical'),
     ('错误选择最短域名','CapturePlan.swift','let longest=matches.map{length($0)}.max()!','let longest=matches.map{length($0)}.min()!'),
     ('忽略 SupplementalMatchOrders','CaptureDNSPolicy.swift','return orders.indices.contains(index) ? orders[index]:((settings["SearchOrder"] as? Int) ?? 200000)','return (settings["SearchOrder"] as? Int) ?? 200000'),
     ('写前不保存事务','DNSServiceTransaction.swift','        try persist()',''),
@@ -17,7 +21,7 @@ mutations=[
     ('恢复遇独立冲突提前退出','DNSServiceTransaction.swift','issues.append("DNS 服务已有外部修改，保留当前值："+record.key);continue','issues.append("DNS 服务已有外部修改，保留当前值："+record.key);return issues'),
     ('省略写后核验','DNSServiceTransaction.swift','guard try read(record.key)==expected else {throw ProxyError("DNS 服务写后核验失败："+record.key)}',''),
     ('放行旧代次响应','ScopedDNSForwarder.swift','planGeneration==generation || (!wasProtected && !plan.protects(name))','true || (!wasProtected && !plan.protects(name))'),
-    ('保护失败仍返回答案','ScopedDNSForwarder.swift','catch {report(.answerProtectionFailed,"答案保护",server,resolver.interface);return DNSPacket.failure(query)}','catch {report(.answerProtectionFailed,"答案保护",server,resolver.interface);return response}'),
+    ('保护失败仍返回答案','ScopedDNSForwarder.swift','return DNSPacket.failure(query)}\n        }}','return response}\n        }}'),
     ('无 AAAA 记录误报失败','ScopedDNSForwarder.swift','addresses.isEmpty ? .noRecords:.answered','addresses.isEmpty ? .servfail:.answered'),
 ]
 results=[]

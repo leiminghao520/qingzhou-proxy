@@ -120,3 +120,70 @@ final class CorporateDNSTests:CheckCase {
         expectEqual(DNSServiceTransaction.restore(records,read:{_ in throw ProxyError("读取失败")},write:{_,_ in expectTrue(false)}).count,3)
     }
 }
+
+extension CorporateDNSTests {
+    func testOfficeWiFi() throws {
+        let wifi=DNSResolverScope(service:"office-wifi",interface:"en0",servers:["10.57.82.100","10.57.82.101"],defaultResolver:true)
+        let vpn=DNSResolverScope(service:"security",interface:"utun6",servers:["10.251.1.1"],defaultResolver:true)
+        let physical=ProtectedRoute(destination:"10.0.0.0/8",gateway:"10.57.240.1",interface:"en0")
+        var snapshot=NetworkSnapshot(primaryInterface:"en0",routes:[physical,ProtectedRoute(destination:"0.0.0.0/0",gateway:"10.57.240.1",interface:"en0")],resolvers:[wifi,vpn])
+        snapshot.primaryService=wifi.service
+        var state=AppState();state.protectedDomains=["tongdun.me"];state.tunExcludedCIDRs=["10.0.0.0/8"]
+        let trusted=TrustedCorporateDNS(name:"公司 Wi-Fi",serviceID:wifi.service,servers:wifi.servers,domains:["tongdun.me"])
+        let name="teamwork.tongdun.me"
+        let baseline=try CapturePlan.make(snapshot:snapshot,state:state)
+        expectEqual(try baseline.selectResolvers(for:name).first?.interface,"utun6")
+        expectEqual(try baseline.domainRoute(address:"10.63.100.149",resolver:vpn,host:name).interface,"en0","企业 DNS 与业务出口可以不同")
+        state.trustedCorporateDNS=[trusted]
+        let office=try CapturePlan.make(snapshot:snapshot,state:state)
+        expectEqual(try office.selectResolvers(for:name).first?.service,wifi.service)
+        expectEqual(try office.domainRoute(address:"10.63.100.149",resolver:wifi,host:name).interface,"en0")
+        expectThrows(try office.domainRoute(address:"8.8.8.8",resolver:wifi,host:name))
+        var alone=snapshot;alone.resolvers=[wifi]
+        expectEqual(try CapturePlan.make(snapshot:alone,state:state).selectResolvers(for:name).first?.service,wifi.service)
+        var unknown=alone;unknown.resolvers[0].servers=["192.168.1.1"]
+        expectThrows(try CapturePlan.make(snapshot:unknown,state:state).selectResolvers(for:name))
+        unknown.resolvers[0].servers=wifi.servers;unknown.resolvers[0].service="other-service"
+        expectThrows(try CapturePlan.make(snapshot:unknown,state:state).selectResolvers(for:name))
+        unknown.resolvers[0]=wifi;unknown.primaryService="other-primary"
+        expectThrows(try CapturePlan.make(snapshot:unknown,state:state).selectResolvers(for:name))
+        unknown.primaryService=wifi.service
+        unknown.resolvers[0]=wifi;unknown.resolvers[0].servers=[]
+        expectThrows(try CapturePlan.make(snapshot:unknown,state:state).selectResolvers(for:name))
+        unknown.resolvers[0]=wifi;unknown.resolvers[0].servers=[wifi.servers[0],"192.168.1.1"]
+        expectThrows(try CapturePlan.make(snapshot:unknown,state:state).selectResolvers(for:name))
+        unknown.resolvers[0]=wifi;unknown.resolvers[0].servers=[wifi.servers[0]]
+        expectEqual(try CapturePlan.make(snapshot:unknown,state:state).selectResolvers(for:name).first?.servers,[wifi.servers[0]])
+        var scoped=snapshot;scoped.resolvers[1].domains=["tongdun.me"]
+        expectEqual(try CapturePlan.make(snapshot:scoped,state:state).selectResolvers(for:name).first?.service,vpn.service)
+        expectTrue(office.trustedResolvers(for:"tongdun.me.attacker.test").isEmpty)
+        var conflict=office;conflict.snapshot.routes.append(ProtectedRoute(destination:physical.destination,gateway:"10.57.240.2",interface:"en1"))
+        expectThrows(try conflict.domainRoute(address:"10.63.100.149",resolver:vpn,host:name))
+        var specific=office;specific.snapshot.routes.append(ProtectedRoute(destination:"10.63.0.0/16",gateway:"link#15",interface:"utun6"));specific.protectedRoutes.append(specific.snapshot.routes.last!)
+        expectEqual(try specific.domainRoute(address:"10.63.100.149",resolver:wifi,host:name).interface,"utun6")
+        var pinned=office;pinned.pinnedDomainRoutes=[ProtectedRoute(destination:"10.63.0.0/16",gateway:"10.10.1.1",interface:"en1")]
+        expectEqual(try pinned.domainRoute(address:"10.63.100.149",resolver:wifi,host:name).interface,"en1")
+        let relay=try ScopedDNSForwarder(plan:baseline,protectAnswers:{host,addresses,resolver,_ in
+            for address in addresses {_ = try baseline.domainRoute(address:address,resolver:resolver,host:host)}
+        });defer{relay.stop()}
+        let query=DNSPacket.query(name,type:1)
+        var answer=query;answer[2]|=0x80;answer[7]=1;answer.append(contentsOf:[0xc0,12,0,1,0,1,0,0,0,1,0,4,10,63,100,149])
+        let response=relay.resolve(query,name:name,exchange:{_,server,interface in
+            expectEqual(server,vpn.servers[0]);expectEqual(interface,"utun6");return answer
+        })
+        expectEqual(response[3]&15,0)
+        expectEqual(relay.diagnosticResults.last?.businessInterfaces,["en0"])
+        let rejected=try ScopedDNSForwarder(plan:office,protectAnswers:{_,_,_,_ in throw CorporateDNSRouteError.conflict});defer{rejected.stop()}
+        _=rejected.resolve(query,name:name,exchange:{_,_,_ in answer})
+        expectEqual(rejected.diagnosticResults.last?.outcome,.answerRouteConflict)
+        var noTrust=state;noTrust.trustedCorporateDNS=nil
+        expectThrows(try CapturePlan.make(snapshot:alone,state:noTrust).selectResolvers(for:name))
+        let encoded=try JSONEncoder().encode(state)
+        expectEqual(try JSONDecoder().decode(AppState.self,from:encoded).trustedCorporateDNS,[trusted])
+        expectNil(try JSONDecoder().decode(AppState.self,from:Data("{}".utf8)).trustedCorporateDNS)
+        expectThrows(try TrustedCorporateDNS.normalize([TrustedCorporateDNS(name:"",serviceID:"wifi",servers:wifi.servers,domains:trusted.domains)]))
+        expectThrows(try TrustedCorporateDNS.normalize([TrustedCorporateDNS(name:"公司",serviceID:"wifi",servers:["10.0.0.0/8"],domains:trusted.domains)]))
+        expectThrows(try TrustedCorporateDNS.normalize([TrustedCorporateDNS(name:"公司",serviceID:"wifi",servers:wifi.servers,domains:[])]))
+        expectThrows(try TrustedCorporateDNS.normalize([trusted,trusted]))
+    }
+}

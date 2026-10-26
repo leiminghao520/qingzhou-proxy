@@ -119,11 +119,13 @@ extension Service {
         knownProtectedDomains.formUnion(fresh.domains)
         fresh.domains=Array(knownProtectedDomains).sorted()
         let defaultsChanged=fresh.snapshot.routes.filter{$0.destination.hasSuffix("/0")} != previous.snapshot.routes.filter{$0.destination.hasSuffix("/0")}
-        let bootstrapTargets=Set(captureNodeAddresses.values.flatMap{$0}+fresh.snapshot.resolvers.flatMap(\.servers).map{$0.components(separatedBy:"%")[0]}+["1.1.1.1"])
+        let answerTargets=dynamicAnswerRoutes.values.map{String($0.destination.split(separator:"/")[0])}
+        let dnsTargets=fresh.snapshot.resolvers.flatMap(\.servers).map{$0.components(separatedBy:"%")[0]}
+        let bootstrapTargets=Set(answerTargets+captureNodeAddresses.values.flatMap{$0}+dnsTargets+["1.1.1.1"])
         let originalPathsChanged=bootstrapTargets.contains {target in
             (try? CaptureRoutePlan.systemPath(target,routes:fresh.snapshot.routes)) != (try? CaptureRoutePlan.systemPath(target,routes:previous.snapshot.routes))
         }
-        let changed=originalPathsChanged || fresh.snapshot.primaryInterface != previous.snapshot.primaryInterface || fresh.snapshot.resolvers != previous.snapshot.resolvers || fresh.domains != previous.domains || fresh.protectedRoutes != previous.protectedRoutes || defaultsChanged
+        let changed=fresh.snapshot.primaryService != previous.snapshot.primaryService || originalPathsChanged || fresh.snapshot.primaryInterface != previous.snapshot.primaryInterface || fresh.snapshot.resolvers != previous.snapshot.resolvers || fresh.domains != previous.domains || fresh.protectedRoutes != previous.protectedRoutes || defaultsChanged
         if !changed {
             pendingNetworkChange=nil;changeWindow.reset()
             if protectedQueriesSuspended {

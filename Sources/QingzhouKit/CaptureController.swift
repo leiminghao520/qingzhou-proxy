@@ -14,6 +14,11 @@ import Foundation
         if let helperRequestOverride {return try await helperRequestOverride(request)}
         return try await helper.request(request)
     }
+    public static func validateCorporateDNSCapability(state:AppState,status:TunReply) throws {
+        if !(state.trustedCorporateDNS ?? []).isEmpty && status.supportsTrustedCorporateDNS != true {
+            throw ProxyError("公司网络 DNS 需要更新辅助服务，当前版本不能安全应用此配置")
+        }
+    }
     public var running:Bool{(activeMode == .systemProxy ? core.isRunning:(helperRunning || core.isRunning)) && (httpCompatibility == nil || httpCompatibility!.isRunning)}
     public func start(_ state:AppState,credentials:CredentialStore,control:CoreControlContext) async throws {
         guard activeMode==nil else{throw ProxyError("必须先恢复上一种接管方式")}
@@ -30,6 +35,7 @@ import Foundation
             try await CaptureActivationTransaction.run(prepare:{
                 let status=try await self.requestHelper(TunRequest(operation:"status"))
                 guard status.protocolVersion==5 else{throw ProxyError("辅助服务协议过旧，请更新后再开启组合接管")}
+                try Self.validateCorporateDNSCapability(state:state,status:status)
                 let reply=try await self.requestHelper(TunRequest(operation:"prepare",state:runtime,credentials:values,control:control,httpCompatibilityPort:compatibilityPort,systemProxyPort:state.captureMode == .compatible ? state.listenPort:nil))
                 self.ownedTunDNS=reply.dnsServer;self.helperRunning=reply.running;self.activeMode = state.captureMode
             },compatibility:{

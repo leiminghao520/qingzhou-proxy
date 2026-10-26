@@ -9,6 +9,7 @@ struct NetworkBypassView:View {
     }
 }
 private struct BypassViewRevision:Equatable {
+    let corporateDNS:[TrustedCorporateDNS]
     let items:[NetworkBypass]
     let rules:[RoutingRule]
     let active:[NetworkBypass]?
@@ -17,7 +18,7 @@ private struct BypassViewRevision:Equatable {
     let connection:AppModel.Connection
     let failure:String?
     let helper:String
-    @MainActor init(model:AppModel) {items=model.state.effectiveBypasses;rules=model.state.rules;active=model.activeBypasses;profile=model.currentProfileID;locked=model.locked;connection=model.connection;failure=model.bypassApplyFailure;helper=model.helperStatus}
+    @MainActor init(model:AppModel) {corporateDNS=model.state.trustedCorporateDNS ?? [];items=model.state.effectiveBypasses;rules=model.state.rules;active=model.activeBypasses;profile=model.currentProfileID;locked=model.locked;connection=model.connection;failure=model.bypassApplyFailure;helper=model.helperStatus}
 }
 private struct BypassContent:View,Equatable {
     let model:AppModel
@@ -27,7 +28,7 @@ private struct BypassContent:View,Equatable {
     @ObservedObject private var session:BypassDraft
     init(model:AppModel,conversion:RoutingRule?,revision:BypassViewRevision) {
         self.model=model;self.conversion=conversion;self.revision=revision
-        session=model.drafts.bypass(profile:revision.profile,items:revision.items,revision:try? model.bypassRevision())
+        session=model.drafts.bypass(profile:revision.profile,items:revision.items,revision:try? model.bypassRevision(),corporateDNS:model.state.trustedCorporateDNS ?? [])
     }
     @State private var selection=Set<UUID>()
     @State private var search=""
@@ -49,10 +50,10 @@ private struct BypassContent:View,Equatable {
     }
     private func reload() {
         previewGeneration=UUID();previewing=false
-        session.accept(items:model.state.effectiveBypasses,revision:try? model.bypassRevision());selection=[];error=nil
+        session.accept(items:model.state.effectiveBypasses,revision:try? model.bypassRevision(),corporateDNS:model.state.trustedCorporateDNS ?? []);selection=[];error=nil
     }
     private func load() {
-        session.sync(items:model.state.effectiveBypasses,revision:try? model.bypassRevision())
+        session.sync(items:model.state.effectiveBypasses,revision:try? model.bypassRevision(),corporateDNS:model.state.trustedCorporateDNS ?? [])
         if let conversion,!session.converted.contains(conversion.id) {
             do {
                 let item=try NetworkBypassPolicy.convert(conversion)
@@ -75,7 +76,7 @@ private struct BypassContent:View,Equatable {
             do {
                 let result=try await Task.detached {let normalized=try NetworkBypassPolicy.normalize(source);return (normalized,NetworkBypassPolicy.coverageWarnings(normalized))}.value
                 guard previewGeneration==token else{return}
-                session.items=result.0;previewWarnings=result.1;preview=true;error=nil
+                session.items=result.0;session.corporateDNS=try TrustedCorporateDNS.normalize(session.corporateDNS);previewWarnings=result.1;preview=true;error=nil
             }catch {if previewGeneration==token {self.error=error.localizedDescription}}
             if previewGeneration==token {previewing=false}
         }
@@ -85,6 +86,30 @@ private struct BypassContent:View,Equatable {
             Text("绕过轻舟").font(.title2.bold())
             Text("普通直连由核心访问目标；网络绕过优先于普通规则，同步系统代理例外、TUN 和 DNS。显式指定代理的应用可能忽略系统例外。")
                 .font(.caption).foregroundStyle(.secondary)
+            GroupBox("公司网络 DNS") {
+                VStack(alignment:.leading,spacing:6) {
+                    Text("仅在已确认的公司网络使用这些 DNS；网络服务或 DNS 变化后需要重新确认。此匹配不作为 Wi-Fi 身份认证。适用于 TUN 和组合接管模式。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    ForEach(session.corporateDNS) {entry in
+                        HStack {
+                            VStack(alignment:.leading) {
+                                Text(entry.name)
+                                Text(entry.servers.joined(separator:", ")+" · "+entry.domains.joined(separator:", ")).font(.caption).textSelection(.enabled)
+                            }
+                            Spacer()
+                            Button("移除") {session.corporateDNS.removeAll{$0.id==entry.id}}
+                        }
+                    }
+                    Button("识别当前公司网络…") {
+                        do {
+                            let domains=session.items.filter{$0.enabled && $0.kind == .suffix}.map(\.value)
+                            let entry=try TrustedCorporateDNS.current(domains:domains)
+                            session.corporateDNS.removeAll{$0.serviceID==entry.serviceID}
+                            session.corporateDNS.append(entry)
+                        }catch {self.error=error.localizedDescription}
+                    }
+                }.frame(maxWidth:.infinity,alignment:.leading)
+            }.disabled(revision.locked || previewing)
             HStack {
                 TextField("搜索目标或备注",text:$search).textFieldStyle(.roundedBorder)
                 Button("新增") {editing=NetworkBypass(kind:.cidr,value:"")}
@@ -120,7 +145,7 @@ private struct BypassContent:View,Equatable {
             }
         }
         .task {load()}
-        .onChange(of:revision) {_,_ in session.sync(items:model.state.effectiveBypasses,revision:try? model.bypassRevision())}
+        .onChange(of:revision) {_,_ in session.sync(items:model.state.effectiveBypasses,revision:try? model.bypassRevision(),corporateDNS:model.state.trustedCorporateDNS ?? [])}
         .sheet(item:$editing) {item in BypassItemEditor(item:item,store:model.drafts,profile:revision.profile) {update($0)}}
         .sheet(isPresented:$bulk) {BypassBulkEditor(existing:session.items,store:model.drafts,profile:revision.profile) {session.items.append(contentsOf:$0)}}
         .sheet(isPresented:$diagnostic) {BypassDiagnosticView(model:model)}
@@ -132,9 +157,11 @@ private struct BypassContent:View,Equatable {
         return VStack(alignment:.leading,spacing:14) {
             Text("确认绕过变更").font(.title2.bold())
             Text("新增 \(newIDs.subtracting(oldIDs).count) 项，修改 \(modified) 项，删除 \(oldIDs.subtracting(newIDs).count) 项。")
+            Text("公司网络 DNS：原 \(session.originalDNS.count) 项 → 新 \(session.corporateDNS.count) 项；保存即批准所列服务、DNS 及企业域名。").font(.caption)
             if !session.converted.isEmpty {Text("将 \(session.converted.count) 条普通 DIRECT 转为绕过，移除原普通规则。绕过优先于所有普通分流规则。").foregroundStyle(.orange)}
             ScrollView {
                 LazyVStack(alignment:.leading,spacing:7) {
+                    ForEach(session.corporateDNS) {entry in Text(entry.name+" · "+entry.servers.joined(separator:", ")+" · "+entry.domains.joined(separator:", "))}
                     ForEach(session.items) {item in
                         HStack {Text(item.kind.label);Text(item.value).font(.system(.body,design:.monospaced));Spacer();Text(item.enabled ? "启用":"停用");Text(item.exit == .pinned ? "指定网卡及网关":"系统路由")}
                     }
@@ -148,7 +175,7 @@ private struct BypassContent:View,Equatable {
                 Spacer()
                 Button(revision.connection == .connected ? "应用并保存":"保存配置") {
                     guard let baseRevision=session.revision else{return}
-                    Task {if await model.applyBypassDraft(session.items,converted:session.converted,revision:baseRevision) {preview=false;reload()}}
+                    Task {if await model.applyBypassDraft(session.items,converted:session.converted,revision:baseRevision,corporateDNS:session.corporateDNS) {preview=false;reload()}}
                 }.buttonStyle(.borderedProminent).disabled(revision.locked)
             }
             if let failure=revision.failure {Text("验证失败："+failure).font(.caption).foregroundStyle(.red)}

@@ -1,6 +1,6 @@
 import Foundation
 
 public enum BuildVersion {
-    public static let current="0.15.0"
-    public static let build=70
+    public static let current="0.15.2"
+    public static let build=72
 }

@@ -119,7 +119,9 @@ public final class ScopedDNSForwarder {
     public func resolve(_ query:Data,name:String,exchange:((Data,String,String)->Data?)?=nil,budget:TimeInterval=5)->Data {
         let (plan,generation,suspended)=currentPlan()
         func report(_ outcome:CorporateDNSOutcome,_ stage:String,_ server:String?=nil,_ interface:String?=nil,_ addresses:[String]=[]) {
-            record(CorporateDNSDiagnostic(name:name,queryType:DNSPacket.queryType(query),outcome:outcome,server:server,interface:interface,addresses:addresses,stage:stage),generation:generation)
+            let resolver=DNSResolverScope(service:"diagnostic",interface:interface ?? "",servers:server.map{[$0]} ?? [])
+            let business=addresses.compactMap{try? plan.domainRoute(address:$0,resolver:resolver,host:name).interface}
+            record(CorporateDNSDiagnostic(name:name,queryType:DNSPacket.queryType(query),outcome:outcome,server:server,interface:interface,addresses:addresses,businessInterfaces:Array(Set(business)).sorted(),stage:stage),generation:generation)
         }
         if suspended && plan.protects(name) {report(.resolverUnavailable,"网络更新");return DNSPacket.failure(query)}
         let deadline=Date().addingTimeInterval(min(5,max(0,budget)))
@@ -154,7 +156,7 @@ public final class ScopedDNSForwarder {
                 guard code==0 || code==3 else {report(.invalidResponse,"上游响应",server,resolver.interface);return DNSPacket.failure(query)}
                 report(code==3 ? .nxdomain:addresses.isEmpty ? .noRecords:.answered,"完成",server,resolver.interface,addresses)
                 return response
-            } catch {report(.answerProtectionFailed,"答案保护",server,resolver.interface);return DNSPacket.failure(query)}
+            } catch {report((error as? CorporateDNSRouteError) == .conflict ? .answerRouteConflict:.answerProtectionFailed,"答案保护",server,resolver.interface);return DNSPacket.failure(query)}
         }}
         return DNSPacket.failure(query)
     }

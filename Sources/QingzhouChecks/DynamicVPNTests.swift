@@ -34,7 +34,7 @@ final class DynamicVPNTests:CheckCase {
         }
         let global=ProtectedRoute(destination:"10.20.0.0/16",gateway:"192.0.2.1",interface:"en0")
         let mixed=try CapturePlan.make(snapshot:NetworkSnapshot(primaryInterface:"en0",routes:[global]+scoped,resolvers:[wifi,dns6]),extraCIDRs:[],extraDomains:[])
-        expectEqual(mixed.protectedRoutes,[global]);expectThrows(try mixed.domainRoute(address:"10.20.1.2",resolver:dns6))
+        expectEqual(mixed.protectedRoutes,[global]);expectEqual(try mixed.domainRoute(address:"10.20.1.2",resolver:dns6).interface,"en0","DNS 接口不覆盖已确认的全局业务出口")
         expectEqual(try CapturePlan.effectiveRoutes([global,global],resolvers:[]),[global])
         for conflict in [ProtectedRoute(destination:global.destination,gateway:"192.0.2.2",interface:"en0"),ProtectedRoute(destination:global.destination,gateway:"192.0.2.1",interface:"en6")] {
             do {_=try CapturePlan.effectiveRoutes([global,conflict],resolvers:[]);expectTrue(false)}
