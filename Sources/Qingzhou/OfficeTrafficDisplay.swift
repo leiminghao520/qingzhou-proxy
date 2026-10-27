@@ -32,33 +32,13 @@ struct OfficeMenuTrafficSample:Equatable {
 }
 
 struct OfficeMenuBarLabel:View {
-    @ObservedObject var display:OfficeMenuTrafficDisplay
     let connected:Bool
-    let available:Bool
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    private func height(_ rate:Int64)->CGFloat {3+15*CGFloat(min(1,log2(Double(max(0,rate))/1024+1)/14))}
     var body:some View {
-        HStack(spacing:4) {
-            Image(systemName:connected ? "paperplane.fill":"paperplane")
-            HStack(alignment:.bottom,spacing:2) {
-                Capsule().frame(width:2,height:connected && available ? height(display.sample.upload):3)
-                Capsule().frame(width:2,height:connected && available ? height(display.sample.download):3)
-            }.frame(width:6,height:18,alignment:.bottom)
-                .animation(reduceMotion ? nil:.easeOut(duration:0.18),value:display.sample)
-            VStack(alignment:.leading,spacing:0) {
-                Text(connected ? "↑ "+(available ? formatRate(display.sample.upload):"—"):"未连接")
-                Text(connected ? "↓ "+(available ? formatRate(display.sample.download):"—"):"—")
-            }.font(.system(size:9,design:.monospaced)).monospacedDigit()
-                .frame(width:76,alignment:.leading).lineLimit(1).minimumScaleFactor(0.8)
-        }
-        .accessibilityElement(children:.ignore)
-        .accessibilityLabel(connected ? "轻舟代理，上传 "+(available ? formatRate(display.sample.upload):"未验证")+"，下载 "+(available ? formatRate(display.sample.download):"未验证"):"轻舟代理，未连接")
+        // 菜单栏只保留固定尺寸图标，避免实时速率更新挤动其他菜单项。
+        Image(systemName:connected ? "paperplane.fill":"paperplane")
+            .frame(width:18,height:18)
+            .accessibilityLabel(connected ? "轻舟代理，已连接":"轻舟代理，未连接")
     }
-}
-struct OfficeMenuRateLine:View {
-    @ObservedObject var display:OfficeMenuTrafficDisplay
-    let available:Bool
-    var body:some View {Text("↑ "+(available ? formatRate(display.sample.upload):"不可用")+"  ↓ "+(available ? formatRate(display.sample.download):"不可用")).monospacedDigit()}
 }
 struct OfficeRateLine:View {
     @ObservedObject var display:OfficeTrafficDisplay

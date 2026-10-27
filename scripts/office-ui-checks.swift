@@ -223,8 +223,8 @@ private final class OfficeControlProtocol:URLProtocol {
         model.connection = .connected;model.busy=false;model.startupStage=nil
         try await capture("office-sidebar-connected")
         model.trafficDisplay.menu.receive(upload:1048576,download:2097152,now:Date())
-        host.rootView=AnyView(OfficeMenuBarLabel(display:model.trafficDisplay.menu,connected:true,available:true).padding(20))
-        try await capture("office-menu-traffic")
+        host.rootView=AnyView(OfficeMenuBarLabel(connected:true).padding(20))
+        try await capture("office-menu-icon")
         host.rootView=AnyView(DeveloperProxyAssistantView(port:7890,configuredDomains:["internal.example"],cidrs:["10.0.0.0/8"]))
         try await capture("office-developer-tools")
         host.rootView=AnyView(ProfilesView(model:model).padding(20));try await capture("office-profiles")

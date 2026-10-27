@@ -51,9 +51,6 @@ import QingzhouKit
                     Button("全部目标与诊断") {model.office.diagnosticRequested=true}
                 }.disabled(model.locked)
             }
-            if model.connection == .connected {
-                OfficeMenuRateLine(display:model.trafficDisplay.menu,available:model.monitor.traffic == .available && !model.monitorPaused && !model.networkReconnecting)
-            }
             Button(model.connection == .connected ? "断开" : model.connection == .connecting ? "取消连接" : "连接") {
                 Task {
                     if model.connection == .connected || model.connection == .connecting { await model.disconnect() }
@@ -90,7 +87,7 @@ import QingzhouKit
             }
             Button("退出轻舟代理") { NSApplication.shared.terminate(nil) }
         } label: {
-            OfficeMenuBarLabel(display:model.trafficDisplay.menu,connected:model.connection == .connected,available:model.monitor.traffic == .available && !model.monitorPaused && !model.networkReconnecting)
+            OfficeMenuBarLabel(connected:model.connection == .connected)
         }
     }
     @ViewBuilder private var advancedMenuActions: some View {
