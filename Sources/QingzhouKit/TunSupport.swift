@@ -3,6 +3,8 @@ import Darwin
 import SystemConfiguration
 
 public struct TunRequest:Codable,Sendable {
+    public var proxyExceptions:[String]?
+    public var proxyProtectedDomains:[String]?
     public var deferToNetworkResume:Bool?
     public var progressUpdates:Bool?
     public var preserveExternal:Bool?
@@ -17,6 +19,7 @@ public struct TunRequest:Codable,Sendable {
     public init(operation:String,state:AppState?=nil,credentials:[String:String]?=nil,control:CoreControlContext?=nil,verifyNetwork:Bool=false,httpCompatibilityPort:Int?=nil,systemProxyPort:Int?=nil,preserveExternal:Bool=false){self.preserveExternal=preserveExternal;self.systemProxyPort=systemProxyPort;self.httpCompatibilityPort=httpCompatibilityPort;self.verifyNetwork=verifyNetwork;self.operation=operation;self.state=state;self.credentials=credentials;self.control=control}
 }
 public struct TunReply: Codable, Sendable {
+    public var supportsManagedSystemProxy:Bool?
     public var wakeRecoveryReason:WakeRecoveryReason?
     public var supportsTrustedCorporateDNS:Bool?
     public var supportsWakeRecovery:Bool?

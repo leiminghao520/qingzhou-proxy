@@ -23,7 +23,7 @@ final class Service {
     var bypassServicesRead:()->[BypassNetworkService] = BypassNetworkService.read
     var pinnedMonitor:DispatchSourceTimer?
     var pinnedPaths:[ProtectedRoute]=[]
-    var helperIsRunning:Bool {process?.isRunning==true || (journal?.pinnedOnly==true && activeRequest != nil)}
+    var helperIsRunning:Bool {process?.isRunning==true || (journal?.proxyOnly==true && owner != nil) || (journal?.pinnedOnly==true && activeRequest != nil)}
     var capturePlan:CapturePlan?
     var dynamicRules:DynamicCaptureRules?
     var changeWindow=CaptureChangeWindow()
@@ -89,6 +89,13 @@ final class Service {
         var token=[UInt32](repeating:0,count:8);var size=socklen_t(32);guard getsockopt(fd,0,0x006,&token,&size)==0,size==32,token[1]==manifest.uid else{throw ProxyError("客户端身份不允许")}
         let audit=token.withUnsafeBytes{Data($0)};var guest:SecCode?;let attrs=[kSecGuestAttributeAudit as String:audit] as CFDictionary
         guard SecCodeCopyGuestWithAttributes(nil,attrs,SecCSFlags(),&guest)==errSecSuccess,let guest,SecCodeCheckValidity(guest,SecCSFlags(),nil)==errSecSuccess else{throw ProxyError("客户端代码签名无效")}
+        // 仅信任管理员安装时固定的完整签名要求；临时签名仍按原始哈希逐包授权。
+        if let text=manifest.clientRequirement {
+            var requirement:SecRequirement?
+            guard SecRequirementCreateWithString(text as CFString,SecCSFlags(),&requirement)==errSecSuccess,let requirement,
+                  SecCodeCheckValidity(guest,SecCSFlags(),requirement)==errSecSuccess else{throw ProxyError("客户端不符合已批准的签名身份")}
+            return
+        }
         var staticCode:SecStaticCode?;guard SecCodeCopyStaticCode(guest,SecCSFlags(),&staticCode)==errSecSuccess,let staticCode else{throw ProxyError("客户端代码身份无法读取")};var information:CFDictionary?;guard SecCodeCopySigningInformation(staticCode,SecCSFlags(rawValue:kSecCSSigningInformation),&information)==errSecSuccess,let info=information as? [String:Any],let cdhash=info[kSecCodeInfoUnique as String] as? Data,cdhash.map({String(format:"%02x",$0)}).joined()==manifest.clientHash else{throw ProxyError("客户端代码身份已变化，请重新批准更新")}
     }
     func save() throws {guard let journal else{return};try measured("routeJournalSave") {try SecureFile.write(JSONEncoder().encode(journal),to:root.appendingPathComponent("recovery.json"),durable:true)}}
@@ -99,6 +106,7 @@ final class Service {
     }
     func prefix(_ info:String)->String? {NetworkInspection.routePrefix(destination:field("destination",info),mask:field("mask",info),host:info.contains("HOST"))}
     func stop(preserveExternal:Bool=false) throws {
+        if journal?.proxyOnly==true {try stopManagedSystemProxy(preserveExternal:preserveExternal);return}
         let previousPhase=phase
         phase="recovery"
         defer{phase=previousPhase}
@@ -393,7 +401,7 @@ return};var issues:[String]=[]
         do {
             var reply=try handleOperation(request,fd:fd)
             reply.tunnelInterface=journal?.interface
-            reply.supportsTrustedCorporateDNS=true;reply.supportsWakeRecovery=true;reply.supportsExternalRecovery=true;reply.recoveryPending=journal != nil
+            reply.supportsManagedSystemProxy=true;reply.supportsTrustedCorporateDNS=true;reply.supportsWakeRecovery=true;reply.supportsExternalRecovery=true;reply.recoveryPending=journal != nil
             if request.operation=="status",request.verifyNetwork==true {reply.safeToQuit=verifyReleasedForQuit()}
             timing.finish()
             reply.corporateDNSDiagnostics=dnsForwarder?.diagnosticResults
@@ -403,17 +411,21 @@ return};var issues:[String]=[]
             timing.finish(succeeded:false)
             var reply=TunReply(ok:false,message:"TUN 阶段 "+phase+"："+Redactor.redact(error.localizedDescription),coreDiagnostics:["prepare","activate"].contains(request.operation) ? coreDiagnostics.recent:nil,running:helperIsRunning,phase:phase,networkNotReady:error is NetworkEnvironmentNotReady,stageTimings:timing.samples+(routeMetrics?.samples ?? []))
             reply.tunnelInterface=journal?.interface
-            reply.supportsTrustedCorporateDNS=true;reply.supportsWakeRecovery=true;reply.supportsExternalRecovery=true;reply.recoveryPending=journal != nil
+            reply.supportsManagedSystemProxy=true;reply.supportsTrustedCorporateDNS=true;reply.supportsWakeRecovery=true;reply.supportsExternalRecovery=true;reply.recoveryPending=journal != nil
             return reply
         }
     }
     private func handleOperation(_ request:TunRequest,fd:Int32) throws -> TunReply {
         guard request.preserveExternal != true || request.operation=="recover" else{throw ProxyError("保留外部网络仅用于用户恢复操作")}
         switch request.operation {case "status":
+            if journal?.proxyOnly==true {
+                return TunReply(ok:true,message:"系统代理授权服务已就绪",running:helperIsRunning,proxyVerified:verifyProxy(),phase:phase)
+            }
             if request.verifyNetwork==true,let record=journal,process?.isRunning==true {
                 return try wakeNetworkReply(record:record,sample:routeSample())
             }
             return TunReply(ok:true,message:networkStatus+(journal != nil && process==nil ? " · 存在待恢复记录":""),coreDiagnostics:process?.isRunning==true ? coreDiagnostics.recent:nil,running:helperIsRunning,protectionSummary:networkSummary,phase:phase)
+        case "systemProxy":return try startManagedSystemProxy(request,fd:fd)
         case "pinBypasses":
             guard request.protocolVersion==5,let state=request.state,state.captureMode == .systemProxy else {throw ProxyError("指定出口辅助协议或模式无效，请更新辅助服务")}
             do {try startPinnedBypasses(request,fd:fd)}catch{let original=error;try stop();throw original}

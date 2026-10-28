@@ -125,6 +125,7 @@ extension AppModel {
                     if checks.contains(where:{$0==nil}) {return .inconclusive(.unverified)}
                     if !wakeNetworkReady() {return .failed(.networkNotReady)}
                 } else if !status.running {return .stop(.configuration)}
+                if state.captureMode == .systemProxy,status.supportsManagedSystemProxy==true,status.proxyVerified != true {return .stop(.ownershipConflict)}
             }catch is HelperRequestBusy {return .helperRecovering}
             catch{return .inconclusive(.unverified)}
         } else {

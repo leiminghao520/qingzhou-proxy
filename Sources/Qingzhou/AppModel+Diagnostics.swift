@@ -6,6 +6,7 @@ extension AppModel {
         timeline.record(NetworkEvent(sessionID:eventSessionID,profileID:profileID ?? currentProfileID,category:category,outcome:outcome,reason:reason,phase:phase,recoveryID:recoveryID ?? wakeIntent?.id,originalSessionID:originalSessionID ?? wakeIntent?.session,diagnosticID:diagnosticID,historyTransactionID:historyTransactionID ?? activeHistoryTransactionID,time:dependencies.now()))
     }
     func invalidateDiagnostic() {
+        cancelThroughput(invalidate:true)
         diagnosticGeneration=UUID();diagnosticTask?.cancel();diagnosticTask=nil;diagnosing=false
         if diagnosticSession != nil {diagnosticSession=nil;diagnosticRows=[]}
     }

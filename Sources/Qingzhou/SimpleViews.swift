@@ -69,112 +69,102 @@ struct SimpleConnectionView: View {
     var onLines: () -> Void
     var onSubscriptions: () -> Void
     var onDiagnose: () -> Void
+    var onEdit: (Node) -> Void = { _ in }
+    var onProfessional: () -> Void = {}
 
+    private var needsImport: Bool { model.state.nodes.isEmpty && model.state.mode != .direct }
+    private var needsSelection: Bool {
+        model.state.mode != .direct && (model.state.activePolicy.map { !PolicyValidator.exists($0, in: model.state) } ?? true)
+    }
     private var status: String {
-        if model.wakeRecovery.active || model.wakeRecoveryStatus.phase == .manual {return model.wakeRecoveryStatus.label}
+        if model.selectionNetworkUncertain { return "代理运行中 · 网络状态待确认" }
         if model.recovering { return "正在恢复网络" }
         if model.stopRequested { return "等待安全断开" }
-        if model.networkReconnecting { return "网络恢复中，正在自动重连" }
-        if model.networkRechecking { return "网络变化，正在重新检查" }
+        if model.wakeRecovery.active || model.wakeRecoveryStatus.phase == .manual { return model.wakeRecoveryStatus.label }
+        if model.networkRechecking { return "网络变化 · 正在检查" }
         return model.connection == .connected ? "代理已连接" : model.connection.rawValue
     }
-    private var transitioning: Bool {
-        model.wakeRecovery.active || model.recovering || model.stopRequested || model.networkRechecking || model.connection == .connecting || model.connection == .disconnecting
-    }
-    private var needsSelection: Bool {
-        guard model.state.mode != .direct else { return false }
-        guard let policy = model.state.activePolicy else { return true }
-        return !PolicyValidator.exists(policy, in: model.state)
-    }
-    private var needsImport: Bool { model.state.nodes.isEmpty && model.state.mode != .direct }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                Text("连接").font(.largeTitle.bold())
-                if model.recoveryPending {
-                    SimpleCard {
-                        Label("网络设置尚未恢复", systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(Theme.amberAccent)
-                        Text("请先恢复原网络设置，再开始新的连接。").font(.callout)
-                        Button("恢复网络") { Task { await model.recover() } }
-                            .disabled(model.loadingFailed || model.recovering)
-                    }
-                }
-                SimpleCard {
-                    HStack(alignment:.center,spacing:12) {
-                        ZStack {
-                            if transitioning {ProgressView().controlSize(.regular)}
-                            else {Image(systemName:model.connection == .connected ? "paperplane.fill":"power").font(.system(size:22,weight:.medium)).foregroundStyle(Theme.accentBlue)}
-                        }.frame(width:44,height:44).liquidControl(in:Circle(),tint:Theme.accentBlue.opacity(0.1),interactive:false).accessibilityHidden(true)
-                        VStack(alignment:.leading,spacing:4) {
-                            Text(status).font(.title3.bold()).fixedSize(horizontal:false,vertical:true)
-                            if model.connection == .connecting,let stage=model.startupStage {ConnectionProgressView(stage:stage,startedAt:model.startupStartedAt)}
-                            if needsImport && model.connection != .connected {Text("添加订阅或节点，开始使用轻舟。").font(.caption).foregroundStyle(.secondary)}
-                            else if needsSelection && model.connection != .connected {Text("选择一条线路后即可连接。").font(.caption).foregroundStyle(.secondary)}
-                        }
-                        Spacer(minLength:8)
-                        if needsImport && model.connection != .connected {
-                            Button("添加订阅或节点",action:onImport).liquidAction(prominent:true).disabled(model.locked)
-                        } else if needsSelection && model.connection != .connected {
-                            Button("选择线路",action:onLines).liquidAction(prominent:true).disabled(model.locked)
-                        } else {
-                            Button {
-                                Task {if model.connection == .connected || model.connection == .connecting {await model.disconnect()}else{await model.connect()}}
-                            } label: {
-                                Text(model.connection == .connected ? "断开连接":model.connection == .connecting ? "取消连接":"连接").fontWeight(.semibold)
-                            }.liquidAction(prominent:true,tint:model.connection == .connected ? Theme.dangerRed:Theme.accentBlue)
-                            .disabled(model.stopDisabled || (model.recoveryPending && model.connection != .connected))
-                            .accessibilityIdentifier("primaryConnectionButton")
-                        }
-                    }
-                    Divider()
-                    HStack(alignment: .top) {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("当前线路").font(.caption).foregroundStyle(.secondary)
-                            Text(model.state.mode == .direct ? "直连" : model.selectedName)
-                                .font(.headline).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                            if model.connection == .connected {
-                                Text("实际使用：" + model.actualName).font(.caption).foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                        }
-                        Spacer(minLength: 12)
-                        Button("更换", action: onLines).liquidAction().disabled(model.locked)
-                    }
-                    if model.connection == .connected {OfficeRateLine(display:model.trafficDisplay,available:model.monitor.traffic == .available && !model.monitorPaused).font(.caption).foregroundStyle(.secondary)}
-                    Text("配置："+(model.profiles.first{$0.id==model.currentProfileID}?.name ?? "默认配置")+" · "+model.state.captureMode.label).font(.caption).foregroundStyle(.secondary)
-                }
-                if model.state.subscriptions.contains(where: \.pendingReview) {
-                    SimpleCard {
-                        Label("订阅更新需要确认", systemImage: "exclamationmark.bubble")
-                        Text("部分线路或配置有重要变化，请预览后决定是否更新。")
-                            .font(.callout).foregroundStyle(.secondary)
-                        Button("查看订阅", action: onSubscriptions)
-                    }
-                }
-                DisclosureGroup("连接选项") {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Picker("代理运行模式", selection: Binding(get: { model.state.mode }, set: { mode in
-                            Task { await model.setMode(mode) }
-                        })) {
-                            ForEach(ProxyMode.allCases, id: \.self) { mode in Text(mode.label).tag(mode) }
-                        }.disabled(model.locked)
-                        Text("接管方式：" + model.state.captureMode.label).font(.caption).foregroundStyle(.secondary)
-                        Text("这里调整实际代理行为；简洁与专业仅切换界面。")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }.padding(.top, 12)
-                }
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("连接").font(.title2.bold())
+                Spacer()
+                Picker("代理模式", selection: Binding(get: { model.state.mode }, set: { value in Task { await model.setMode(value) } })) {
+                    ForEach(ProxyMode.allCases, id: \.self) { Text($0.label).tag($0) }
+                }.labelsHidden().frame(width: 140).disabled(model.locked)
+            }
+            if model.recoveryPending {
                 HStack {
-                    Button("网络诊断", action: onDiagnose)
+                    Label("网络设置尚未恢复", systemImage: "exclamationmark.triangle.fill").foregroundStyle(Theme.amberAccent)
                     Spacer()
-                    if !model.recoveryPending {
-                        Button("恢复网络") { Task { await model.recover() } }
-                            .disabled(model.loadingFailed || model.recovering)
+                    Button("恢复网络") { Task { await model.recover() } }.disabled(model.loadingFailed || model.recovering)
+                }
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    Image(systemName: model.connection == .connected ? "paperplane.fill" : "power")
+                        .font(.title2).foregroundStyle(Theme.accentBlue).frame(width: 32)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(status).font(.headline)
+                        if model.connection == .connected {
+                            Text("最近连通性：" + (model.selectionNetworkUncertain ? "待确认" : model.linkStatusLabel))
+                                .font(.caption).foregroundStyle(model.selectionNetworkUncertain ? Theme.amberAccent : Color.secondary)
+                        }
+                        if model.connection == .connecting, let stage = model.startupStage {
+                            ConnectionProgressView(stage: stage, startedAt: model.startupStartedAt)
+                        }
                     }
-                }.buttonStyle(.borderless)
-            }.padding(2)
-        }
+                    Spacer(minLength: 8)
+                    if needsImport && model.connection != .connected {
+                        Button("添加订阅或节点", action: onImport).liquidAction(prominent: true).disabled(model.locked)
+                    } else {
+                        Button {
+                            Task { if model.connection == .connected || model.connection == .connecting { await model.disconnect() } else { await model.connect() } }
+                        } label: {
+                            Text(model.connection == .connected ? "断开连接" : model.connection == .connecting ? "取消连接" : "连接")
+                        }.liquidAction(prominent: true, tint: model.connection == .connected ? Theme.dangerRed : Theme.accentBlue)
+                            .disabled(model.stopDisabled || (model.connection != .connected && model.connection != .connecting && (needsSelection || model.recoveryPending)))
+                            .accessibilityIdentifier("primaryConnectionButton")
+                    }
+                }
+                Divider()
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(model.state.mode == .direct ? "当前：直连" : "当前：" + model.selectedName)
+                            .font(.callout.weight(.medium)).lineLimit(2).help(model.selectedName)
+                        if model.connection == .connected && model.state.mode != .direct {
+                            Text("实际出口：" + model.actualName).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        } else if needsSelection { Text("在下方选择线路后连接").font(.caption).foregroundStyle(.secondary) }
+                    }
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 3) {
+                        Text(model.state.captureMode.label).font(.caption).foregroundStyle(.secondary)
+                        if model.connection == .connected {
+                            OfficeRateLine(display: model.trafficDisplay, available: model.monitor.traffic == .available && !model.monitorPaused).font(.caption)
+                        }
+                    }
+                }
+            }.padding(14).liquidContentSurface()
+            if model.state.subscriptions.contains(where: \.pendingReview) {
+                HStack {
+                    Label("订阅更新需要确认", systemImage: "exclamationmark.bubble").font(.caption)
+                    Spacer()
+                    Button("查看订阅", action: onSubscriptions)
+                }
+            }
+            DailyLinesView(model: model, onImport: onImport, onEdit: onEdit, onProfessional: onProfessional)
+                .frame(maxHeight: .infinity)
+            HStack {
+                Button("网络诊断", action: onDiagnose)
+                Spacer()
+                Text("配置：" + (model.profiles.first { $0.id == model.currentProfileID }?.name ?? "默认配置"))
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                if !model.recoveryPending {
+                    Button("恢复网络") { Task { await model.recover() } }.disabled(model.loadingFailed || model.recovering)
+                }
+            }.buttonStyle(.borderless)
+        }.padding(2)
     }
 }
 
@@ -183,103 +173,8 @@ struct SimpleLinesView: View {
     var onImport: () -> Void
     var onEdit: (Node) -> Void
     var onProfessional: () -> Void
-    @StateObject private var page=NodeListViewModel()
-    @State private var detail: Node?
-    @State private var pendingEdit: Node?
-
     var body: some View {
-        let nodes=page.nodes(state:model.state,invalidatedAt:model.latencyInvalidatedAt,now:Date(),profile:model.currentProfileID,simple:true)
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text("线路").font(.largeTitle.bold())
-                Spacer()
-                Button("添加", action: onImport).disabled(model.locked)
-            }
-            if case .group = model.state.activePolicy {
-                SimpleCard {
-                    Text("当前策略组：" + model.selectedName).font(.headline)
-                    Button("在专业模式中管理策略组", action: onProfessional)
-                }
-            }
-            HStack {
-                TextField("搜索线路或备注", text: $page.query).textFieldStyle(.roundedBorder)
-                Toggle("收藏", isOn: $page.favoriteOnly).toggleStyle(.button)
-            }
-            Button { Task { await model.selectPolicy(.automatic) } } label: {
-                HStack {
-                    Label("自动选择", systemImage: "bolt.badge.automatic")
-                    Spacer()
-                    if model.state.activePolicy == .automatic { Image(systemName: "checkmark.circle.fill") }
-                }.padding(12).contentShape(Rectangle())
-            }
-            .buttonStyle(.plain).liquidControl(in: RoundedRectangle(cornerRadius: 14), tint: Theme.accentBlue.opacity(0.08))
-            .disabled(model.locked || model.state.nodes.isEmpty)
-            .accessibilityLabel("自动选择线路")
-            if model.state.nodes.isEmpty {
-                ContentUnavailableView {
-                    Label("还没有线路", systemImage: "network")
-                } description: { Text("添加订阅或节点后，线路会出现在这里。") }
-                actions: { Button("添加订阅或节点", action: onImport).disabled(model.locked) }
-            } else if nodes.isEmpty {
-                ContentUnavailableView {
-                    Label("没有匹配的线路",systemImage:"magnifyingglass")
-                } description: {Text("试试其他关键词，或关闭收藏筛选。")}
-                actions: {Button("清除筛选") {page.clearFilters()}}
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 8) {
-                        ForEach(nodes) { node in line(node) }
-                    }
-                }
-            }
-            HStack {
-                Text("延迟来自 HTTPS 检测，并非下载速度。").font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Button(model.measuring ? "取消检测" : "检测延迟") {
-                    if model.measuring { model.cancelMeasurement() } else { model.measure() }
-                }.disabled(model.busy || model.state.nodes.isEmpty)
-            }
-            if model.measuring { Text(model.measurementProgress).font(.caption).foregroundStyle(.secondary) }
-        }
-        .sheet(item: $detail, onDismiss: {
-            if let node = pendingEdit { pendingEdit = nil; onEdit(node) }
-        }) { node in
-            VStack(alignment: .leading, spacing: 20) {
-                Text(node.name).font(.title2.bold()).textSelection(.enabled)
-                LabeledContent("协议", value: node.kind.rawValue.uppercased())
-                LabeledContent("服务器", value: node.server)
-                LabeledContent("端口", value: String(node.port))
-                if let note = model.state.notes[node.id.uuidString], !note.isEmpty { Text(note) }
-                HStack {
-                    Button("编辑线路") { pendingEdit = node; detail = nil }.disabled(model.locked)
-                    Spacer()
-                    Button("完成") { detail = nil }.keyboardShortcut(.cancelAction)
-                }
-            }.padding(24).frame(width: 480)
-        }
-    }
-    private func line(_ node: Node) -> some View {
-        HStack(spacing: 10) {
-            Button { Task { await model.select(node.id) } } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: model.state.activePolicy == .node(node.id) ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(model.state.activePolicy == .node(node.id) ? Theme.accentBlue : Color.secondary)
-                    Text(node.name).font(.body.weight(.medium)).lineLimit(2).help(node.name)
-                    Spacer(minLength: 8)
-                    LatencyBadge(delayText: latency(node, model))
-                }.contentShape(Rectangle())
-            }.buttonStyle(.plain).disabled(model.locked)
-                .accessibilityLabel("选择线路：" + node.name)
-                .accessibilityValue(model.state.activePolicy == .node(node.id) ? "已选中" : "未选中")
-            Button { model.toggleFavorite(node.id) } label: {
-                Image(systemName: model.state.favorites.contains(node.id) ? "star.fill" : "star")
-                    .foregroundStyle(model.state.favorites.contains(node.id) ? Theme.amberAccent : Color.secondary)
-            }.buttonStyle(.borderless).disabled(model.locked)
-                .accessibilityLabel((model.state.favorites.contains(node.id) ? "取消收藏：" : "收藏：") + node.name)
-            Button { detail = node } label: { Image(systemName: "info.circle") }
-                .buttonStyle(.borderless).accessibilityLabel("线路详情：" + node.name)
-        }
-        .padding(14).liquidContentSurface(cornerRadius: 14)
+        DailyLinesView(model: model, onImport: onImport, onEdit: onEdit, onProfessional: onProfessional)
     }
 }
 

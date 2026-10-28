@@ -19,6 +19,22 @@ def file_hash(path):
     return hasher.hexdigest()
 
 
+def deployment_paths():
+    # 使用文件清单保存双协议入口与授权恢复所需的配置，私钥只进入加密归档。
+    paths = ['/etc/hy2-admin.env','/etc/hysteria/config.yaml','/etc/nginx/nginx.conf',
+        '/etc/haproxy/haproxy.cfg','/etc/qz-vless/config.json','/etc/hy2-admin-vless.json',
+        '/usr/local/sbin/hy2-admin-helper','/etc/sudoers.d/hy2-admin']
+    units = ['hy2-admin.service','hy2-auth.service','hy2-stats.service','hy2-stats.timer',
+        'hy2-client-cloud.service','hy2-client-cloud.timer','hy2-client-backup.service','hy2-client-backup.timer',
+        'qz-vless.service','qz-vless-sync.service','qz-vless-sync.timer']
+    paths += ['/etc/systemd/system/' + unit for unit in units]
+    for folder in ['/etc/nginx/sites-enabled','/etc/nginx/conf.d','/etc/nginx/snippets',
+                   '/etc/systemd/system/hy2-admin.service.d','/etc/systemd/system/hy2-stats.service.d',
+                   '/etc/systemd/system/qz-vless.service.d']:
+        paths += [str(path) for path in sorted(Path(folder).glob('*')) if path.is_file()]
+    return tuple(Path(path) for path in dict.fromkeys(paths))
+
+
 def create_backup(database, source, output, age='/usr/bin/age', extra=(), work_dir="/run/qingzhou-backup"):
     with sqlite3.connect('file:'+str(database)+'?mode=ro',uri=True) as conn:
         row=conn.execute("SELECT value FROM settings WHERE key='backup_recipient'").fetchone()
@@ -83,12 +99,7 @@ if __name__=='__main__':
     with open('/run/qingzhou-backup/job.lock','w') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         result=create_backup(DATABASE,Path('/opt/hy2-admin'),Path('/var/backups/qingzhou-client'),
-            extra=tuple(Path(p) for p in ['/etc/hy2-admin.env','/etc/hysteria/config.yaml',
-                '/etc/nginx/sites-available/hy2-admin','/etc/nginx/sites-available/hy2-admin.conf',
-                '/usr/local/sbin/hy2-admin-helper','/etc/sudoers.d/hy2-admin']+
-                ['/etc/systemd/system/'+u for u in ['hy2-admin.service','hy2-auth.service','hy2-stats.service','hy2-stats.timer',
-                    'hy2-client-cloud.service','hy2-client-cloud.timer','hy2-client-backup.service','hy2-client-backup.timer']]+
-                ['/etc/systemd/system/'+u+'.d/qingzhou-client.conf' for u in ['hy2-admin.service','hy2-stats.service']]))
+            extra=deployment_paths())
         if result:
             import pwd
             uid=pwd.getpwnam('hy2admin').pw_gid

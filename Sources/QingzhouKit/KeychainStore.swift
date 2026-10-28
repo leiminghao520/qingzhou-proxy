@@ -17,42 +17,52 @@ public enum KeychainFailure {
 public final class KeychainStore:CredentialStore {
     public typealias Read=([String:Any])->(OSStatus,Data?)
     private let service:String
-    private let context=LAContext()
-    private var cache:[String:String]=[:]
+    private final class Session {
+        let lock=NSRecursiveLock()
+        let context=LAContext()
+        var cache:[String:[String:String]]=[:]
+        init(){context.localizedReason="轻舟需要读取已保存的节点密码以连接代理；授权后本次运行自动复用"}
+    }
+    // 原生存储共用进程内授权会话；注入的测试或替代实现保持隔离。
+    private static let nativeSession=Session()
+    private let session:Session
     private let read:Read
     private let update:([String:Any],[String:Any])->OSStatus
     private let add:([String:Any])->OSStatus
     private let delete:([String:Any])->OSStatus
     public init(service:String="cn.qingzhou.proxy.credentials",read:Read?=nil,update:(([String:Any],[String:Any])->OSStatus)?=nil,add:(([String:Any])->OSStatus)?=nil,delete:(([String:Any])->OSStatus)?=nil) {
         self.service=service
+        self.session = read==nil && update==nil && add==nil && delete==nil ? Self.nativeSession : Session()
         self.read=read ?? {query in var result:CFTypeRef?;let status=SecItemCopyMatching(query as CFDictionary,&result);return (status,result as? Data)}
         self.update=update ?? {SecItemUpdate($0 as CFDictionary,$1 as CFDictionary)}
         self.add=add ?? {SecItemAdd($0 as CFDictionary,nil)}
         self.delete=delete ?? {SecItemDelete($0 as CFDictionary)}
-        context.localizedReason="轻舟需要读取已保存的节点密码以连接代理；授权后本次运行自动复用"
     }
     private func query(_ ref:String)->[String:Any] {[kSecClass as String:kSecClassGenericPassword,kSecAttrService as String:service,kSecAttrAccount as String:ref]}
     public func get(_ ref:String) throws -> String {
+        session.lock.lock();defer{session.lock.unlock()}
         // 只缓存成功读取的凭据；取消或失败不会阻止用户下次重新触发系统授权。
-        if let value=cache[ref] {return value}
+        if let value=session.cache[service]?[ref] {return value}
         var q=query(ref);q[kSecReturnData as String]=true;q[kSecMatchLimit as String]=kSecMatchLimitOne
         q[kSecUseAuthenticationUI as String]=kSecUseAuthenticationUIAllow
-        q[kSecUseAuthenticationContext as String]=context
+        q[kSecUseAuthenticationContext as String]=session.context
         let (status,data)=read(q)
         guard status==errSecSuccess else{throw ProxyError(KeychainFailure.message(status,operation:"读取"))}
         guard let data,let value=String(data:data,encoding:.utf8) else{throw ProxyError("保存的凭据格式损坏，请重新导入对应节点或订阅")}
-        cache[ref]=value;return value
+        session.cache[service,default:[:]][ref]=value;return value
     }
     public func set(_ value:String,for ref:String) throws {
-        var q=query(ref);q[kSecUseAuthenticationUI as String]=kSecUseAuthenticationUIAllow;q[kSecUseAuthenticationContext as String]=context
+        session.lock.lock();defer{session.lock.unlock()}
+        var q=query(ref);q[kSecUseAuthenticationUI as String]=kSecUseAuthenticationUIAllow;q[kSecUseAuthenticationContext as String]=session.context
         let data=Data(value.utf8);let status=update(q,[kSecValueData as String:data])
         if status==errSecItemNotFound {
             var item=query(ref);item[kSecValueData as String]=data;item[kSecAttrAccessible as String]=kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
             let added=add(item);guard added==errSecSuccess else{throw ProxyError(KeychainFailure.message(added,operation:"保存"))}
         }else if status != errSecSuccess {throw ProxyError(KeychainFailure.message(status,operation:"更新"))}
-        cache[ref]=value
+        session.cache[service,default:[:]][ref]=value
     }
     public func remove(_ ref:String) throws {
-        let status=delete(query(ref));guard status==errSecSuccess || status==errSecItemNotFound else{throw ProxyError(KeychainFailure.message(status,operation:"删除"))};cache.removeValue(forKey:ref)
+        session.lock.lock();defer{session.lock.unlock()}
+        let status=delete(query(ref));guard status==errSecSuccess || status==errSecItemNotFound else{throw ProxyError(KeychainFailure.message(status,operation:"删除"))};session.cache[service]?.removeValue(forKey:ref)
     }
 }

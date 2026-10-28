@@ -1,5 +1,17 @@
 # HY2 Console · 设备订阅管理
 
+## TCP 备用节点订阅（2026-10-28）
+
+设置 `HY2_VLESS_PUBLIC_CONFIG` 指向 root 所有、hy2admin 可读的公开参数 JSON，字段为 `server`、`port`、`server_name`、`public_key`、`short_id`。不要放入服务器私钥或共享设备 UUID。未设置时保持原来的单 HY2 输出。
+
+六种原订阅格式均追加 VLESS + TCP + REALITY + Vision，地址和令牌保持不变。轻舟在订阅更新预览中确认后同步节点，完整订阅的规则模板与 revision 保持原语义。sing-box 完整配置新增 selector，默认仍使用 HY2；Shadowrocket 完整配置保留原规则并扩展 PROXY 选择组。
+
+`vless.py` 使用设备密码与 auth_id 派生稳定 UUID，密码轮换后 UUID 随之改变。`vless_sync.py` 由 root 运行，只读设备数据库；只允许启用用户下的启用设备。创建设备、启停设备或用户、轮换设备凭据后同步 TCP 授权列表；名称和备注修改不触发同步，有变化时重启 TCP 服务并断开旧连接。同步失败返回 503，数据库变更仍保留；读取、解密或重启失败会关闭 TCP 服务，避免旧授权继续有效。HY2 认证与连接不因此重启。
+
+root 桥接器新增唯一固定操作 `sync-vless`，sudoers 必须单独允许此精确命令；它通过独立 systemd 任务加载 `/etc/hy2-admin.env` 并运行同步模块。模块使用文件锁串行读取和更新，避免并发变更丢失。部署还应配置每 30 秒运行的补偿 timer，恢复同步异常；服务文件见 `deploy/qz-vless-sync.*`。
+
+新增节点流量目前不计入既有 HY2 的 `Subscription-Userinfo` 和设备 HY2 流量报表。客户端已下载的旧配置需要更新后才会获得轮换凭据。2026-10-28 最初单独发放的临时共享 TCP 链接已由设备专属凭据替代。
+
 轻舟 0.10.0 联动增量、隔离验证和部署边界见 [联动说明](../../docs/vps-client-integration.md)。下方 v3 记录是导入前的历史基线，不能当成本轮变更范围。
 
 Flask + Jinja + SQLite 的管理员专用后台。每台设备有独立凭据和私有订阅；代理认证运行在独立进程，日常用户与设备变更不重启 Hysteria。

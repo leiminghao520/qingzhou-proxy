@@ -1,0 +1,10 @@
+[Unit]
+Description=Recover device credential synchronization
+
+[Timer]
+OnBootSec=15s
+OnUnitInactiveSec=30s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

@@ -23,6 +23,13 @@ def main():
     if len(sys.argv) != 2: raise SystemExit("one operation required")
     op = sys.argv[1]
     if op == "status": result = status()
+    elif op == "sync-vless":
+        # 每次创建独立任务，避免并发设备变更被 systemctl start 合并遗漏。
+        result = run(['systemd-run', '--quiet', '--wait', '--collect',
+                      '--property=EnvironmentFile=/etc/hy2-admin.env',
+                      '/opt/hy2-admin/.venv/bin/python', '/opt/hy2-admin/vless_sync.py'])
+        if result.returncode: raise RuntimeError('TCP 设备凭据同步失败')
+        result = {'ok': True}
     elif op == "reload":
         n = run(["nginx", "-t"])
         if n.returncode: raise RuntimeError("nginx validation failed")

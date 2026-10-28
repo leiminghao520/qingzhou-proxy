@@ -99,14 +99,19 @@ public final class NodeStore {
             tx.nextCatalog=root;tx.historySource="历史恢复";return tx
         }catch {for ref in created {try? credentials.remove(ref)};throw error}
     }
-    public func prepareImport(_ candidates:[Candidate],subscription:Subscription?=nil,source:String?=nil,replacingID:UUID?=nil,profile:ImportPreview?=nil,scope:ImportScope = .nodes) throws -> StoreTransaction {
+    public func prepareImport(_ candidates:[Candidate],subscription:Subscription?=nil,source:String?=nil,replacingID:UUID?=nil,profile:ImportPreview?=nil,scope:ImportScope = .nodes,adoptingManual:Set<UUID>=[]) throws -> StoreTransaction {
         guard !candidates.isEmpty else {throw ProxyError("没有可导入节点")}
         var next=state,created:[String]=[],retired:[String]=[];var mapping:[UUID:UUID]=[:];var seen:[String:Candidate]=[:]
         let oldNodes=subscription.map{sub in state.nodes.filter{$0.subscriptionID==sub.id}} ?? replacingID.map{id in state.nodes.filter{$0.id==id}} ?? []
+        let suggestions=NodeSubscriptionSupport.matches(state:state,incoming:candidates.map(\.node))
+        let adopted=suggestions.filter{adoptingManual.contains($0.manual.id)}
+        guard adoptingManual.isSubset(of:Set(suggestions.map(\.id))),adoptingManual.isEmpty || subscription != nil else{throw ProxyError("手动节点迁移建议已变化，请重新预览")}
+        next.nodes.removeAll{adoptingManual.contains($0.id)}
         let matching=SubscriptionMatching(old:oldNodes,incoming:candidates.map(\.node))
         if let sub=subscription {next.nodes.removeAll{$0.subscriptionID==sub.id}}
         if let id=replacingID {next.nodes.removeAll{$0.id==id}}
-        retired=oldNodes.flatMap{[$0.credentialRef,$0.credentialRef+".obfs"]}
+        retired=(oldNodes+adopted.map(\.manual)).flatMap{[$0.credentialRef,$0.credentialRef+".obfs"]}
+        var changedIDs:[UUID:UUID]=[:]
         do {
             for candidate in candidates {
                 let fingerprint=candidate.node.fingerprint
@@ -117,14 +122,29 @@ public final class NodeStore {
                 seen[fingerprint]=candidate
                 if subscription==nil && replacingID==nil,let existing=next.nodes.first(where:{$0.subscriptionID==nil && $0.fingerprint==fingerprint}),(try? credentials.get(existing.credentialRef))==candidate.secret,(try? credentials.get(existing.credentialRef+".obfs"))==candidate.obfsSecret {mapping[candidate.node.id]=existing.id;continue}
                 var node=candidate.node
-                node.id=replacingID ?? oldNodes.first{$0.fingerprint==fingerprint}?.id ?? node.id
-                if let old=matching.previousByIncomingID[candidate.node.id] {
+                let manual=adopted.first{$0.incoming.id==candidate.node.id}?.manual
+                let previous=matching.previousByIncomingID[candidate.node.id]
+                node.id=replacingID ?? manual?.id ?? previous?.id ?? node.id
+                if let previous{changedIDs[previous.id]=node.id}
+                if let old=manual ?? previous {
                     if let note=state.notes[old.id.uuidString]{next.notes[node.id.uuidString]=note};if state.favorites.contains(old.id){next.favorites.insert(node.id)}
                     if let recent=state.recentUse[old.id.uuidString]{next.recentUse[node.id.uuidString]=recent}
                 }
-                mapping[candidate.node.id]=node.id;node.subscriptionID=subscription?.id;node.credentialRef=UUID().uuidString
-                created.append(node.credentialRef);try credentials.set(candidate.secret,for:node.credentialRef)
-                if let value=candidate.obfsSecret {created.append(node.credentialRef+".obfs");try credentials.set(value,for:node.credentialRef+".obfs")}
+                mapping[candidate.node.id]=node.id;node.subscriptionID=subscription?.id
+                // 凭据未变时复用原引用，避免每次订阅更新都写入和删除钥匙串项目。
+                let old=manual ?? previous
+                let reusable:Bool
+                if let old {
+                    let secret=try credentials.get(old.credentialRef)
+                    let obfs=old.parameters["obfs"]=="salamander" ? try credentials.get(old.credentialRef+".obfs") : nil
+                    reusable=secret==candidate.secret && obfs==candidate.obfsSecret
+                }else{reusable=false}
+                if reusable,let old {node.credentialRef=old.credentialRef}
+                else {
+                    node.credentialRef=UUID().uuidString
+                    created.append(node.credentialRef);try credentials.set(candidate.secret,for:node.credentialRef)
+                    if let value=candidate.obfsSecret {created.append(node.credentialRef+".obfs");try credentials.set(value,for:node.credentialRef+".obfs")}
+                }
                 next.nodes.append(node)
             }
             if var sub=subscription {
@@ -157,6 +177,12 @@ public final class NodeStore {
                 for var rule in profile.rules {rule.target=rule.target.map(remap);rule.subscriptionID=subscription?.id;next.rules.append(rule)}
                 if let final=profile.final {next.ruleFinal=remap(final)}
             }
+            // 保持原节点在选择器、策略组和规则中的引用，不因迁移而切到其他线路。
+            func remapExisting(_ ref:PolicyReference)->PolicyReference {if case .node(let id)=ref{return .node(changedIDs[id] ?? id)};return ref}
+            next.selectedID=next.selectedID.map{changedIDs[$0] ?? $0}
+            next.selectedPolicy=next.selectedPolicy.map(remapExisting);next.ruleFinal=next.ruleFinal.map(remapExisting)
+            for i in next.groups.indices{next.groups[i].members=next.groups[i].members.map(remapExisting);next.groups[i].selected=next.groups[i].selected.map(remapExisting)}
+            for i in next.rules.indices{next.rules[i].target=next.rules[i].target.map(remapExisting)}
             PolicyValidator.repair(&next)
             if state.nodes.isEmpty && state.activePolicy==nil {next.selectedID=next.nodes.first?.id;next.selectedPolicy=next.selectedID.map(PolicyReference.node)}
             try PolicyValidator.validate(next)

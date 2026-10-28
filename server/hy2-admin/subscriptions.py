@@ -5,6 +5,7 @@ import re
 from urllib.parse import quote
 
 import yaml
+from vless import uri as vless_uri
 
 
 def _hy2_uri(username, server, port, password, sni, label):
@@ -221,7 +222,44 @@ def _qingzhou_config(username, server, port, password, sni, label):
     }, ensure_ascii=False, separators=(",", ":")) + "\n"
 
 
-def render_subscription(kind, username, server, port, password, tls_sni=None, display_name=None):
+def render_subscription(kind, username, server, port, password, tls_sni=None, display_name=None, vless=None):
+    body = _render_subscription(kind, username, server, port, password, tls_sni, display_name)
+    if vless is None:
+        return body
+    if kind in ('hy2', 'shadowrocket'):
+        return body + vless_uri(vless) + '\n'
+    if kind == 'qingzhou':
+        config = json.loads(body)
+        config['nodes'].append(vless_uri(vless))
+        return json.dumps(config, ensure_ascii=False, separators=(',', ':')) + '\n'
+    if kind == 'mihomo':
+        config = yaml.safe_load(body)
+        config['proxies'].append({'name': vless['name'], 'type': 'vless', 'server': vless['server'],
+            'port': vless['port'], 'uuid': vless['uuid'], 'network': 'tcp', 'tls': True,
+            'flow': 'xtls-rprx-vision', 'servername': vless['server_name'], 'client-fingerprint': 'chrome',
+            'reality-opts': {'public-key': vless['public_key'], 'short-id': vless['short_id']}, 'udp': True})
+        config['proxy-groups'][0]['proxies'].insert(1, vless['name'])
+        return yaml.safe_dump(config, allow_unicode=True, sort_keys=False)
+    if kind == 'sing-box':
+        config = json.loads(body)
+        config['outbounds'][0]['tag'] = 'hy2'
+        config['outbounds'].insert(0, {'type': 'selector', 'tag': 'proxy', 'outbounds': ['hy2', 'vless-tcp'], 'default': 'hy2'})
+        config['outbounds'].append({'type': 'vless', 'tag': 'vless-tcp', 'server': vless['server'],
+            'server_port': vless['port'], 'uuid': vless['uuid'], 'flow': 'xtls-rprx-vision',
+            'tls': {'enabled': True, 'server_name': vless['server_name'],
+                'utls': {'enabled': True, 'fingerprint': 'chrome'},
+                'reality': {'enabled': True, 'public_key': vless['public_key'], 'short_id': vless['short_id']}}})
+        return json.dumps(config, ensure_ascii=False, indent=2) + '\n'
+    # Shadowrocket 完整配置复用原规则，仅扩展节点与选择组。
+    name = re.sub(r'[\r\n,=]+', '_', vless['name']).strip()
+    line = (f"{name} = vless, {vless['server']}, {vless['port']}, username={vless['uuid']}, "
+            f"tls=true, peer={vless['server_name']}, reality-pbk={vless['public_key']}, "
+            f"reality-sid={vless['short_id']}, flow=xtls-rprx-vision, udp=1")
+    body = body.replace('[Proxy]\n', '[Proxy]\n' + line + '\n', 1)
+    return re.sub(r'^(PROXY = select, .+)$', lambda match: match[1] + ', ' + name, body, count=1, flags=re.MULTILINE)
+
+
+def _render_subscription(kind, username, server, port, password, tls_sni=None, display_name=None):
     sni = tls_sni or server
     label = display_name or username
     auth = f"{username}:{password}"

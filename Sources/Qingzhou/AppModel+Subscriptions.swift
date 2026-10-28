@@ -15,13 +15,13 @@ extension AppModel {
             }else{guard let decoded=String(data:data,encoding:.utf8) else{throw ProxyError("文件必须为 UTF-8 或本地二维码图片")};text=decoded}
             pendingSubscription=nil;previewDiff=nil;preview=try ProfileImporter.parse(text)}catch{report(error)}
     }
-    func confirmImport(scope:ImportScope = .nodes) async {
+    func confirmImport(scope:ImportScope = .nodes,adoptingManual:Set<UUID>=[]) async {
         guard !locked,let preview,let store else{return};busy=true;defer{busy=false}
         do {
             var sub=pendingSubscription
             if sub==nil,let source=preview.source {sub=state.subscriptions.first{(try? credentials.get($0.sourceRef))==source} ?? Subscription(name:"订阅 \(state.subscriptions.count+1)")}
             let effectiveScope:ImportScope=preview.fullConfiguration != nil ? .profile:scope
-            let tx=try store.prepareImport(preview.candidates,subscription:sub,source:preview.source,profile:preview,scope:effectiveScope)
+            let tx=try store.prepareImport(preview.candidates,subscription:sub,source:preview.source,profile:preview,scope:effectiveScope,adoptingManual:adoptingManual)
             try await apply(tx,source:"订阅更新");self.preview=nil;pendingSubscription=nil;log("导入已完成")
         } catch {report(error)}
     }

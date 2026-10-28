@@ -99,7 +99,7 @@ extension AppModel {
     var telemetryHidden:Bool {dependencies.officeHiddenOverride?() ?? (NSApplication.shared.isHidden || NSApplication.shared.windows.filter{$0.canBecomeMain}.allSatisfy{!$0.isVisible || $0.isMiniaturized})}
     @discardableResult func publishPolicyInfo(_ info:[String:ProxyInfo])->Bool {
         let changed=CoreAPIClient.actualTag(proxyInfo) != CoreAPIClient.actualTag(info)
-        if changed {invalidateOfficeResults();if CoreAPIClient.actualTag(info)==verifiedSelectionTag {publishOfficeConnectivity()};recordEvent(.node,.changed,.nodeSelected)}
+        if changed {cancelThroughput(invalidate:true);invalidateOfficeResults();if CoreAPIClient.actualTag(info)==verifiedSelectionTag {publishOfficeConnectivity()};recordEvent(.node,.changed,.nodeSelected)}
         if proxyInfo != info {proxyInfo=info}
         return changed
     }

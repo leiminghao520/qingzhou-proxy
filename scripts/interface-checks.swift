@@ -168,6 +168,57 @@ struct InterfaceChecks {
         model.healthChecking = false
         model.connectivityResults = [.init("HTTPS 连通性", .passed, "测试状态")]
         try await capture("simple-connected-healthy")
+        if CommandLine.arguments.contains("--daily") {
+            window.setContentSize(NSSize(width: 820, height: 620))
+            model.latencyInvalidatedAt = Date().addingTimeInterval(-30)
+            model.state.latency[first.id.uuidString] = LatencyResult(milliseconds: 45)
+            model.state.latency[long.id.uuidString] = LatencyResult(milliseconds: nil)
+            model.state.favorites = [first.id]
+            model.state.nodes += (1...80).map { Node(name: "备用线路 · \($0)", kind: .trojan, server: "fixture.invalid", port: 443) }
+            model.state.recentUse[long.id.uuidString] = Date()
+            try await capture("daily-home-light")
+            try await capture("daily-home-dark", .darkAqua)
+            let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: "f", charactersIgnoringModifiers: "f", isARepeat: false, keyCode: 3)!
+            let handled = window.performKeyEquivalent(with: event)
+            await settle()
+            try check(handled && window.firstResponder is NSTextView, "Command-F 聚焦首页线路搜索")
+            window.makeFirstResponder(nil)
+            func allScrolls(_ view: NSView) -> [NSScrollView] {
+                (view as? NSScrollView).map { [$0] } ?? view.subviews.flatMap { allScrolls($0) }
+            }
+            if let scroll = allScrolls(host).max(by: { ($0.documentView?.bounds.height ?? 0) < ($1.documentView?.bounds.height ?? 0) }),
+               let document = scroll.documentView {
+                let offset = min(600, max(0, document.bounds.height - scroll.contentView.bounds.height))
+                scroll.contentView.scroll(to: NSPoint(x: 0, y: offset)); scroll.reflectScrolledClipView(scroll.contentView)
+                await settle()
+                try check(scroll.contentView.bounds.origin.y > 0, "大量节点列表可独立滚动")
+                let before = scroll.contentView.bounds.origin.y
+                model.downloadRate = 256
+                await settle()
+                try check(abs(scroll.contentView.bounds.origin.y - before) < 2, "实时流量刷新保留线路滚动位置")
+                scroll.contentView.scroll(to: .zero); scroll.reflectScrolledClipView(scroll.contentView)
+            } else { throw ProxyError("线路滚动容器不可用") }
+            preferences.set("HTTPS 延迟", forKey: "dailyLineSort")
+            preferences.synchronize(); await settle()
+            try check(UserDefaults(suiteName: suite)?.string(forKey: "dailyLineSort") == "HTTPS 延迟", "线路排序偏好持久保存")
+            preferences.set("最近使用", forKey: "dailyLineSort"); await settle()
+            model.selectionStatus = SelectionStatus(target: .node(first.id), name: first.name, epoch: model.epoch, phase: .checking, message: "正在检查新线路")
+            model.busy = true
+            try await capture("daily-switching")
+            model.busy = false
+            model.selectionStatus?.phase = .failed
+            model.selectionStatus?.message = "新线路连通性检查失败；恢复未确认，请重试或检查网络"
+            model.selectionStatus?.networkUncertain = true
+            try await capture("daily-recovery-unconfirmed", .darkAqua)
+            model.selectionStatus = nil
+            model.measuring = true; model.measurementProgress = "HTTPS 延迟 12/82"
+            try await capture("daily-measuring")
+            model.measuring = false
+            host.rootView = AnyView(SimpleLinesView(model: model, onImport: {}, onEdit: { _ in }, onProfessional: {}).defaultAppStorage(preferences).padding(20))
+            try await capture("daily-lines")
+            print("DAILY_INTERFACE_CHECKS_OK checks=\(checks) screenshots=\(screenshotCount)")
+            return
+        }
         model.connection = .disconnecting
         model.busy = true
         try await capture("simple-disconnecting")

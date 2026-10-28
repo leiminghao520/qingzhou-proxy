@@ -7,6 +7,14 @@ struct AppDependencies {
     var officePathOverride:((SavedDiagnosticTarget,AppState,Bool,String?) throws -> TargetPathEvidence)?
     var officeProbeOverride:((SavedDiagnosticTarget,TargetPathEvidence,AppState,Bool) async -> DiagnosticResult)?
     var makeCredentials:(Bool)->any CredentialStore = {$0 ? MemoryCredentials():KeychainStore()}
+    var makeThroughputProbe:(ThroughputContext)->ThroughputProbe = {ThroughputProbe(context:$0)}
+    var throughputCoreVersion:(String) async -> String = {path in
+        await Task.detached {
+            guard let text=try? NetworkInspection.command(path,["version"],deadline:Date().addingTimeInterval(2)),
+                  let line=text.components(separatedBy:"\n").first, line.hasPrefix("sing-box version ") else {return "未取得"}
+            return String(line.dropFirst("sing-box version ".count).prefix(80))
+        }.value
+    }
     var diagnosticExecutor=DiagnosticExecutor()
     var diagnosticDNS:(String) async -> DiagnosticResult = {await DiagnosticService.dns($0)}
     var diagnosticHelper:() async throws -> TunReply = {

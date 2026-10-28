@@ -60,13 +60,13 @@ elif [ ! -f .build/AppIcon.icns ]; then
     /usr/bin/python3 scripts/make-icns.py .build/icon-png .build/AppIcon.icns
 fi
 cp .build/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
-codesign --force --sign - "$app/Contents/Resources/qzhttp"
-codesign --force --sign - "$app/Contents/Resources/sing-box"
-codesign --force --sign - "$app/Contents/Resources/QingzhouRunner"
-codesign --force --sign - "$app/Contents/Resources/age"
-codesign --force --sign - "$app/Contents/Resources/age-keygen"
-codesign --force --sign - "$app/Contents/Resources/QingzhouHelper"
-codesign --force --sign - "$app"
+codesign --force --sign "${QZ_SIGNING_IDENTITY:--}" "$app/Contents/Resources/qzhttp"
+codesign --force --sign "${QZ_SIGNING_IDENTITY:--}" "$app/Contents/Resources/sing-box"
+codesign --force --sign "${QZ_SIGNING_IDENTITY:--}" "$app/Contents/Resources/QingzhouRunner"
+codesign --force --sign "${QZ_SIGNING_IDENTITY:--}" "$app/Contents/Resources/age"
+codesign --force --sign "${QZ_SIGNING_IDENTITY:--}" "$app/Contents/Resources/age-keygen"
+codesign --force --sign "${QZ_SIGNING_IDENTITY:--}" "$app/Contents/Resources/QingzhouHelper"
+codesign --force --sign "${QZ_SIGNING_IDENTITY:--}" "$app"
 codesign --verify --deep --strict "$app"
 /usr/bin/python3 - "$app" "$version" <<'PYTHON'
 import pathlib,hashlib,json,sys,subprocess

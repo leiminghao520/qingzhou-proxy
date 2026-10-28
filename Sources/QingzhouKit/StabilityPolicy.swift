@@ -47,7 +47,7 @@ public enum LatencyPresentation {
     }
     public static func label(_ result:LatencyResult?,invalidatedAt:Date,now:Date=Date())->String {
         guard let result else{return "未检测"}
-        let value=result.milliseconds.map{"\($0) ms"} ?? "检测失败"
+        let value=result.milliseconds.map{"\($0) ms"} ?? (result.failure?.label ?? "检测失败")
         let stamp=result.testedAt.formatted(date:.abbreviated,time:.shortened)
         return value+" · "+(current(result,invalidatedAt:invalidatedAt,now:now) ? "测试于 ":"历史结果 · ")+stamp
     }

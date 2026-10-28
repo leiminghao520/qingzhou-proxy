@@ -5,10 +5,14 @@ public struct UpdateDiff:Sendable {
     public var added:[String]=[];public var removed:[String]=[];public var changed:[String]=[];public var certificateChanges:[String]=[];public var strategyChanges=false;public var ruleChanges=false;public var removesSelection=false
     public var ambiguousNodes:[String]=[]
     public var compatibilityChanges=false
-    public var requiresReview:Bool {!ambiguousNodes.isEmpty || removesSelection || !certificateChanges.isEmpty || compatibilityChanges}
+    public var manualNodeConflicts=false
+    public var requiresReview:Bool {!ambiguousNodes.isEmpty || removesSelection || !certificateChanges.isEmpty || compatibilityChanges || manualNodeConflicts}
     public static func compare(old:AppState,preview:ImportPreview,subscriptionID:UUID?,credentials:CredentialStore?=nil) -> UpdateDiff {
         let oldNodes=old.nodes.filter{$0.subscriptionID==subscriptionID};let fresh=preview.candidates.map(\.node);var diff=UpdateDiff()
         let matching=SubscriptionMatching(old:oldNodes,incoming:fresh)
+        if subscriptionID != nil {
+            diff.manualNodeConflicts=NodeSubscriptionSupport.matches(state:old,incoming:fresh).contains{match in !oldNodes.contains{$0.fingerprint==match.incoming.fingerprint}}
+        }
         diff.ambiguousNodes=fresh.filter{matching.ambiguousIncomingIDs.contains($0.id)}.map(\.name)
         for candidate in preview.candidates {
             let node=candidate.node

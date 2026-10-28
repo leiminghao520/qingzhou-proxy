@@ -42,6 +42,8 @@ type Rule struct {
 	NoResolve bool      `json:"noResolve"`
 }
 type Request struct {
+	ProtectedDomains  []string          `json:"protectedDomains,omitempty"`
+	ExcludedCIDRs     []string          `json:"excludedCIDRs,omitempty"`
 	Nodes             []Node            `json:"nodes"`
 	Groups            []Group           `json:"groups"`
 	Rules             []Rule            `json:"rules"`
@@ -219,6 +221,9 @@ func (n Node) Validate(credentials map[string]string) error {
 	return nil
 }
 func (r Request) Validate() error {
+	if err := ValidateBypass(r.ProtectedDomains, r.ExcludedCIDRs); err != nil {
+		return err
+	}
 	if len(r.Nodes) > 2000 || len(r.Groups) > 2000 || len(r.Rules) > 50000 || r.Port < 1024 || r.Port > 65535 {
 		return errors.New("配置数量或监听端口无效")
 	}
@@ -490,6 +495,13 @@ func Build(r Request, control Control) ([]byte, error) {
 	choices = append(choices, "direct")
 	outs = append(outs, map[string]any{"type": "selector", "tag": "proxy", "outbounds": choices, "default": r.Selected.Tag(), "interrupt_exist_connections": false})
 	rules := []any{map[string]any{"action": "sniff", "timeout": "300ms"}, map[string]any{"port": 53, "action": "hijack-dns"}}
+	// 保护规则优先于全局模式与普通规则，域名同时覆盖根域和子域。
+	if len(r.ProtectedDomains) > 0 {
+		rules = append(rules, map[string]any{"domain_suffix": r.ProtectedDomains, "action": "route", "outbound": "direct"})
+	}
+	if len(r.ExcludedCIDRs) > 0 {
+		rules = append(rules, map[string]any{"ip_cidr": r.ExcludedCIDRs, "action": "route", "outbound": "direct"})
+	}
 	if r.Mode == "direct" {
 		rules = append(rules, map[string]any{"action": "route", "outbound": "direct"})
 	} else if r.Mode == "global" {
@@ -532,7 +544,7 @@ func Build(r Request, control Control) ([]byte, error) {
 		if r.IPv6 {
 			addresses = append(addresses, "fdfe:dcba:9876::1/126")
 		}
-		inbounds = append(inbounds, map[string]any{"type": "tun", "tag": "tun-in", "address": addresses, "mtu": 1500, "stack": "gvisor", "auto_route": true, "strict_route": true})
+		inbounds = append(inbounds, map[string]any{"type": "tun", "tag": "tun-in", "address": addresses, "mtu": 1500, "stack": "gvisor", "auto_route": true, "strict_route": true, "route_exclude_address": r.ExcludedCIDRs})
 	}
 	servers := []any{map[string]any{"type": "local", "tag": "local"}}
 	dnsFinal := "local"
@@ -541,6 +553,9 @@ func Build(r Request, control Control) ([]byte, error) {
 		dnsFinal = "remote"
 	}
 	dnsRules := []any{}
+	if len(r.ProtectedDomains) > 0 {
+		dnsRules = append(dnsRules, map[string]any{"domain_suffix": r.ProtectedDomains, "server": "local"})
+	}
 	for _, n := range r.Nodes {
 		if net.ParseIP(n.Server) == nil {
 			dnsRules = append(dnsRules, map[string]any{"domain": []string{n.Server}, "server": "local"})

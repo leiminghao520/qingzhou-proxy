@@ -293,6 +293,8 @@ struct NodesView: View {
                 Text(node.name)
                     .font(.system(size: 15, weight: .bold))
                     .lineLimit(1)
+                Text(NodeSubscriptionSupport.source(node,state:model.state)).font(.caption2).foregroundStyle(.secondary)
+                if let guidance=NodeSubscriptionSupport.guidance(node,state:model.state){Text(guidance).font(.caption2).foregroundStyle(Theme.amberAccent)}
                 Text("\(node.server):\(node.port)")
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.secondary)
@@ -397,6 +399,7 @@ struct NodesView: View {
             Spacer()
 
             LatencyBadge(delayText: latency(node, model))
+                .help(NodeSubscriptionSupport.source(node,state:model.state)+(NodeSubscriptionSupport.guidance(node,state:model.state).map{" · "+$0} ?? ""))
 
             Button("测速") { model.measure([node.id]) }
                 .buttonStyle(.bordered)

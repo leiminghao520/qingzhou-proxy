@@ -83,7 +83,7 @@ private struct SettingsContent:View,Equatable {
                     Text("系统代理（默认）").tag(CaptureMode.systemProxy)
                     Text("TUN 虚拟网卡（管理员辅助服务）").tag(CaptureMode.tun)
                     Text("完整接管（TUN＋系统代理，需管理员权限）").tag(CaptureMode.compatible)
-                } label: {settingLabel("接管方式",help:"系统代理覆盖遵循系统代理设置的应用；TUN 和完整接管需要管理员辅助服务，并需独立进行网络恢复及实网验收。")}
+                } label: {settingLabel("接管方式",help:"系统代理覆盖遵循系统代理设置的应用；各接管方式统一使用辅助服务，首次安装授权后日常连接复用。")}
                 .disabled(model.locked)
 
                 Picker(selection:$draft.network.family) {
@@ -118,7 +118,7 @@ private struct SettingsContent:View,Equatable {
                 }.disabled(model.locked)
                 if !model.protectionSummary.isEmpty {DisclosureGroup("生效的内网绕过项") {ForEach(model.protectionSummary,id:\.self){Text($0).font(.caption)}}}
                 HStack {
-                    settingLabel("辅助服务状态：",help:"TUN 模式需要通过辅助服务获取路由权限。重新构建应用后，需要再次授权更新辅助服务以登记客户端代码身份。")
+                    settingLabel("辅助服务状态：",help:"系统代理和 TUN 共用辅助服务。首次安装需管理员授权，日常连接、断开复用；更新权限组件或应用签名身份变化时可能需再次批准。")
                     Text(model.helperStatus)
                         .foregroundStyle(model.helperStatus.contains("通过") ? Theme.connectedGreen : Theme.amberAccent)
                     Spacer()

@@ -66,7 +66,7 @@ public enum ConnectivityProbe {
         let title="当前节点通道检测"
         if mode == .direct {return ConnectivityResult(title,.notApplicable,"全部直连模式")}
         do {
-            let info=try await client.proxies()
+            let info=try await client.preparedProxies()
             guard let tag=CoreAPIClient.actualTag(info) else{return ConnectivityResult(title,.failed,"控制接口缺少实际节点")}
             if tag=="direct" || tag=="reject" {return ConnectivityResult(title,.notApplicable,"当前策略未选择节点")}
             guard tag.hasPrefix("node-"),let id=UUID(uuidString:String(tag.dropFirst(5))) else{return ConnectivityResult(title,.failed,"控制接口节点格式")}

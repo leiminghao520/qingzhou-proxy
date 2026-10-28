@@ -70,6 +70,14 @@ match=re.search(r'^CDHash=([0-9a-f]+)$',text,re.M)
 if not match: raise SystemExit('客户端代码身份无法读取')
 version=plistlib.loads((pathlib.Path(app)/'Contents/Info.plist').read_bytes())['CFBundleShortVersionString']
 manifest={'version':version,'uid':int(uid),'clientHash':match[1],'coreHash':hashlib.sha256((stage/'sing-box').read_bytes()).hexdigest(),'helperHash':hashlib.sha256((stage/'QingzhouHelper').read_bytes()).hexdigest()}
+# 仅 Apple 正式身份使用完整指定要求，拒绝把临时签名退化为仅校验应用名称。
+team=re.search(r'^TeamIdentifier=([A-Z0-9]+)$',text,re.M)
+if team and 'Signature=adhoc' not in text:
+    result=subprocess.run(['/usr/bin/codesign','-d','-r-',app],capture_output=True,text=True,check=True)
+    requirement=re.search(r'designated => (.+)',result.stdout+'\n'+result.stderr)
+    if not requirement or 'anchor apple generic' not in requirement[1] or 'identifier "cn.qingzhou.proxy"' not in requirement[1] or not re.search(r'certificate leaf\[subject\.OU\]\s*=\s*"?'+re.escape(team[1])+r'"?(?:\s|$|\))',requirement[1]):
+        raise SystemExit('正式签名要求缺少 Apple 信任链、应用标识或团队约束')
+    manifest['clientRequirement']=requirement[1]
 p=stage/'manifest.json';p.write_text(json.dumps(manifest));p.chmod(0o600)
 value={'Label':'cn.qingzhou.proxy.helper','ProgramArguments':[root+'/QingzhouHelper'],'RunAtLoad':True,'KeepAlive':True,'ThrottleInterval':10,'UserName':'root','WorkingDirectory':root,'Umask':63,'StandardOutPath':'/dev/null','StandardErrorPath':'/dev/null'}
 p=stage/'helper.plist';p.write_bytes(plistlib.dumps(value));p.chmod(0o644)

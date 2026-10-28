@@ -71,7 +71,18 @@ import Foundation
         guard activeMode?.usesTunnel == true else {return}
         _=try await requestHelper(TunRequest(operation:"activate"))
     }
-    public func activateSystemProxy(port:Int,protectedDomains:[String]=[],exceptions:[String]=[]) throws{guard activeMode == .systemProxy || (activeMode == .tun && httpCompatibility != nil) else{return};try proxy.apply(port:port,ownedTunDNS:activeMode == .tun ? ownedTunDNS:nil,protectedDomains:activeMode == .systemProxy ? protectedDomains:[],exceptions:activeMode == .systemProxy ? exceptions:[])}
+    public func activateSystemProxy(port:Int,protectedDomains:[String]=[],exceptions:[String]=[]) async throws {
+        guard activeMode == .systemProxy || (activeMode == .tun && httpCompatibility != nil) else{return}
+        let status=try await requestHelper(TunRequest(operation:"status"))
+        guard status.supportsManagedSystemProxy==true else{throw ProxyError("首次使用请安装或更新辅助服务，后续系统代理复用该授权")}
+        var request=TunRequest(operation:"systemProxy",systemProxyPort:port)
+        request.proxyProtectedDomains=activeMode == .systemProxy ? protectedDomains:[]
+        request.proxyExceptions=activeMode == .systemProxy ? exceptions:[]
+        let applied=try await requestHelper(request)
+        guard applied.proxyVerified==true else{throw ProxyError("辅助服务系统代理核验未通过")}
+        helperRunning=true
+        try proxy.observeManagedProxy(port:port)
+    }
     public func stop() async throws {
         let needsHelper=activeMode?.usesTunnel == true || helperRunning
         try await restoreAll(includeHelper:needsHelper)

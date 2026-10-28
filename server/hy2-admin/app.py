@@ -19,6 +19,7 @@ from helper import OperationsHelper
 from metrics import overview, device_usage
 from security import LoginLimiter, PH, csrf_token, login_required, make_fernet, require_csrf, valid_totp
 from subscriptions import render_subscription
+from vless import node as vless_node, public_settings
 
 FORMATS = {
     'qingzhou': ('轻舟完整配置（节点、规则及资产）', 'qingzhou.json'),
@@ -53,6 +54,7 @@ def create_app(test_config=None):
         SERVER_NAME_VALUE=SERVER_NAME, SERVER_PORT=SERVER_PORT, PUBLIC_BASE_URL=PUBLIC_BASE_URL.rstrip('/'),
         STATS_URL=STATS_URL, STATS_SECRET=STATS_SECRET, HELPER_PATH=HELPER_PATH, MAX_CONTENT_LENGTH=16384)
     app.config.update(test_config or {})
+    app.config.setdefault('VLESS_PUBLIC_CONFIG', os.environ.get('HY2_VLESS_PUBLIC_CONFIG'))
     if not app.config['SECRET_KEY']:
         raise RuntimeError('HY2_SECRET_KEY is required')
     app.fernet = make_fernet(app.config['ENCRYPTION_KEY'])
@@ -109,12 +111,21 @@ def create_app(test_config=None):
     @app.errorhandler(403)
     @app.errorhandler(404)
     @app.errorhandler(413)
+    @app.errorhandler(503)
     def friendly_error(error):
-        return render_template('error.html', code=error.code, message={400:'输入不完整或表单已过期，请返回检查。',403:'验证失败或无权执行此操作。',404:'页面或订阅不存在，可能已失效。',413:'提交内容过大。'}[error.code]), error.code
+        return render_template('error.html', code=error.code, message={400:'输入不完整或表单已过期，请返回检查。',403:'验证失败或无权执行此操作。',404:'页面或订阅不存在，可能已失效。',413:'提交内容过大。',503:'资料已保存，TCP 授权待同步。请勿重复提交；稍后检查服务状态或重试同步。'}[error.code]), error.code
 
     def save(action, target):
         audit(g.db, session['admin'], action, str(target))
         g.db.commit()
+        if app.config['VLESS_PUBLIC_CONFIG'] and action in {'create_device','disable_device','enable_device','rotate_device','disable_user','enable_user'}:
+            try:
+                app.operations.call('sync-vless')
+                flash('TCP 授权已生效；授权列表变化时会重新加载 TCP 服务，其他 TCP 会话可能需要重连。','info')
+            except Exception:
+                # 数据库变更已保存，但同步失败时明确报错，不提示撤销已完成。
+                app.logger.error('TCP 设备凭据同步失败；数据库变更已保存')
+                abort(503)
 
     def confirm_owner():
         admin = g.db.execute('SELECT * FROM admins WHERE username=?', (session['admin'],)).fetchone()
@@ -354,8 +365,10 @@ def create_app(test_config=None):
         row = g.db.execute('SELECT d.* FROM devices d JOIN proxy_users u ON u.id=d.user_id '
                            'WHERE d.token_hash=? AND d.enabled=1 AND u.enabled=1',(hashlib.sha256(token.encode()).hexdigest(),)).fetchone()
         if not row: abort(404)
+        password = app.fernet.decrypt(row['encrypted_password']).decode()
+        tcp_node = vless_node(public_settings(app.config['VLESS_PUBLIC_CONFIG']), row['auth_id'], password, row['name'])
         body = render_subscription(kind,row['auth_id'],app.config['SERVER_NAME_VALUE'],app.config['SERVER_PORT'],
-                                   app.fernet.decrypt(row['encrypted_password']).decode(),display_name=row['name'])
+                                   password,display_name=row['name'],vless=tcp_node)
         response=make_response(body)
         response.headers['Content-Type']={'qingzhou':'application/json; charset=utf-8','sing-box':'application/json; charset=utf-8','mihomo':'application/yaml; charset=utf-8'}.get(kind,'text/plain; charset=utf-8')
         # 仅返回当前设备留存的已观测用量；缺失采样不补零，也不虚构配额或到期时间。

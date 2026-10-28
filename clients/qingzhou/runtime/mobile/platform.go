@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/sagernet/sing-box/experimental/libbox"
 	"net"
+	"qingzhou.local/runtime/config"
 	"sync"
 	"time"
 )
@@ -34,7 +35,22 @@ func (p *platform) OpenTun(o libbox.TunOptions) (int32, error) {
 	for dns.HasNext() {
 		servers = append(servers, dns.Next())
 	}
-	b, e := json.Marshal(map[string]any{"mtu": o.GetMTU(), "addresses": append(prefixes(o.GetInet4Address()), prefixes(o.GetInet6Address())...), "routes": append(prefixes(o.GetInet4RouteRange()), prefixes(o.GetInet6RouteRange())...), "excludes": append(prefixes(o.GetInet4RouteExcludeAddress()), prefixes(o.GetInet6RouteExcludeAddress())...), "dns": servers, "httpProxy": o.IsHTTPProxyEnabled(), "httpPort": func() int32 {
+	routes := append(prefixes(o.GetInet4RouteRange()), prefixes(o.GetInet6RouteRange())...)
+	excludes := append(prefixes(o.GetInet4RouteExcludeAddress()), prefixes(o.GetInet6RouteExcludeAddress())...)
+	if len(routes) == 0 {
+		routes = []string{"0.0.0.0/0"}
+		if o.GetInet6Address().HasNext() {
+			routes = append(routes, "::/0")
+		}
+	}
+	routes, e = config.RouteComplement(routes, excludes)
+	if e != nil {
+		return -1, e
+	}
+	if len(routes) == 0 {
+		return -1, errors.New("接管范围为空")
+	}
+	b, e := json.Marshal(map[string]any{"mtu": o.GetMTU(), "addresses": append(prefixes(o.GetInet4Address()), prefixes(o.GetInet6Address())...), "routes": routes, "excludes": []string{}, "dns": servers, "httpProxy": o.IsHTTPProxyEnabled(), "httpPort": func() int32 {
 		if o.IsHTTPProxyEnabled() {
 			return o.GetHTTPProxyServerPort()
 		}

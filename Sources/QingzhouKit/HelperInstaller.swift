@@ -2,6 +2,15 @@ import Foundation
 import Darwin
 
 public enum HelperInstaller {
+    public static func componentsMatch(app:URL,directory:URL=URL(fileURLWithPath:HelperPaths.directory))->Bool {
+        // 此检查只用于跳过重复安装，调用方还必须通过现有辅助服务的身份与协议核验。
+        for name in ["QingzhouHelper","sing-box"] {
+            guard let bundled=try? Data(contentsOf:app.appendingPathComponent("Contents/Resources/"+name)),
+                  let installed=try? Data(contentsOf:directory.appendingPathComponent(name)),
+                  !bundled.isEmpty,bundled==installed else{return false}
+        }
+        return true
+    }
     public static func authorizationScript(app:URL)->String {
         func shellQuote(_ value:String)->String {"'"+value.replacingOccurrences(of:"'",with:"'\"'\"'")+"'"}
         let script=app.appendingPathComponent("Contents/Resources/install-helper.sh")

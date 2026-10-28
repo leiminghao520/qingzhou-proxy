@@ -55,6 +55,26 @@ public actor CoreAPIClient {
     private func decode<T:Decodable>(_ type:T.Type,path:String,timeout:TimeInterval?=nil) async throws -> T {var query=try request(path);if let timeout {query.timeoutInterval=timeout};let data=try await send(query);do {return try JSONDecoder().decode(type,from:data)} catch {throw CoreAPIError("控制接口响应格式")}}
     private struct ProxyResponse:Decodable {var proxies:[String:ProxyInfo]}
     public func proxies() async throws -> [String:ProxyInfo] {try await decode(ProxyResponse.self,path:"/proxies").proxies}
+    public func preparedProxies() async throws -> [String:ProxyInfo] {
+        let initial=try await proxies()
+        guard Self.actualTag(initial)==nil else{return initial}
+        let candidates=Self.pendingAutomaticNodes(initial)
+        guard !candidates.isEmpty else{return initial}
+        // URLTest 在首轮测速完成前会返回空 now；直接测成员以建立核心自己的选择历史。
+        // 不猜测首个节点，也不借用 GLOBAL 组绕过当前选择，最终仍读取并验证实际节点。
+        return try await withThrowingTaskGroup(of:Bool.self) { group in
+            for id in candidates.prefix(4) {group.addTask{if case .success = await self.measureNode(id){return true};return false}}
+            while let succeeded=try await group.next() {
+                try Task.checkCancellation()
+                if succeeded {
+                    let refreshed=try await proxies()
+                    if Self.actualTag(refreshed) != nil {group.cancelAll();return refreshed}
+                }
+            }
+            try Task.checkCancellation()
+            return try await proxies()
+        }
+    }
     public func waitUntilReady(timeout:TimeInterval=5) async throws {
         try await CoreAPIReadiness.wait(timeout:timeout) {budget in
             _ = try await self.decode(ProxyResponse.self,path:"/proxies",timeout:budget)
@@ -142,7 +162,22 @@ public actor CoreAPIClient {
     }
     public static func actualTag(_ proxies:[String:ProxyInfo]) -> String? {
         var next=proxies["proxy"]?.now;var seen=Set<String>()
-        while let tag=next {guard seen.insert(tag).inserted else{return nil};if let nested=proxies[tag]?.now {next=nested} else{return tag}}
+        while let tag=next {guard !tag.isEmpty,seen.insert(tag).inserted else{return nil};if let nested=proxies[tag]?.now {next=nested} else if proxies[tag]?.all != nil || proxies[tag]?.type.lowercased()=="urltest" {return nil} else{return tag}}
         return nil
+    }
+    public static func pendingAutomaticNodes(_ proxies:[String:ProxyInfo]) -> [UUID] {
+        var next="proxy",seen=Set<String>()
+        while seen.insert(next).inserted,let info=proxies[next] {
+            if info.type.lowercased()=="urltest",info.now?.isEmpty != false {
+                return (info.all ?? []).compactMap { tag in
+                    guard tag.hasPrefix("node-"),let id=UUID(uuidString:String(tag.dropFirst(5))),
+                          let member=proxies[tag],member.now==nil,member.all==nil else{return nil}
+                    return id
+                }
+            }
+            guard let selected=info.now,!selected.isEmpty else{return []}
+            next=selected
+        }
+        return []
     }
 }

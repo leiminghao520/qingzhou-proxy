@@ -20,8 +20,9 @@ extension Service {
     func commitProxy(_ preferences:SCPreferences) throws {
         guard SCPreferencesCommitChanges(preferences),SCPreferencesApplyChanges(preferences) else{throw ProxyError("兼容代理提交失败")}
     }
-    func applyProxy(port:Int,plan:CapturePlan) throws {
+    func applyProxy(port:Int,plan:CapturePlan?=nil,exceptions additional:[String]=[],protectedDomains:[String]=[]) throws {
         guard CoreController.listening(port) else{throw ProxyError("兼容代理入口尚未监听")}
+        if journal?.proxyOnly==true {try NetworkSafety.check()}
         let preferences=try proxyPreferences();defer{SCPreferencesUnlock(preferences)}
         guard let set=SCNetworkSetCopyCurrent(preferences),let services=SCNetworkSetCopyServices(set) as? [SCNetworkService] else{throw ProxyError("当前网络服务无法读取")}
         var records:[HelperProxyRecord]=[]
@@ -29,15 +30,15 @@ extension Service {
             guard let id=SCNetworkServiceGetServiceID(service) else{continue}
             let proto=SCNetworkServiceCopyProtocol(service,kSCNetworkProtocolTypeProxies)
             let original=proto.flatMap{SCNetworkProtocolGetConfiguration($0) as? [String:Any]} ?? [:]
-            var applied=try ProxyRecovery.applied(to:original,port:port)
-            let excluded=plan.exclusions.flatMap{NetworkBypass(kind:.cidr,value:$0).proxyExceptions}
-            let protected=plan.protectedRoutes.flatMap{NetworkBypass(kind:.cidr,value:$0.destination).proxyExceptions}
-            let domains=plan.domains.flatMap{[$0,"*."+$0]}
-            let exceptions=(plan.exactDomains ?? [])+excluded+protected+domains
-            var ordered=original["ExceptionsList"] as? [String] ?? []
+            var applied=try ProxyRecovery.applied(to:original,port:port,protectedDomains:protectedDomains,exceptions:additional)
+            let excluded=(plan?.exclusions ?? []).flatMap{NetworkBypass(kind:.cidr,value:$0).proxyExceptions}
+            let protected=(plan?.protectedRoutes ?? []).flatMap{NetworkBypass(kind:.cidr,value:$0.destination).proxyExceptions}
+            let domains=(plan?.domains ?? []).flatMap{[$0,"*."+$0]}
+            let exceptions=(plan?.exactDomains ?? [])+excluded+protected+domains
+            var ordered=applied["ExceptionsList"] as? [String] ?? []
             for entry in exceptions where !ordered.contains(entry) {ordered.append(entry)}
             applied["ExceptionsList"]=ordered
-            applied["ExcludeSimpleHostnames"]=1
+            if plan != nil {applied["ExcludeSimpleHostnames"]=1}
             records.append(HelperProxyRecord(service:id as String,original:try PropertyListSerialization.data(fromPropertyList:original,format:.binary,options:0),applied:try PropertyListSerialization.data(fromPropertyList:applied,format:.binary,options:0),enabled:proto.map{SCNetworkProtocolGetEnabled($0)} ?? false,hadProtocol:proto != nil))
         }
         guard !records.isEmpty else{throw ProxyError("没有可用代理服务")}
@@ -58,12 +59,14 @@ extension Service {
             let current=SCNetworkProtocolGetConfiguration(proto) as? [String:Any] ?? [:],original=try plist(record.original)
             if NSDictionary(dictionary:current).isEqual(to:original),SCNetworkProtocolGetEnabled(proto)==record.enabled {continue}
             let applied=try plist(record.applied)
-            let strict=SCNetworkProtocolGetEnabled(proto) ? ProxyRecovery.restored(original:original,applied:applied,current:current):nil
+            // 普通代理恢复时不重新启用已失去监听的旧回环入口。
+            let restoration=journal?.proxyOnly==true ? NetworkSafety.restoration(original,listening:NetworkSafety.loopbackListening):original
+            let strict=SCNetworkProtocolGetEnabled(proto) ? ProxyRecovery.restored(original:restoration,applied:applied,current:current):nil
             guard strict != nil || preserveExternal else{
                 let changed=ProxyRecovery.changedOwnedKeys(expected:applied,current:current,protectsExceptions:true)
                 issues.append(label+" 已有外部修改，保留当前值："+(changed.isEmpty ? "协议启用状态":changed.joined(separator:",")));continue
             }
-            let restored=strict ?? ProxyRecovery.restoredPreservingExternal(original:original,applied:applied,current:current)
+            let restored=strict ?? ProxyRecovery.restoredPreservingExternal(original:restoration,applied:applied,current:current)
             let enabled=strict == nil ? SCNetworkProtocolGetEnabled(proto):record.enabled
             guard !preserveExternal || !enabled || !ProxyRecovery.pointsToOwnedEndpoint(current:restored,applied:applied) else{issues.append(label+" 仍指向轻舟入口");continue}
             guard SCNetworkProtocolSetConfiguration(proto,restored as CFDictionary),SCNetworkProtocolSetEnabled(proto,enabled) else{issues.append(label+" 恢复写入失败");continue}

@@ -75,6 +75,7 @@ struct PreviewSheet: View {
     @State private var scope = ImportScope.nodes
     @State private var confirmedInsecure = false
     @State private var confirmedSkipping = false
+    @State private var adoptingManual:Set<UUID> = []
     
     private var insecure: Bool { model.preview?.candidates.contains { $0.node.insecure } == true }
     private var issues: [String] { model.preview?.unsupported ?? [] }
@@ -128,6 +129,18 @@ struct PreviewSheet: View {
                 .padding(12)
                 .background(Theme.cardBackground)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+
+            if let preview=model.preview,preview.source != nil {
+                let matches=NodeSubscriptionSupport.matches(state:model.state,incoming:preview.candidates.map(\.node))
+                if !matches.isEmpty {
+                    VStack(alignment:.leading,spacing:6) {
+                        Text("发现同端点的手动节点；仅替换勾选项，保留收藏、备注和选择关系。").font(.caption)
+                        ForEach(matches) { match in
+                            Toggle("将手动节点「\(match.manual.name)」替换为订阅节点「\(match.incoming.name)」",isOn:Binding(get:{adoptingManual.contains(match.id)},set:{if $0{adoptingManual.insert(match.id)}else{adoptingManual.remove(match.id)}})).font(.caption)
+                        }
+                    }
+                }
             }
             
             Picker("导入范围", selection: $scope) {
@@ -189,7 +202,7 @@ struct PreviewSheet: View {
                 Spacer()
                 
                 Button("确认导入并应用") {
-                    Task { await model.confirmImport(scope: scope) }
+                    Task { await model.confirmImport(scope: scope,adoptingManual:adoptingManual) }
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(

@@ -228,6 +228,9 @@ struct ContentView: View {
                         ConnectionProgressView(stage:stage,startedAt:model.startupStartedAt)
                             .padding(.horizontal,24).padding(.top,16)
                     }
+                    if interfaceMode == .professional {
+                        SelectionFeedbackView(model: model).padding(.horizontal, 24).padding(.top, 8)
+                    }
                     content
                         .padding(24)
                 }
@@ -303,7 +306,7 @@ struct ContentView: View {
     @ViewBuilder private var content: some View {
         switch page {
         case .home:
-            SimpleConnectionView(model: model, onImport: { importing = true }, onLines: { page = .lines }, onSubscriptions: { page = .subscriptions }, onDiagnose: { utility = .diagnostics })
+            SimpleConnectionView(model: model, onImport: { importing = true }, onLines: { page = .lines }, onSubscriptions: { page = .subscriptions }, onDiagnose: { utility = .diagnostics }, onEdit: { editing = EditorRequest(node: $0) }, onProfessional: { interfaceMode = .professional })
         case .lines:
             SimpleLinesView(model: model, onImport: { importing = true }, onEdit: { editing = EditorRequest(node: $0) }, onProfessional: { interfaceMode = .professional })
         case .overview: OverviewView(model: model)

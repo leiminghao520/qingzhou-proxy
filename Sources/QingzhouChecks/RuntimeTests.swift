@@ -47,10 +47,38 @@ import QingzhouKit
     expectTrue(supervisedUnexpected);expectFalse(supervised.isRunning);expectTrue(try FileManager.default.contentsOfDirectory(atPath:dir.path).isEmpty);await supervised.stop();print("PASS RuntimeTests.supervisedCoreCrash")
     let unavailable = CoreController(directory:dir,binary:dir.appendingPathComponent("missing"))
     do {try await unavailable.start(config:config,port:port);CheckHarness.failure("缺失核心应拒绝启动",file:#filePath,line:#line)} catch {expectTrue(error.localizedDescription.contains("缺失"))};print("PASS RuntimeTests.missingCore")
-    let keychain = KeychainStore(service:"cn.qingzhou.test."+UUID().uuidString)
+    let keychainService="cn.qingzhou.test."+UUID().uuidString
+    let keychain = KeychainStore(service:keychainService)
     let ref = UUID().uuidString
     defer {try? keychain.remove(ref)}
     try keychain.set("synthetic-test-secret",for:ref);expectEqual(try keychain.get(ref),"synthetic-test-secret")
-    try keychain.set("updated-synthetic-secret",for:ref);expectEqual(try keychain.get(ref),"updated-synthetic-secret")
+    let peer=KeychainStore(service:keychainService)
+    expectEqual(try peer.get(ref),"synthetic-test-secret")
+    try peer.set("updated-synthetic-secret",for:ref);expectEqual(try keychain.get(ref),"updated-synthetic-secret")
     try keychain.remove(ref);expectThrows(try keychain.get(ref));try keychain.remove(ref);print("PASS RuntimeTests.keychainRoundTripAndRemoval")
+    let managedJournal=dir.appendingPathComponent("managed-user-recovery.json")
+    var operations:[String]=[],managedActive=false,managedCapability=true
+    let observedProxy=SystemProxyController(journal:managedJournal,preferencesFactory:{throw ProxyError("不允许主程序申请网络写权限")})
+    let managed=CaptureController(core:CoreController(directory:dir,binary:binary),proxy:observedProxy,helperRequest:{request in
+        operations.append(request.operation)
+        if request.operation=="systemProxy" {managedActive=true}
+        if request.operation=="recover" || request.operation=="stop" {managedActive=false}
+        var reply=TunReply(ok:true,message:"隔离服务",running:managedActive,proxyVerified:managedActive)
+        reply.supportsManagedSystemProxy=managedCapability;reply.supportsExternalRecovery=true;reply.recoveryPending=false
+        return reply
+    })
+    var direct=AppState();direct.mode = .direct;direct.listenPort=port
+    for _ in 0..<2 {
+        try await managed.start(direct,credentials:MemoryCredentials(),control:CoreControlContext.make())
+        try await managed.activateSystemProxy(port:port)
+        expectTrue(managed.helperRunning);expectFalse(FileManager.default.fileExists(atPath:managedJournal.path))
+        try await managed.stop();expectFalse(managed.running)
+    }
+    expectEqual(operations.filter{$0=="systemProxy"}.count,2)
+    managedCapability=false
+    try await managed.start(direct,credentials:MemoryCredentials(),control:CoreControlContext.make())
+    do{try await managed.activateSystemProxy(port:port);expectTrue(false,"旧辅助服务不能退回交互式授权")}catch{expectTrue(error.localizedDescription.contains("首次使用"))}
+    try await managed.stop()
+    print("PASS RuntimeTests.managedProxyReusesServiceWithoutUserWrites")
+
 }

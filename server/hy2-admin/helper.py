@@ -4,7 +4,7 @@ import urllib.request
 
 
 class OperationsHelper:
-    ALLOWED = frozenset({"status", "reload"})
+    ALLOWED = frozenset({"status", "reload", "sync-vless"})
 
     def __init__(self, helper_path, runner=None):
         self.helper_path = helper_path

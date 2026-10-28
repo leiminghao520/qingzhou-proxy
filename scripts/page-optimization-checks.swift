@@ -225,7 +225,7 @@ final class ClosingProtocol:URLProtocol {
         try check(tiedPage.nodes(state:tied,invalidatedAt:.distantPast,now:Date()).map(\.id)==[earlier.id,sameName.id],"专业节点同名按标识排序")
         tiedPage.sort="最近使用"
         try check(tiedPage.nodes(state:tied,invalidatedAt:.distantPast,now:Date()).map(\.id)==[earlier.id,sameName.id],"无使用记录时回退到名称和标识")
-        try check(tiedPage.nodes(state:tied,invalidatedAt:.distantPast,now:Date(),simple:true).map(\.id)==[sameName.id,earlier.id],"简洁线路同名保持原顺序")
+        try check(tiedPage.nodes(state:tied,invalidatedAt:.distantPast,now:Date(),simple:true).map(\.id)==[earlier.id,sameName.id],"简洁线路同名按标识稳定排序")
         let parent=NSWindow(contentRect:NSRect(x:0,y:0,width:500,height:400),styleMask:[.titled],backing:.buffered,defer:false)
         let child=NSWindow(contentRect:NSRect(x:0,y:0,width:300,height:200),styleMask:[.titled,.closable],backing:.buffered,defer:false)
         parent.isReleasedWhenClosed=false;child.isReleasedWhenClosed=false

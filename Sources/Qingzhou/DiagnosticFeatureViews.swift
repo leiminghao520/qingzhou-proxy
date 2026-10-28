@@ -20,6 +20,7 @@ struct DiagnosticsView:View {
                 Text("综合诊断").tag(0)
                 Text("目标路径").tag(1)
                 Text("事件时间线").tag(2)
+                Text("完整下载").tag(4)
             }.pickerStyle(.segmented)
             Group {
                 switch tab {
@@ -30,6 +31,7 @@ struct DiagnosticsView:View {
                             SavedTargetsPanel(model:model,targets:model.state.savedDiagnosticTargets ?? [],office:model.office,locked:model.locked,showAll:true)
                         }
                     }
+                case 4:ThroughputPanel(model:model)
                 case 1:TargetPathPanel(model:model)
                 case 2:NetworkTimelineView(timeline:model.timeline,profiles:model.profiles)
                 default:ComprehensiveDiagnosticsView(model:model)

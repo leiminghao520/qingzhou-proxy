@@ -4,6 +4,11 @@ import Darwin
 import SystemConfiguration
 
 let args = CommandLine.arguments
+if args.count==2 && args[1]=="throughput-checks" {
+    Task {await runThroughputChecks();exit(CheckHarness.failures==0 ? 0:1)}
+    dispatchMain()
+}
+
 if args.count==2 && args[1]=="office-checks" {
     Task {
         do {try await runOfficeFeatureChecks()}catch{CheckHarness.failure("办公功能检查异常："+error.localizedDescription,file:#filePath,line:#line)}
@@ -386,6 +391,9 @@ run("DomesticRouting.indexedSemantics",t){try t.testIndexedDomainsPreserveMatchi
 run("DomesticRouting.conflictOrder",t){t.testConflictOrderAndDirectRulesArePreserved()}
 }
 
+do{let t=StoreTests();run("StoreTests.credentialReuse",t){try t.testUnchangedCredentialsReuseAndRollback()}}
+do{let t=KeychainUXTests();run("KeychainUX.isolation",t){try t.testInjectedStoresStayIsolated()};run("HelperInstaller.components",t){try t.testHelperComponentComparison()}}
+
 Task {
     do {try await runVPSChecks()} catch {CheckHarness.failure("VPS 联动检查异常",file:#filePath,line:#line)}
     do {try await runStartupOptimizationChecks()} catch {CheckHarness.failure("启动优化检查异常",file:#filePath,line:#line)}
@@ -402,6 +410,7 @@ Task {
     await runConnectivityChecks()
     await runRepairHealthChecks()
     await runNetworkProbeChecks()
+    await runThroughputChecks()
     await runDownloadCancellationChecks()
     do{try await runHistoryTransactionChecks()}catch{CheckHarness.failure("流量配置事务检查异常",file:#filePath,line:#line)}
     await runPooledDownloadChecks()
