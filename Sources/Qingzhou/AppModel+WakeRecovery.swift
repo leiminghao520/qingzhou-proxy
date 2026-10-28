@@ -14,6 +14,7 @@ extension AppModel {
     func beginRoutineRecovery(reason:WakeRecoveryReason) {
         guard connection == .connected,!locked,!wakeRecovery.active,wakeIntent==nil else{return}
         cancelHealthRefresh()
+        errorMessage=nil
         routineRecovery=true
         wakeIntent=(UUID(),eventSessionID,currentProfileID,epoch)
         log("日常连接进入自动恢复："+reason.label)

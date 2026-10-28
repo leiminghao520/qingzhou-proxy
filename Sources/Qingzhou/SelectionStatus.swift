@@ -67,14 +67,14 @@ extension AppModel {
             }
             guard sameSession() else { throw ProxyError("配置已变化，本次选择未保存") }
             if case .node(let id) = ref { tx.next.recentUse[id.uuidString] = Date() }
-            tx.connectionVerified = wasConnected
+            tx.connectionVerified = wasConnected && connectivityHealth == .healthy
             try store.commit(tx)
             state = store.state
             verifiedSelectionTag = wasConnected && { if case .node = ref { return true }; return false }() ? ref.tag : nil
             healthFailures = HealthFailureCounter(); failedHealthCycles = 0
             if verifiedSelectionTag != nil { healthRefreshPending = false }
             selectionStatus?.phase = .succeeded
-            selectionStatus?.message = wasConnected ? "已切换到 \(state.label(ref))" : "已选择 \(state.label(ref))，点击连接即可使用"
+            selectionStatus?.message = wasConnected ? "已切换到 \(state.label(ref))"+(connectivityHealth == .healthy ? "":"，连通性待后台复查") : "已选择 \(state.label(ref))，点击连接即可使用"
             recordEvent(.node, .changed, .nodeSelected)
             log(selectionStatus?.message ?? "线路已选择")
         } catch {

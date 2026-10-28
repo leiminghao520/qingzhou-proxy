@@ -61,17 +61,21 @@ func runConnectivityChecks() async {
         expectTrue(StartupConnectivityPolicy.allows([failure,node,pass],mode:.rule),"单个测试网站失败允许降级连接")
         expectTrue(StartupConnectivityPolicy.allows([failure,node,na],mode:.global),"TUN 单个测试网站失败允许保留已验证节点")
         expectTrue(StartupConnectivityPolicy.allows([pass,node,failure],mode:.rule))
-        expectFalse(StartupConnectivityPolicy.allows([failure,node,failure],mode:.rule),"两个网站都失败不能放行")
-        expectFalse(StartupConnectivityPolicy.allows([failure,node,na],mode:.direct),"直连模式不能借用节点证明")
+        expectTrue(StartupConnectivityPolicy.allows([failure,node,failure],mode:.rule),"网站检测不能阻止已核验的接管")
+        expectTrue(StartupConnectivityPolicy.allows([failure,node,na],mode:.direct),"直连模式也不依赖测试网站决定能否连接")
         expectEqual(StartupConnectivityPolicy.recovery([failure,node]),.healthy,"网站异常不触发已可用节点的重建")
         expectFalse(ConnectivityHealth.evaluate([failure,node,na]) == .healthy,"降级不能伪报链路正常")
     }
-    for category in ["鉴权","代理入口","取消"] {
+    for category in ["鉴权","取消"] {
         let failure=ConnectivityResult("入口",.failed,category)
         expectFalse(StartupConnectivityPolicy.allows([pass,node,failure],mode:.rule))
         expectFalse(StartupConnectivityPolicy.recovery([failure,node]) == .healthy)
     }
-    expectFalse(StartupConnectivityPolicy.allows([pass,ConnectivityResult("节点",.failed,"超时"),pass],mode:.rule))
+    expectTrue(StartupConnectivityPolicy.allows([pass,ConnectivityResult("节点",.failed,"超时"),pass],mode:.rule))
+    let timeout=ConnectivityResult("节点",.failed,"超时"),entryFailure=ConnectivityResult("入口",.failed,"代理入口")
+    expectTrue(StartupConnectivityPolicy.allows([pass,timeout,entryFailure],mode:.rule),"复现日志中的节点超时与入口错误组合，保留连接")
+    expectTrue(StartupConnectivityPolicy.allows([timeout,timeout,entryFailure],mode:.global),"全部外部探测失败仍由独立接管核验决定是否连接")
+    expectFalse(ConnectivityHealth.evaluate([pass,timeout,entryFailure]) == .healthy,"连接放行不得伪报通道正常")
     expectFalse(StartupConnectivityPolicy.allows([ConnectivityResult("规则",.pending,""),node,na],mode:.rule))
     expectFalse(StartupConnectivityPolicy.recovery([ConnectivityResult("规则",.pending,""),node]) == .healthy)
     for port in [18401,18404,18408] {

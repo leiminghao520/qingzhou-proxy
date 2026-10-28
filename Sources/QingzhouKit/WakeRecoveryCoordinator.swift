@@ -33,8 +33,8 @@ public struct WakeRecoveryStatus:Equatable,Sendable {
     case .idle:return ""
     case .waiting:return "等待网络稳定"
     case .checking:return "连接复查中"
-    case .retryWaiting:return "等待自动重连第 \(attempt)/3 次"
-    case .rebuilding:return "自动重连第 \(attempt)/3 次"
+    case .retryWaiting:return "等待自动重连第 \(attempt) 次"
+    case .rebuilding:return "自动重连第 \(attempt) 次"
     case .recovered:return "连接已恢复"
     case .manual:return "需手动处理："+(reason?.label ?? "未验证")
     case .cancelled:return "恢复已取消"
@@ -72,29 +72,30 @@ public struct WakeRecoveryStatus:Equatable,Sendable {
             defer {if self.generation==run && self.id==token {self.task=nil;self.id=nil}}
             do {
                 publish(WakeRecoveryStatus(.waiting));try await self.sleep(stableDelay)
-                var failures=0,unknown=0,helperWaits=0,attempt=0,rounds=0
+                var failures=0,unknown=0,helperWaits=0,attempt=0
                 while current() {
-                    rounds+=1
-                    guard rounds<=120 else {publish(WakeRecoveryStatus(.manual,attempt:attempt,reason:.retryExhausted));return}
+                    var pollDelay=3.0
                     publish(WakeRecoveryStatus(.checking,attempt:attempt))
                     let result=await check();guard current() else{return}
                     switch result {
                     case .healthy:publish(WakeRecoveryStatus(.recovered,attempt:attempt));return
                     case .stop(let reason):publish(WakeRecoveryStatus(.manual,attempt:attempt,reason:reason));return
                     case .helperRecovering:
-                        failures=0;unknown=0;helperWaits+=1
-                        guard helperWaits<=60 else {publish(WakeRecoveryStatus(.manual,attempt:attempt,reason:.helperRecovery));return}
+                        failures=0;unknown=0;helperWaits=min(helperWaits+1,10)
+                        pollDelay=Double(helperWaits)*3
                     case .inconclusive(let reason):
-                        failures=0;unknown+=1
-                        if unknown>=2 {publish(WakeRecoveryStatus(.manual,attempt:attempt,reason:reason));return}
+                        // 未知和超时只继续只读复查，不释放会话，也不据此重建网络。
+                        failures=0;helperWaits=0;unknown=min(unknown+1,10)
+                        publish(WakeRecoveryStatus(.checking,attempt:attempt,reason:reason))
+                        pollDelay=Double(unknown)*3
                     case .failed(let reason):
                         if reason.terminal {publish(WakeRecoveryStatus(.manual,attempt:attempt,reason:reason));return}
-                        failures+=1;unknown=0
+                        failures+=1;unknown=0;helperWaits=0
                         if failures>=2 {
-                            guard attempt<3 else {publish(WakeRecoveryStatus(.manual,attempt:attempt,reason:.retryExhausted));return}
                             let nextAttempt=attempt+1
                             publish(WakeRecoveryStatus(.retryWaiting,attempt:nextAttempt,reason:reason))
-                            try await self.sleep([1.0,3,10][attempt]);guard current() else{return}
+                            // 持续故障按一、三、十、三十、六十秒退避，直到恢复或用户取消。
+                            try await self.sleep([1.0,3,10,30,60][min(attempt,4)]);guard current() else{return}
                             // 退避期间辅助服务可能已完成重建；写操作前重新核对，避免双重重连。
                             let latest=await check();guard current() else{return}
                             if latest == .healthy {publish(WakeRecoveryStatus(.recovered,attempt:attempt));return}
@@ -109,7 +110,7 @@ public struct WakeRecoveryStatus:Equatable,Sendable {
                             failures=0
                         }
                     }
-                    try await self.sleep(3)
+                    try await self.sleep(pollDelay)
                 }
             } catch {if current() {publish(WakeRecoveryStatus(.manual,reason:.cancelled))}}
         }

@@ -80,7 +80,8 @@ final class DailyControlProtocol: URLProtocol {
         let one = first.node.id, two = second.node.id
         let old = PolicyReference.node(one), target = PolicyReference.node(two)
         let healthy = [ConnectivityResult("网站", .passed, ""), .init("节点", .passed, ""), .init("入口", .passed, "")]
-        let failed = [ConnectivityResult("网站", .failed, "超时"), .init("节点", .failed, "超时"), .init("入口", .passed, "")]
+        let failed = [ConnectivityResult("网站", .failed, "鉴权"), .init("节点", .failed, "鉴权"), .init("入口", .passed, "")]
+        let degraded = [ConnectivityResult("网站", .passed, ""), .init("节点", .failed, "超时"), .init("入口", .failed, "代理入口")]
         func reset(connected: Bool = true, reject: Set<String> = [], slow: Bool = false) throws {
             model.busy = false; model.connection = .disconnected; model.selectionStatus = nil
             var state = store.state; state.selectedPolicy = old; state.selectedID = one; state.captureMode = .systemProxy; state.recentUse = [:]
@@ -109,6 +110,11 @@ final class DailyControlProtocol: URLProtocol {
         try check(DailyControlProtocol.calls().count == 1, "已生效节点重复选择不发送请求")
         await model.selectPolicy(.node(UUID())); await model.selectPolicy(.selected); await model.selectPolicy(.reject)
         try check(DailyControlProtocol.calls().count == 1, "无效和保留策略不能进入切换")
+        try reset()
+        model.connectivityProbe = { _, _, _ in degraded }
+        await model.selectPolicy(target)
+        try check(DailyControlProtocol.calls() == [target.tag] && model.state.activePolicy == target, "节点超时和入口探测错误不会回退用户选择")
+        try check(model.selectionStatus?.phase == .succeeded && model.connectivityResults == degraded && model.connectivityHealth != .healthy, "换线完成保留真实探测失败，不伪报健康")
         try reset()
         var probes = 0
         model.connectivityProbe = { _, _, _ in probes += 1; return probes == 1 ? failed : healthy }

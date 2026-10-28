@@ -101,16 +101,12 @@ public enum ConnectivityHealth:String,Sendable {
     }
 }
 
-// 网站响应与接管安全分开判断；本地监听、核心和网络所有权仍由启动流程强制核验。
+// 网站探测只提示连通性；本地监听、核心、路由、DNS 和网络所有权由启动流程单独强制核验。
 public enum StartupConnectivityPolicy {
     public static func allows(_ results:[ConnectivityResult],mode:ProxyMode)->Bool {
-        guard results.count==3 else{return false}
-        if ConnectivityHealth.evaluate(results) == .healthy {return true}
-        guard mode != .direct,results.count==3,results[1].status == .passed else{return false}
-        let paths=[results[0],results[2]]
-        guard paths.allSatisfy({$0.status != .pending}),
-              !paths.contains(where:{$0.status == .failed && ["鉴权","代理入口","取消"].contains($0.category)}) else{return false}
-        return paths.filter{$0.status == .failed}.count==1
+        guard results.count==3,results.allSatisfy({$0.status != .pending}) else{return false}
+        // 明确鉴权错误和取消仍终止启动；外部网站、代理请求及测速超时不能撤销已核验的接管。
+        return !results.contains(where:{$0.status == .failed && ["鉴权","取消"].contains($0.category)})
     }
     public static func recovery(_ results:[ConnectivityResult])->WakeRecoveryCheck {
         // 实际节点已可用时，测试网站局部异常不触发重建，也不改写检测结果。

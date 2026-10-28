@@ -294,12 +294,14 @@ final class WakeModelProtocol:URLProtocol {
             check(single != nil && single==model.wakeRecovery.id,"日常恢复与重复故障只启动一个任务")
             await model.wakeRecovery.waitUntilFinished()
             check(wakeBuilds==before && model.connection == .connected && model.wakeRecoveryStatus.phase == .recovered,"日常故障复查成功保留原会话")
-            model.wakeCheckOverride={.inconclusive(.timeout)}
+            var unknownChecks=0
+            model.wakeCheckOverride={unknownChecks+=1;return unknownChecks<=5 ? .inconclusive(.timeout):.healthy}
             model.beginRoutineRecovery(reason:.nodeUnavailable)
             await model.wakeRecovery.waitUntilFinished()
             for _ in 0..<30 {await Task.yield()}
-            check(model.connection == .connected && model.wakeRecoveryStatus.phase == .idle && model.errorMessage==nil,"日常恢复中的未知检测只降级，不释放可用会话或弹出错误")
-            model.wakeCheckOverride={.failed(.nodeUnavailable)}
+            check(model.connection == .connected && model.wakeRecoveryStatus.phase == .recovered && model.errorMessage==nil,"日常恢复中的未知检测持续复查，不释放可用会话或弹出错误")
+            var failureChecks=0
+            model.wakeCheckOverride={failureChecks+=1;return failureChecks<=15 ? .failed(.nodeUnavailable):.healthy}
             model.wakeRebuildOverride={wakeBuilds+=1;return .failed(.nodeUnavailable)}
             var releaseCalls=0
             model.capture=CaptureController(core:model.core,proxy:model.proxy,helperRequest:{request in
@@ -313,13 +315,14 @@ final class WakeModelProtocol:URLProtocol {
             try await model.capture.start(routineTunnel,credentials:MemoryCredentials(),control:control)
             model.beginRoutineRecovery(reason:.nodeUnavailable)
             await model.wakeRecovery.waitUntilFinished()
-            for _ in 0..<100 where model.connection != .error {try await Task.sleep(nanoseconds:1_000_000)}
-            check(wakeBuilds==before+3 && model.connection == .error && model.wakeRecoveryStatus.reason == .retryExhausted,"日常明确故障最多重建三次，耗尽后释放并提示")
-            check(model.wakeIntent==nil && !model.wakeRecovery.active && !model.routineRecovery && releaseCalls==1,"恢复耗尽撤销连接意图并释放一次自有接管")
+            for _ in 0..<30 {await Task.yield()}
+            check(wakeBuilds==before+5 && model.connection == .connected && model.wakeRecoveryStatus.phase == .recovered,"日常明确故障超过三次仍继续恢复，不强制断开")
+            check(model.wakeIntent==nil && !model.wakeRecovery.active && !model.routineRecovery && releaseCalls==0,"恢复成功清除恢复意图，不执行额外断开")
             model.cancelWakeRecovery();model.connection = .connected
             model.wakeRecovery=WakeRecoveryCoordinator(sleep:{_ in try await Task.sleep(nanoseconds:30_000_000_000)})
             model.beginRoutineRecovery(reason:.nodeUnavailable)
             check(model.wakeRecovery.active && model.linkStatusLabel=="自动恢复中","首页准确显示日常自动恢复")
+            check(!model.locked && model.canStop,"后台等待恢复时允许用户换线和停止，不永久锁住界面")
             model.epoch=UUID()
             check(!model.wakeRecovery.active && model.wakeIntent==nil && !model.routineRecovery,"切换会话撤销日常恢复，旧任务不能重连")
             model.connection = .disconnected

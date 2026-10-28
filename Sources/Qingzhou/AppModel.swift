@@ -152,7 +152,8 @@ import QingzhouKit
     var healthDisplayAwake:() -> Bool = {CGDisplayIsAsleep(CGMainDisplayID())==0}
     var healthPowerUptime:() -> TimeInterval = {TimeInterval(DispatchTime.now().uptimeNanoseconds)/1_000_000_000}
     var healthRefreshPending=false
-    var locked:Bool {busy || measuring || loadingFailed || recovering || stopRequested || networkReconnecting || wakeRecovery.active}
+    // 只读复查和重连退避不锁住界面；实际重建仍由 busy 串行保护，用户可随时换线或停止。
+    var locked:Bool {busy || measuring || loadingFailed || recovering || stopRequested || networkReconnecting}
     var selected:Node? {if case .node(let id)=state.activePolicy {return state.nodes.first{$0.id==id}};return nil}
     var selectedName:String {state.label(state.activePolicy)}
     var actualName:String {if state.mode == .direct{return "直连"};guard let tag=CoreAPIClient.actualTag(proxyInfo) else {return "尚未检测"};return label(tag)}
@@ -316,6 +317,7 @@ import QingzhouKit
             connectivityResults=results;reachability=ConnectivityResult.combinedSummary(results)
             for result in results {log(result.summary)}
             guard StartupConnectivityPolicy.allows(results,mode:next.mode) else {throw wakeStartupError(results)}
+            if ConnectivityHealth.evaluate(results) != .healthy {log("连通性探测尚未通过，继续连接并在后台复查；不因网站或测速超时退出")}
             guard !networkChanged,!coreFailed else {throw ProxyError("启动期间核心或网络发生变化")}
             timing.begin("captureActivation");startupStage="应用接管"
             try await capture.activateTunnel()
