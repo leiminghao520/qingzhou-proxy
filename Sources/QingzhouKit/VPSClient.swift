@@ -93,7 +93,7 @@ public final class VPSClient: NSObject, URLSessionTaskDelegate, @unchecked Senda
     }
     public static func endpoint(subscription: URL, advertised: String?) throws -> URL {
         guard subscription.scheme == "https", let host=subscription.host, subscription.user == nil, subscription.password == nil,
-              advertised == "/api/client/v1" else {throw ProxyError("该订阅没有提供轻舟联动能力")}
+              advertised == "/api/client/v1" else {throw ProxyError("该订阅没有提供汐航联动能力")}
         var url=URLComponents(); url.scheme="https"; url.host=host; url.port=subscription.port; url.path="/api/client/v1"
         guard let result=url.url else {throw ProxyError("联动地址无效")}; return result
     }

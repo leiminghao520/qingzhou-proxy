@@ -13,7 +13,7 @@ import QingzhouKit
     var samples:[[String:Any]]=[]
     let data=try Data(contentsOf:URL(fileURLWithPath:args[2]))
     let catalog=try JSONDecoder().decode(ProfileCatalog.self,from:data);try catalog.validate()
-    let state=catalog.active,credentials=KeychainStore()
+    let state=catalog.active,credentials=UnifiedCredentialStore.native
     let dir=FileManager.default.temporaryDirectory.appendingPathComponent("qingzhou-network-"+UUID().uuidString)
     try FileManager.default.createDirectory(at:dir,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
     defer{try? FileManager.default.removeItem(at:dir)}

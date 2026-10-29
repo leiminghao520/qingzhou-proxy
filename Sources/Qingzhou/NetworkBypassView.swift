@@ -83,7 +83,7 @@ private struct BypassContent:View,Equatable {
     }
     var body:some View {
         VStack(alignment:.leading,spacing:12) {
-            Text("绕过轻舟").font(.title2.bold())
+            Text("绕过汐航").font(.title2.bold())
             Text("普通直连由核心访问目标；网络绕过优先于普通规则，同步系统代理例外、TUN 和 DNS。显式指定代理的应用可能忽略系统例外。")
                 .font(.caption).foregroundStyle(.secondary)
             GroupBox("公司网络 DNS") {

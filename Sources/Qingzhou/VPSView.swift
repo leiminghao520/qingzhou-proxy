@@ -58,7 +58,7 @@ struct VPSView: View {
         }
         .task {
             while !Task.isCancelled {
-                if phase == .active {await center.refresh()}
+                if phase == .active {await CredentialAuthorization.$allowsInteraction.withValue(false) {await center.refresh()}}
                 do{try await Task.sleep(for:.seconds(30))}catch{break}
             }
         }
@@ -185,10 +185,10 @@ struct VPSView: View {
                 Text("检查时间："+diagnosticDate.formatted()).font(.caption)
                 ForEach(model.diagnosticRows){row in Text(row.stage+" · "+row.status+" · "+row.detail).font(.callout)}
                 ForEach(jointRows){row in Text(row.stage+" · "+row.status+" · "+row.detail).font(.callout)}
-                Button("导出 JSON") {if var session=model.diagnosticSession {session.results += jointRows;saveDiagnosticData(try? session.export(json:true),name:"轻舟联合诊断.json")}}
+                Button("导出 JSON") {if var session=model.diagnosticSession {session.results += jointRows;saveDiagnosticData(try? session.export(json:true),name:"汐航联合诊断.json")}}
                 Text("服务端："+(center.status["state"].string=="fresh" ? "使用上述最新状态":"未知，管理通道不可达不能据此判定代理故障"))
                 Button("导出脱敏诊断") {
-                    let panel=NSSavePanel();panel.nameFieldStringValue="轻舟联合诊断.txt"
+                    let panel=NSSavePanel();panel.nameFieldStringValue="汐航联合诊断.txt"
                     if panel.runModal() == .OK,let url=panel.url {
                         if var session=model.diagnosticSession {
                             session.results += jointRows

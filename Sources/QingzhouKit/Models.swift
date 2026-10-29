@@ -125,7 +125,7 @@ public protocol CredentialStore: AnyObject {
 public final class MemoryCredentials: CredentialStore {
     private var values: [String:String] = [:]
     public init() {}
-    public func get(_ ref: String) throws -> String { guard let v = values[ref] else { throw ProxyError("凭据不存在，请重新导入节点") }; return v }
+    public func get(_ ref: String) throws -> String { guard let v = values[ref] else { throw MissingCredential() }; return v }
     public func set(_ value: String, for ref: String) throws { values[ref] = value }
     public func remove(_ ref: String) throws { values.removeValue(forKey: ref) }
 }

@@ -103,8 +103,8 @@ struct TargetResultSheet:View {
                 }
             }}
             Menu("导出脱敏报告") {
-                Button("文本") {saveDiagnosticData(try? office.sessions[target.id]?.export(json:false),name:"轻舟目标检查.txt")}
-                Button("JSON") {saveDiagnosticData(try? office.sessions[target.id]?.export(json:true),name:"轻舟目标检查.json")}
+                Button("文本") {saveDiagnosticData(try? office.sessions[target.id]?.export(json:false),name:"汐航目标检查.txt")}
+                Button("JSON") {saveDiagnosticData(try? office.sessions[target.id]?.export(json:true),name:"汐航目标检查.json")}
             }.disabled(office.sessions[target.id]==nil)
         }.padding(20).frame(minWidth:600,minHeight:420)
     }
@@ -182,7 +182,7 @@ struct DeveloperProxyAssistantView:View {
                 Button("检查本地端口") {Task {
                     let target=SavedDiagnosticTarget(name:"本地端口",host:"127.0.0.1",port:port,test:.tcp,expectedPath:.system)
                     let result=await TargetConnectionProbe.run(target,evidence:TargetPathEvidence(rows:[],addresses:["127.0.0.1"],corporate:false),state:AppState(),connected:true)
-                    results=[result.status+"："+result.detail,"端口可连接不证明监听进程属于轻舟。"]
+                    results=[result.status+"："+result.detail,"端口可连接不证明监听进程属于汐航。"]
                 }}
             }.controlSize(.small)
             ForEach(Array(results.enumerated()),id:\.offset) {_,result in Text(result).font(.caption).textSelection(.enabled)}

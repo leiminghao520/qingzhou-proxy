@@ -25,7 +25,8 @@ import QingzhouKit
     @Published var selectionStatus:SelectionStatus?
     @Published var measurementCancelling=false
     @Published var state=AppState()
-    @Published var connection=Connection.disconnected {didSet{if connection != oldValue {invalidateDiagnostic();invalidateOfficeResults();if connection == .connected {publishOfficeConnectivity()}}}}
+    @Published private(set) var connectedSince: Date?
+    @Published var connection=Connection.disconnected {didSet{if connection != oldValue {connectedSince = connection == .connected ? dependencies.now() : nil};if connection != oldValue {invalidateDiagnostic();invalidateOfficeResults();if connection == .connected {publishOfficeConnectivity()}}}}
     @Published var startupStage:String?
     @Published var startupStartedAt:TimeInterval?
     var startupGeneration=UUID()
@@ -198,7 +199,7 @@ import QingzhouKit
         } catch {loadingFailed=true;errorMessage="配置无法读取或应用已运行，未覆盖原文件。";return}
         helperAuthorizationAttempted=FileManager.default.fileExists(atPath:directory.appendingPathComponent("helper-authorization-requested").path)
         timeline.activate()
-        if let store {store.history=profileHistory;do{try profileHistory.initialize(store.catalog)}catch{historyStatus=profileHistory.lastError}}
+        if let store {store.history=profileHistory;do{try CredentialAuthorization.$allowsInteraction.withValue(false) {try profileHistory.initialize(store.catalog)}}catch{historyStatus=profileHistory.lastError}}
         logBuffer.configure(url:directory.appendingPathComponent("diagnostic.log"))
         log("应用启动，正在检查上次恢复记录")
         recoveryPending=proxy.hasRecovery
@@ -273,7 +274,11 @@ import QingzhouKit
         defer {historyStatus=profileHistory.lastError}
         try store.commit(next);state=store.state;errorMessage=nil
     }
-    private func secrets(_ next:AppState,_ control:CoreControlContext) -> [String] {[control.secret]+next.nodes.flatMap{[(try? credentials.get($0.credentialRef)) ?? "",(try? credentials.get($0.credentialRef+".obfs")) ?? ""]}}
+    private func secrets(_ next:AppState,_ control:CoreControlContext) -> [String] {
+        CredentialAuthorization.$allowsInteraction.withValue(false) {
+            [control.secret]+next.nodes.flatMap{[(try? credentials.get($0.credentialRef)) ?? "",(try? credentials.get($0.credentialRef+".obfs")) ?? ""]}
+        }
+    }
     func checkStartup(_ generation:UUID) throws {
         try Task.checkCancellation()
         guard startupGeneration==generation,!stopRequested,!pendingRecovery else {throw CancellationError()}
@@ -429,12 +434,16 @@ import QingzhouKit
         await changeSelection(ref, in: group)
     }
     func connect() async {
+        await CredentialAuthorization.$attempt.withValue(CredentialAuthorization.Attempt()) {await connectWithCredentialSession()}
+    }
+    private func connectWithCredentialSession() async {
         guard !locked,state.activePolicy != nil || state.mode == .direct else{return}
         cancelWakeRecovery();cancelConnectionWait();userWantsConnection=true;networkReleased=false
         busy=true;connection = .connecting;reachability="尚未检测";connectivityResults=ConnectivityResult.pending;defer{busy=false}
         do {guard !recoveryPending,!proxy.hasRecovery else {throw ProxyError("请先恢复原代理")}
             let status=try? await capture.helperStatus()
             if status?.supportsManagedSystemProxy != true {
+                guard CredentialAuthorization.allowsInteraction else {throw ConnectionFailure(.permission,"自动连接需要可复用的辅助服务授权，请手动连接或在设置中安装辅助服务")}
                 guard !helperAuthorizationAttempted else {throw ConnectionFailure(.permission,"辅助服务尚未就绪，请在设置中安装或更新；不再自动重复申请授权")}
                 helperAuthorizationAttempted=true
                 try Data().write(to:directory.appendingPathComponent("helper-authorization-requested"),options:.atomic)
@@ -484,7 +493,7 @@ import QingzhouKit
         log("应急恢复开始：核对本地代理及已安装辅助服务，与当前模式无关")
         do {
             try await capture.emergencyRecover(preserveExternal:true);stopTelemetry();protectionSummary=[];recoveryPending=false;connection = .disconnected
-            connectivityResults=[];helperStatus="轻舟接管已清理，外部网络已保留并核对";reachability="尚未检测";errorMessage=nil;log(helperStatus);recordEvent(.recovery,.succeeded,.recoverySucceeded)
+            connectivityResults=[];helperStatus="汐航接管已清理，外部网络已保留并核对";reachability="尚未检测";errorMessage=nil;log(helperStatus);recordEvent(.recovery,.succeeded,.recoverySucceeded)
         }catch {stopTelemetry();recoveryPending=true;connection = .error;helperStatus="恢复未完成，请查看错误及恢复记录";recordEvent(.recovery,.failed,.recoveryConflict);report(error)}
     }
     func startupRecovery() async {
@@ -503,7 +512,7 @@ import QingzhouKit
             }
         }else if evidence.journalPresent || !evidence.available {recoveryPending=true;helperStatus="辅助服务不可用，仍有恢复记录待处理"}
         // 用户开启自动连接后仅尝试一次；恢复记录和无效策略阻止自动接管。
-        if state.autoConnect,!recoveryPending,state.activePolicy != nil || state.mode == .direct {await connect()}
+        if state.autoConnect,!recoveryPending,state.activePolicy != nil || state.mode == .direct {await CredentialAuthorization.$allowsInteraction.withValue(false) {await connect()}}
         maintenanceTask=Task{[weak self] in while !Task.isCancelled {await self?.maintenance();try? await Task.sleep(nanoseconds:60_000_000_000)}}
     }
     func measure(_ ids:[UUID]?=nil) {
@@ -550,7 +559,7 @@ import QingzhouKit
         do {
             if value {guard Bundle.main.bundleURL.path.hasPrefix("/Applications/") else {throw ProxyError("请先将应用放入 Applications，再启用登录启动")};try SMAppService.mainApp.register()}else{try SMAppService.mainApp.unregister()}
             var next=state;next.loginAtStartup=value;try persist(next)
-            if SMAppService.mainApp.status == .requiresApproval {errorMessage="请到系统设置中的登录项允许轻舟代理"}
+            if SMAppService.mainApp.status == .requiresApproval {errorMessage="请到系统设置中的登录项允许汐航"}
         }catch{report(error)}
     }
     func copyTerminalProxy(){let p=state.listenPort;let value="export http_proxy=http://127.0.0.1:\(p) https_proxy=http://127.0.0.1:\(p) all_proxy=socks5h://127.0.0.1:\(p) HTTP_PROXY=http://127.0.0.1:\(p) HTTPS_PROXY=http://127.0.0.1:\(p) ALL_PROXY=socks5h://127.0.0.1:\(p)";NSPasteboard.general.clearContents();NSPasteboard.general.setString(value,forType:.string);log("已复制本地终端代理命令，不包含节点凭据")}
@@ -771,7 +780,7 @@ import QingzhouKit
         userWantsConnection=false;cancelConnectionWait()
         await cancelWakeRecoveryAndWait()
         guard !busy else {errorMessage="正在更新配置，请稍后退出";return false}
-        guard drafts.allowLeaving("退出轻舟",all:true) else{return false}
+        guard drafts.allowLeaving("退出汐航",all:true) else{return false}
         if loadingFailed{return true}
         cancelHealthRefresh()
         if measuring {cancelMeasurement();await measurementTask?.value}
@@ -785,7 +794,7 @@ import QingzhouKit
                 try await self.capture.verifyReleasedForQuit()
             },deferredRecovery:{error in
                 self.recoveryPending=true
-                self.log("退出时已确认轻舟不再接管；恢复记录留待下次处理："+Redactor.redact(error.localizedDescription))
+                self.log("退出时已确认汐航不再接管；恢复记录留待下次处理："+Redactor.redact(error.localizedDescription))
             })
             connection = .disconnected
             await timeline.drain()

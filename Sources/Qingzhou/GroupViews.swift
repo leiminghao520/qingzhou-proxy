@@ -97,7 +97,7 @@ struct GroupsView: View {
                             .font(.caption.bold())
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(isSelected ? Theme.connectedGreen : Theme.accentBlue)
+                    .tint(Theme.accentBlue)
                     .controlSize(.small)
                     .disabled(model.locked || model.state.nodes.isEmpty)
                 }
@@ -108,7 +108,7 @@ struct GroupsView: View {
         .clipShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
         .overlay(
             RoundedRectangle(cornerRadius: Theme.cardCornerRadius)
-                .stroke(isSelected ? Theme.connectedGreen.opacity(0.5) : Theme.subtleBorder, lineWidth: isSelected ? 1.5 : 1)
+                .stroke(isSelected ? Theme.accentBlue.opacity(0.5) : Theme.subtleBorder, lineWidth: isSelected ? 1.5 : 1)
         )
     }
     
@@ -117,7 +117,7 @@ struct GroupsView: View {
         let isSelected = model.state.activePolicy == .group(group.id)
         
         return VStack(alignment: .leading, spacing: 12) {
-            // Header
+            // 策略组摘要
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 8) {
@@ -152,7 +152,7 @@ struct GroupsView: View {
                             .font(.caption.bold())
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(isSelected ? Theme.connectedGreen : Theme.accentBlue)
+                    .tint(Theme.accentBlue)
                     .controlSize(.small)
                     
                     Button("编辑") {
@@ -173,14 +173,14 @@ struct GroupsView: View {
             
             Divider().opacity(0.5)
             
-            // Member interactive selector
+            // 成员选择
             if group.kind == .select {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("点击快速切换组内成员节点：")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                     
-                    // Chip Grid
+                    // 成员标签列表
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
                             ForEach(group.members, id: \.self) { member in
@@ -192,19 +192,19 @@ struct GroupsView: View {
                                         if isMemberActive {
                                             Image(systemName: "checkmark.circle.fill")
                                                 .font(.system(size: 11))
-                                                .foregroundStyle(Theme.connectedGreen)
+                                                .foregroundStyle(Theme.accentBlue)
                                         }
                                         Text(model.state.label(member))
                                             .font(.system(size: 12, weight: isMemberActive ? .semibold : .regular))
                                     }
                                     .padding(.horizontal, 10)
                                     .padding(.vertical, 5)
-                                    .background(isMemberActive ? Theme.connectedGreen.opacity(0.14) : Color.secondary.opacity(0.08))
-                                    .foregroundStyle(isMemberActive ? Theme.connectedGreen : Color.primary)
+                                    .background(isMemberActive ? Theme.accentBlue.opacity(0.14) : Color.secondary.opacity(0.08))
+                                    .foregroundStyle(isMemberActive ? Theme.accentBlue : Color.primary)
                                     .clipShape(Capsule())
                                     .overlay(
                                         Capsule()
-                                            .stroke(isMemberActive ? Theme.connectedGreen.opacity(0.4) : Color.clear, lineWidth: 1)
+                                            .stroke(isMemberActive ? Theme.accentBlue.opacity(0.4) : Color.clear, lineWidth: 1)
                                     )
                                     .contentShape(Capsule())
                                 }
@@ -230,7 +230,7 @@ struct GroupsView: View {
         .clipShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
         .overlay(
             RoundedRectangle(cornerRadius: Theme.cardCornerRadius)
-                .stroke(isSelected ? Theme.connectedGreen.opacity(0.5) : Theme.subtleBorder, lineWidth: isSelected ? 1.5 : 1)
+                .stroke(isSelected ? Theme.accentBlue.opacity(0.5) : Theme.subtleBorder, lineWidth: isSelected ? 1.5 : 1)
         )
     }
     
@@ -253,7 +253,7 @@ struct GroupsView: View {
     }
 }
 
-// MARK: - Modern Group Editor
+// MARK: - 策略组编辑器
 struct GroupEditor: View {
     @ObservedObject var model: AppModel
     var group: PolicyGroup?

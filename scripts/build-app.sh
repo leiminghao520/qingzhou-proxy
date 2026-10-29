@@ -7,10 +7,11 @@ output="$(cd "$output" && pwd)"
 version=$(/usr/bin/sed -n 's/.*current="\([^"]*\)".*/\1/p' Sources/QingzhouKit/BuildVersion.swift)
 build=$(/usr/bin/sed -n 's/.*build=\([0-9]*\).*/\1/p' Sources/QingzhouKit/BuildVersion.swift)
 test -n "$version"; test -n "$build"
-output="$(/usr/bin/mktemp -d "$output/qingzhou-$version-$(date +%Y%m%d-%H%M%S).XXXXXX")"
+output="$(/usr/bin/mktemp -d "$output/xihang-$version-$(date +%Y%m%d-%H%M%S).XXXXXX")"
 bash scripts/build-age.sh
 /usr/bin/python3 scripts/fetch-core.py
 /usr/bin/python3 scripts/verify-yams.py
+/usr/bin/python3 scripts/verify-pow.py
 /usr/bin/python3 scripts/helper-script-tests.py
 /usr/bin/python3 scripts/verify-domestic.py
 mkdir -p .build/httpcompat
@@ -18,7 +19,7 @@ mkdir -p .build/httpcompat
 scripts/swift-local.sh build -c release --product Qingzhou
 scripts/swift-local.sh build -c release --product QingzhouRunner
 scripts/swift-local.sh build -c release --product QingzhouHelper
-app="$output/轻舟代理.app"
+app="$output/汐航.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp .build/release/Qingzhou "$app/Contents/MacOS/Qingzhou"
 cp .build/httpcompat/qzhttp "$app/Contents/Resources/qzhttp"
@@ -39,8 +40,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <plist version="1.0"><dict>
 <key>CFBundleExecutable</key><string>Qingzhou</string>
 <key>CFBundleIdentifier</key><string>cn.qingzhou.proxy</string>
-<key>CFBundleName</key><string>轻舟代理</string>
-<key>CFBundleDisplayName</key><string>轻舟代理</string>
+<key>CFBundleName</key><string>汐航</string>
+<key>CFBundleDisplayName</key><string>汐航</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>$version</string>
 <key>CFBundleVersion</key><string>$build</string>
@@ -60,6 +61,11 @@ elif [ ! -f .build/AppIcon.icns ]; then
     /usr/bin/python3 scripts/make-icns.py .build/icon-png .build/AppIcon.icns
 fi
 cp .build/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
+cp Vendor/Pow/LICENSE "$app/Contents/Resources/Pow.LICENSE"
+cp Vendor/pow-lock.json "$app/Contents/Resources/pow-lock.json"
+for resource in .build/release/Pow_Pow.bundle; do
+    if [ -d "$resource" ]; then cp -R "$resource" "$app/Contents/Resources/"; fi
+done
 codesign --force --sign "${QZ_SIGNING_IDENTITY:--}" "$app/Contents/Resources/qzhttp"
 codesign --force --sign "${QZ_SIGNING_IDENTITY:--}" "$app/Contents/Resources/sing-box"
 codesign --force --sign "${QZ_SIGNING_IDENTITY:--}" "$app/Contents/Resources/QingzhouRunner"
@@ -70,12 +76,16 @@ codesign --force --sign "${QZ_SIGNING_IDENTITY:--}" "$app"
 codesign --verify --deep --strict "$app"
 /usr/bin/python3 - "$app" "$version" <<'PYTHON'
 import pathlib,hashlib,json,sys,subprocess
-app=pathlib.Path(sys.argv[1]);files=['Contents/Resources/age','Contents/Resources/age-keygen','Contents/Resources/age.LICENSE','Contents/MacOS/Qingzhou','Contents/Resources/sing-box','Contents/Resources/QingzhouRunner','Contents/Resources/QingzhouHelper','Contents/Resources/qzhttp','Contents/Resources/shadowrocket-default.json','Contents/Resources/domestic-rules.json','Contents/Resources/domestic-rules-lock.json','Contents/Resources/domestic-domain.LICENSE']
+app=pathlib.Path(sys.argv[1]);files=['Contents/Resources/age','Contents/Resources/age-keygen','Contents/Resources/age.LICENSE','Contents/MacOS/Qingzhou','Contents/Resources/sing-box','Contents/Resources/QingzhouRunner','Contents/Resources/QingzhouHelper','Contents/Resources/qzhttp','Contents/Resources/shadowrocket-default.json','Contents/Resources/domestic-rules.json','Contents/Resources/domestic-rules-lock.json','Contents/Resources/domestic-domain.LICENSE','Contents/Resources/AppIcon.icns','Contents/Resources/Pow.LICENSE','Contents/Resources/pow-lock.json']
+files += ['Contents/Info.plist'] + [str(p.relative_to(app)) for p in sorted((app/'Contents/Resources/Pow_Pow.bundle').rglob('*')) if p.is_file()]
 source=pathlib.Path.cwd()
-source_files=sorted([path for folder in ['Sources','scripts','Resources','tools','server'] for path in (source/folder).rglob('*') if path.is_file() and not any(part.startswith('.') or part=='__pycache__' for part in path.relative_to(source).parts)]+[source/'Package.swift'])
+revision=subprocess.run(['git','rev-parse','HEAD'],capture_output=True,text=True)
+provenance=json.loads((source/'source-provenance.json').read_text()) if (source/'source-provenance.json').is_file() else {}
+head=revision.stdout.strip() if revision.returncode==0 else provenance.get('baseCommit','source-archive')
+source_files=sorted([path for folder in ['Sources','scripts','Resources','tools','server'] for path in (source/folder).rglob('*') if path.is_file() and not any(part.startswith('.') or part=='__pycache__' for part in path.relative_to(source).parts)]+[source/'Package.swift',source/'Vendor/pow-lock.json'])
 source_digest=hashlib.sha256()
 for path in source_files:source_digest.update(str(path.relative_to(source)).encode());source_digest.update(hashlib.sha256(path.read_bytes()).digest())
-manifest={'version':sys.argv[2],'gitHead':subprocess.run(['git','rev-parse','HEAD'],capture_output=True,text=True,check=True).stdout.strip(),'sourceTreeSHA256':source_digest.hexdigest(),'includesUncommittedChanges':True,'components':{f:{'size':(app/f).stat().st_size,'sha256':hashlib.sha256((app/f).read_bytes()).hexdigest()} for f in files}}
+manifest={'version':sys.argv[2],'gitHead':head,'sourceTreeSHA256':source_digest.hexdigest(),'includesUncommittedChanges':True,'components':{f:{'size':(app/f).stat().st_size,'sha256':hashlib.sha256((app/f).read_bytes()).hexdigest()} for f in files}}
 (app.parent/'artifact-manifest.json').write_text(json.dumps(manifest,indent=2))
 PYTHON
 echo "APP_BUILD_OK $app"

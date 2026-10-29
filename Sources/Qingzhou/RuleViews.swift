@@ -44,7 +44,7 @@ struct RuleView: View {
             Picker("规则来源", selection: $tab) {
                 Text("自定义分流规则 (\(model.state.rules.count))").tag("自定义规则")
                 Text("远程分流规则集 (\(model.state.remoteRules.count))").tag("远程规则源")
-                Text("绕过轻舟 (\(model.state.effectiveBypasses.count))").tag("网络绕过")
+                Text("绕过汐航 (\(model.state.effectiveBypasses.count))").tag("网络绕过")
             }
             .pickerStyle(.segmented)
             

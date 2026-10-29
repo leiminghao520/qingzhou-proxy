@@ -81,7 +81,7 @@ final class Service {
     // 仅供单独链接的离线检查程序；正式构建不包含此初始化入口。
     init(fixtureRoot:URL,backend:RouteBackend) {
         root=fixtureRoot;routeBackend=backend
-        dynamic=SCDynamicStoreCreate(nil,"轻舟恢复隔离夹具" as CFString,nil,nil)!
+        dynamic=SCDynamicStoreCreate(nil,"汐航恢复隔离夹具" as CFString,nil,nil)!
         manifest=Manifest(version:HelperPaths.version,uid:getuid(),clientHash:"fixture",coreHash:"fixture",helperHash:"fixture")
     }
     #endif
@@ -130,7 +130,7 @@ final class Service {
         captureGeneration=UUID();dynamicAnswerRoutes=[:];domainRouteSummary=[];activatePrepared=nil;activeRequest=nil;networkChecks?.cancel();networkChecks=nil;networkTimer?.cancel();networkTimer=nil;if let networkStore {SCDynamicStoreSetDispatchQueue(networkStore,nil)};networkStore=nil;routeEvents?.cancel();routeEvents=nil;pendingNetworkChange=nil;snapshotRetry.reset();dnsForwarder?.stop();dnsForwarder=nil;capturePlan=nil;proxyMismatchSince=nil;dynamicRules=nil;changeWindow.reset();protectedQueriesSuspended=false;captureNodeAddresses=[:];captureNodeInterfaces=[:];knownProtectedDomains=[]
         guard let record=journal else{        if let process,process.isRunning {process.terminate();for _ in 0..<40 {if !process.isRunning{break};usleep(50000)};if process.isRunning{kill(process.processIdentifier,SIGKILL)};process.waitUntilExit()};process=nil;owner=nil;try? FileManager.default.removeItem(at:root.appendingPathComponent("runtime.json"))
 return};var issues:[String]=[]
-        // 用户显式恢复时也只清理仍属于轻舟的入口，不能覆盖后来接管的代理。
+        // 用户显式恢复时也只清理仍属于汐航的入口，不能覆盖后来接管的代理。
         do{issues += try restoreProxy(record.proxies ?? [],preserveExternal:preserveExternal)}catch{issues.append("系统代理读取或提交失败："+error.localizedDescription)}
         issues += DNSServiceTransaction.restore(record.allDNSServices,read:readDNSService,write:writeDNSService)
         let recoverySample=preserveExternal ? try routeSample():nil
@@ -184,7 +184,7 @@ return};var issues:[String]=[]
             guard record.routes.allSatisfy({route in
                 let state=remaining.state(ProtectedRoute(destination:route.destination,gateway:route.gateway,interface:route.interface,scope:route.scope))
                 return state != .owned && state != .ambiguous
-            }) else {throw ProxyError("仍有轻舟拥有的路由，保留恢复记录并拒绝完成交接")}
+            }) else {throw ProxyError("仍有汐航拥有的路由，保留恢复记录并拒绝完成交接")}
             // 显式交接外部网络时保留完整审计快照，不能直接丢弃恢复证据。
             let archive=root.appendingPathComponent("recovery-preserved-"+UUID().uuidString+".json")
             try SecureFile.write(JSONEncoder().encode(record),to:archive)
@@ -445,14 +445,14 @@ return};var issues:[String]=[]
                 return TunReply(ok:true,message:"辅助服务正在重建，客户端等待核验",running:helperIsRunning,phase:"networkReconnecting")
             }
             phase="recovery";try stop(preserveExternal:request.preserveExternal==true);phase="restored";lastFailure=nil
-            return TunReply(ok:true,message:request.preserveExternal==true ? "轻舟接管已清理，外部网络已保留":"原网络已恢复")
+            return TunReply(ok:true,message:request.preserveExternal==true ? "汐航接管已清理，外部网络已保留":"原网络已恢复")
         default:throw ProxyError("只允许状态、启动、停止、恢复操作")}
     }
 }
 func run() throws {
     let preserving=CommandLine.arguments.dropFirst()==["--recover-preserving-external"]
     let service=try Service(recoveryOnly:preserving)
-    if preserving {try service.recoverStartup(preserveExternal:true);print("外部网络保留完成；轻舟仍拥有的残留已清理");return}
+    if preserving {try service.recoverStartup(preserveExternal:true);print("外部网络保留完成；汐航仍拥有的残留已清理");return}
     if CommandLine.arguments.dropFirst()==["--recover"]{try service.recoverStartup();print("原网络恢复完成");return}
     guard CommandLine.arguments.count==1 else{throw ProxyError("辅助服务参数无效")}
     try service.recoverStartup();umask(0o077)

@@ -55,7 +55,7 @@ extension Service {
         let checks=NetworkCheckScheduler(enqueue: { [weak self] operation in self?.queue.async(execute: operation) }, operation: { [weak self] in self?.checkNetworkChange() })
         networkChecks=checks
         var context=SCDynamicStoreContext(version:0,info:Unmanaged.passUnretained(self).toOpaque(),retain:nil,release:nil,copyDescription:nil)
-        networkStore=SCDynamicStoreCreate(nil,"轻舟企业保护监控" as CFString,{_,_,info in
+        networkStore=SCDynamicStoreCreate(nil,"汐航企业保护监控" as CFString,{_,_,info in
             guard let info else{return};Unmanaged<Service>.fromOpaque(info).takeUnretainedValue().networkChecks?.request()
         },&context)
         if let networkStore {SCDynamicStoreSetNotificationKeys(networkStore,nil,["State:/Network/Global/.*","State:/Network/Service/.*/(DNS|IPv4|IPv6)","State:/Network/Interface/.*/.*"] as CFArray);SCDynamicStoreSetDispatchQueue(networkStore,queue)}

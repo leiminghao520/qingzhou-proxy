@@ -40,8 +40,8 @@ public enum BypassDiagnostics {
             let gateway=NetworkInspection.routeGateway(info) ?? "接口直连或不可确认"
             rows.append(address+" → "+interface+" / "+gateway)
             let targets=state.enabledBypasses.filter{$0.matches(host:host,ip:address)}
-            if let tunnel=ownedTunnel {rows.append("TUN 路径："+(interface==tunnel ? "仍进入轻舟隧道":"未进入轻舟隧道"));if !targets.isEmpty,active,interface==tunnel {failed=true}}
-            else {rows.append("TUN 路径：未取得本次轻舟隧道身份，不能仅凭 utun 名称判定")}
+            if let tunnel=ownedTunnel {rows.append("TUN 路径："+(interface==tunnel ? "仍进入汐航隧道":"未进入汐航隧道"));if !targets.isEmpty,active,interface==tunnel {failed=true}}
+            else {rows.append("TUN 路径：未取得本次汐航隧道身份，不能仅凭 utun 名称判定")}
             for item in targets where item.exit == .pinned {
                 let service=services.first{$0.id==item.serviceID}
                 let valid=service?.active==true && service?.interface==interface && item.gateway==gateway
@@ -49,11 +49,11 @@ public enum BypassDiagnostics {
                 if !valid {failed=true}
             }
         }
-        if inspectEnterpriseDNS,!isIP,let store=SCDynamicStoreCreate(nil,"轻舟绕过 DNS 路径只读诊断" as CFString,nil,nil),let global=SCDynamicStoreCopyValue(store,"State:/Network/Global/IPv4" as CFString) as? [String:Any],let primary=global["PrimaryInterface"] as? String {
+        if inspectEnterpriseDNS,!isIP,let store=SCDynamicStoreCreate(nil,"汐航绕过 DNS 路径只读诊断" as CFString,nil,nil),let global=SCDynamicStoreCopyValue(store,"State:/Network/Global/IPv4" as CFString) as? [String:Any],let primary=global["PrimaryInterface"] as? String {
             guard !cancelled() else{throw CancellationError()}
             let sample=try backend.snapshot()
             let keys=SCDynamicStoreCopyKeyList(store,"State:/Network/Service/Qingzhou-.*/DNS" as CFString) as? [String] ?? []
-            // 诊断原网络时排除轻舟命名服务；此过滤不用于恢复或认领所有权。
+            // 诊断原网络时排除汐航命名服务；此过滤不用于恢复或认领所有权。
             let snapshot=try NetworkSnapshot.read(store:store,primary:primary,routes:sample.table,ownedDNSKeys:Set(keys),ownedTunnel:ownedTunnel,structuredRoutes:sample.planningRoutes,lookup:{try backend.lookup($0,ipv6:$1).queryText})
             let plan=try CapturePlan.make(snapshot:snapshot,state:state)
             rows.append("原系统 DNS："+snapshot.resolvers.map{$0.service+" / "+$0.interface+" / "+$0.servers.joined(separator:",")+" / order="+String($0.order)}.joined(separator:"；"))

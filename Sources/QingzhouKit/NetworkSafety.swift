@@ -4,13 +4,13 @@ import Darwin
 
 public enum NetworkSafety {
     public static func conflict(proxies:[String:Any],dns:String)->String? {
-        for key in ["HTTPEnable","HTTPSEnable","SOCKSEnable","ProxyAutoConfigEnable","ProxyAutoDiscoveryEnable"] where (proxies[key] as? NSNumber)?.boolValue==true {return "已有系统代理正在接管网络，请先关闭 Shadowrocket 等代理并确认网络恢复，再连接轻舟"}
+        for key in ["HTTPEnable","HTTPSEnable","SOCKSEnable","ProxyAutoConfigEnable","ProxyAutoDiscoveryEnable"] where (proxies[key] as? NSNumber)?.boolValue==true {return "已有系统代理正在接管网络，请先关闭 Shadowrocket 等代理并确认网络恢复，再连接汐航"}
         let fake=dns.components(separatedBy:.newlines).contains{line in
             let text=line.trimmingCharacters(in:.whitespaces)
             guard text.hasPrefix("nameserver["),let address=text.components(separatedBy:": ").last else{return false}
             return RuleEvaluator.matches(RoutingRule(kind:.cidr,value:"198.18.0.0/15",action:.direct),host:address,ip:address)==true
         }
-        return fake ? "检测到其他代理的 Fake-IP DNS，请先关闭该代理并等待 DNS 恢复，轻舟未接管网络":nil
+        return fake ? "检测到其他代理的 Fake-IP DNS，请先关闭该代理并等待 DNS 恢复，汐航未接管网络":nil
     }
     public static func excludingOwnedDNS(_ dns:String,owned:String?)->String {
         guard let owned else{return dns}

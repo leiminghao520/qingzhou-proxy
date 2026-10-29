@@ -2,40 +2,41 @@ import SwiftUI
 import AppKit
 import QingzhouKit
 
-// MARK: - Qingzhou UI Theme & Styles
+// MARK: - 汐航主题与基础样式
 enum Theme {
-    static let cornerRadius: CGFloat = 12
-    static let cardCornerRadius: CGFloat = 14
-    static let controlRadius: CGFloat = 8
+    static let cornerRadius: CGFloat = 16
+    static let cardCornerRadius: CGFloat = 16
+    static let controlRadius: CGFloat = 10
     
-    // Status Colors
-    static let connectedGreen = Color(nsColor: .systemGreen)
+    // 状态色与品牌色
+    static let connectedGreen = Color(nsColor: NSColor(name:nil) { $0.bestMatch(from:[.darkAqua,.aqua]) == .darkAqua ? NSColor.systemGreen : NSColor(red:0.08,green:0.45,blue:0.25,alpha:1) })
     static let connectingYellow = Color(nsColor: .systemOrange)
     static let disconnectedGray = Color.secondary
     static let dangerRed = Color(nsColor: .systemRed)
-    static let accentBlue = Color(nsColor: .systemBlue)
-    static let purpleAccent = Color(nsColor: .systemPurple)
-    static let cyanAccent = Color(nsColor: .systemTeal)
-    static let amberAccent = Color(nsColor: .systemOrange)
+    static let accentBlue = Color(nsColor: NSColor(name:nil) { $0.bestMatch(from:[.darkAqua,.aqua]) == .darkAqua ? NSColor(red:0.15,green:0.83,blue:0.85,alpha:1) : NSColor(red:0.02,green:0.45,blue:0.49,alpha:1) })
+    static let brand = Color(red:22/255,green:184/255,blue:197/255)
+    static let purpleAccent = Color(red:88/255,green:101/255,blue:232/255)
+    static let cyanAccent = accentBlue
+    static let amberAccent = Color(nsColor: NSColor(name:nil) { $0.bestMatch(from:[.darkAqua,.aqua]) == .darkAqua ? NSColor.systemOrange : NSColor(red:0.62,green:0.33,blue:0.04,alpha:1) })
     
-    static let trafficUpload = Color(nsColor: .systemOrange)
-    static let trafficDownload = Color(nsColor: .systemBlue)
+    static let trafficUpload = purpleAccent
+    static let trafficDownload = accentBlue
 
     // 背景颜色
     static var cardBackground: Color {
-        Color(nsColor: .controlBackgroundColor)
+        Color(nsColor: NSColor(name:nil) { $0.bestMatch(from:[.darkAqua,.aqua]) == .darkAqua ? NSColor(red:0.080,green:0.112,blue:0.163,alpha:1) : NSColor.white })
     }
     
     static var secondaryBackground: Color {
-        Color(nsColor: .windowBackgroundColor)
+        Color(nsColor: NSColor(name:nil) { $0.bestMatch(from:[.darkAqua,.aqua]) == .darkAqua ? NSColor(red:0.045,green:0.065,blue:0.103,alpha:1) : NSColor(red:0.955,green:0.970,blue:0.980,alpha:1) })
     }
     
     static var subtleBorder: Color {
-        Color.primary.opacity(0.07)
+        Color.primary.opacity(0.10)
     }
 }
 
-// MARK: - Protocol Tag Badge
+// MARK: - 协议标签
 struct ProtocolBadge: View {
     let kind: ProxyKind
     
@@ -63,7 +64,7 @@ struct ProtocolBadge: View {
     }
 }
 
-// MARK: - Latency Pill Badge
+// MARK: - 延迟标签
 struct LatencyBadge: View {
     let delayText: String
     
@@ -86,20 +87,23 @@ struct LatencyBadge: View {
             Circle()
                 .fill(color)
                 .frame(width: 6, height: 6)
-            Text(delayText)
-                .lineLimit(2)
+            Text((delayText.contains("历史结果") ? "历史 · " : "") + (delayText.components(separatedBy:" · ").first ?? delayText))
+                .lineLimit(1)
                 .help(delayText)
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .font(.system(size: 11, weight: .medium, design: .rounded)).monospacedDigit()
                 .foregroundStyle(color)
         }
         .padding(.horizontal, 7)
         .padding(.vertical, 3)
         .background(color.opacity(0.1))
         .clipShape(Capsule())
+        .fixedSize(horizontal:true,vertical:false)
+        .help(delayText)
+        .accessibilityLabel(delayText)
     }
 }
 
-// MARK: - Modern Stat Card
+// MARK: - 统计卡片
 struct ModernStatCard: View {
     let title: String
     let value: String
@@ -146,7 +150,7 @@ struct ModernStatCard: View {
     }
 }
 
-// MARK: - Modern Section Header
+// MARK: - 页面标题
 struct SectionHeader: View {
     let title: String
     var subtitle: String? = nil
@@ -158,7 +162,7 @@ struct SectionHeader: View {
         HStack(alignment: .center) {
             HStack(spacing: 6) {
                 Text(title)
-                    .font(.headline.weight(.semibold))
+                    .font(.system(size:20,weight:.bold,design:.rounded))
                 
                 if let subtitle, !subtitle.isEmpty {
                     HelpTip(text: subtitle)
@@ -239,7 +243,7 @@ struct HelpTip: View {
     }
 }
 
-// MARK: - Usage Progress Bar
+// MARK: - 订阅用量进度
 struct UsageProgressBar: View {
     let usedBytes: Int64?
     let totalBytes: Int64?

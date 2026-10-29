@@ -2,7 +2,7 @@
 set -euo pipefail
 # 仅安装用户批准的固定组件；停止旧服务前完成新组件与恢复记录检查。
 if [ "$(id -u)" != 0 ] || [ -z "${SUDO_UID:-}" ]; then echo '请由当前登录用户用 sudo 安装辅助服务。'; exit 1; fi
-app="${1:?请指定本次构建的轻舟代理.app 路径}"
+app="${1:?请指定本次构建的汐航.app 路径}"
 /usr/bin/codesign --verify --deep --strict "$app"
 resources="$app/Contents/Resources"
 for file in QingzhouHelper sing-box; do test -f "$resources/$file"; test ! -L "$resources/$file"; test -x "$resources/$file"; done

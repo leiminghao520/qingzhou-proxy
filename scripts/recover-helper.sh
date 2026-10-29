@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-# 管理员维护不依赖旧客户端身份；只清理仍由恢复记录证明属于轻舟的接管。
+# 管理员维护不依赖旧客户端身份；只清理仍由恢复记录证明属于汐航的接管。
 if [ "$(id -u)" != 0 ]; then echo '请用 sudo 执行恢复。'; exit 1; fi
 root=/Library/PrivilegedHelperTools/cn.qingzhou.proxy
 plist=/Library/LaunchDaemons/cn.qingzhou.proxy.helper.plist
@@ -46,4 +46,4 @@ fi
 if [ -f "$root/recovery.json" ]; then /bin/cp -p "$root/recovery.json" "$backup/recovery-after-stop.json"; fi
 "$backup/recovery-helper" --recover-preserving-external
 if [ -f "$root/recovery.json" ]; then echo '恢复核验仍有未完成记录，取消更新。' >&2; exit 1; fi
-echo '轻舟接管已清理，其他 VPN 与系统代理已保留。'
+echo '汐航接管已清理，其他 VPN 与系统代理已保留。'

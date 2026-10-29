@@ -39,7 +39,11 @@ public final class ProfileHistoryStore {
         }
     }
     private func key() throws -> SymmetricKey {
-        if let value=try? credentials.get(keyRef),let data=Data(base64Encoded:value),data.count==32 {return SymmetricKey(data:data)}
+        do {
+            let value=try credentials.get(keyRef)
+            guard let data=Data(base64Encoded:value),data.count==32 else {throw ProxyError("历史密钥格式无效，未覆盖原密钥")}
+            return SymmetricKey(data:data)
+        } catch is MissingCredential {}
         let files=(try? FileManager.default.contentsOfDirectory(atPath:directory.path)) ?? []
         guard !files.contains(where:{$0.hasSuffix(".qzh")}) else {throw ProxyError("历史密钥不可用；未覆盖已有历史")}
         let key=SymmetricKey(size:.bits256),data=key.withUnsafeBytes{Data($0)}

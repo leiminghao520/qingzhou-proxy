@@ -1,7 +1,7 @@
 import SwiftUI
 import AppKit
 
-// 玻璃仅用于导航和操作层；正文使用磨砂卡片，避免文字与背景互相干扰。
+// 玻璃仅用于导航和操作层；正文使用不透明卡片，保持文字清晰。
 struct LiquidCanvas: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
@@ -9,12 +9,8 @@ struct LiquidCanvas: View {
 
     var body: some View {
         ZStack {
-            Color(nsColor: .windowBackgroundColor)
-            if !reduceTransparency && contrast != .increased {
-                RadialGradient(colors: [Theme.accentBlue.opacity(scheme == .dark ? 0.22 : 0.14), .clear], center: .topTrailing, startRadius: 0, endRadius: 620)
-                RadialGradient(colors: [Theme.purpleAccent.opacity(scheme == .dark ? 0.14 : 0.08), .clear], center: .bottomLeading, startRadius: 0, endRadius: 480)
-                RadialGradient(colors: [Theme.cyanAccent.opacity(0.07), .clear], center: .topLeading, startRadius: 0, endRadius: 340)
-            }
+            Theme.secondaryBackground
+
         }
         .ignoresSafeArea()
         .allowsHitTesting(false)
@@ -31,23 +27,11 @@ struct LiquidContentSurface: ViewModifier {
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         content
-            .background {
-                if reduceTransparency || contrast == .increased {
-                    shape.fill(Color(nsColor: .controlBackgroundColor))
-                } else {
-                    ZStack {
-                        shape.fill(.thinMaterial)
-                        shape.fill(.white.opacity(scheme == .dark ? 0.02 : 0.28))
-                    }
-                }
-            }
+            .background(shape.fill(Theme.cardBackground))
             .overlay {
-                shape.strokeBorder(
-                    LinearGradient(colors: [.white.opacity(scheme == .dark ? 0.18 : 0.7), .white.opacity(0.04), Color.primary.opacity(0.06)], startPoint: .topLeading, endPoint: .bottomTrailing),
-                    lineWidth: 1
-                ).allowsHitTesting(false)
+                shape.strokeBorder(contrast == .increased ? Color.primary.opacity(0.5) : Theme.subtleBorder, lineWidth: 1).allowsHitTesting(false)
             }
-            .shadow(color: .black.opacity(scheme == .dark ? 0.14 : 0.04), radius: 18, x: 0, y: 8)
+            .shadow(color: .black.opacity(scheme == .dark ? 0.14 : 0.04), radius: 12, x: 0, y: 5)
     }
 }
 

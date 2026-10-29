@@ -30,13 +30,19 @@ enum AppearancePreference: String, CaseIterable, Identifiable {
 struct AppearanceSetting: View {
     @AppStorage("appearancePreference") private var appearance = AppearancePreference.system
     var body: some View {
-        Picker("界面外观", selection: $appearance) {
-            Text("白天").tag(AppearancePreference.light)
-            Text("夜间").tag(AppearancePreference.dark)
-            Text("跟随系统").tag(AppearancePreference.system)
+        LabeledContent("界面外观") {
+            HStack(spacing:4) {
+                ForEach(AppearancePreference.allCases) { value in
+                    Button {appearance=value} label: {
+                        Text(value.title).font(.system(size:12,weight:appearance == value ? .semibold : .regular))
+                            .foregroundStyle(appearance == value ? Theme.accentBlue : Color.secondary)
+                            .fixedSize().padding(.horizontal,12).padding(.vertical,8)
+                            .background(appearance == value ? Theme.accentBlue.opacity(0.12) : .clear,in:RoundedRectangle(cornerRadius:8))
+                    }.buttonStyle(.plain).accessibilityValue(appearance == value ? "已选择":"未选择")
+                }
+            }.padding(4).background(Color.secondary.opacity(0.06),in:RoundedRectangle(cornerRadius:12))
+                .accessibilityIdentifier("appearancePicker")
         }
-        .pickerStyle(.segmented)
-        .accessibilityIdentifier("appearancePicker")
     }
 }
 

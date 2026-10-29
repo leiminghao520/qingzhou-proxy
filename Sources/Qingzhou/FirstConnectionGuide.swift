@@ -43,7 +43,7 @@ private struct UsageGuideView:View {
             }
             ScrollView {
                 VStack(alignment:.leading,spacing:20) {
-                    guide("开始使用",text:"添加订阅或节点，选择自动优选或手动线路，再点击连接。服务商提供订阅链接，轻舟负责导入与连接。")
+                    guide("开始使用",text:"添加订阅或节点，选择自动优选或手动线路，再点击连接。服务商提供订阅链接，汐航负责导入与连接。")
                     guide("自动与手动线路",text:"自动选择会在后台切换可用节点，界面保留自动选择并显示实际出口。手动线路发生故障时只重连原节点，不擅自换线。")
                     guide("接管范围",text:model.effectiveState.captureMode.usesTunnel ? "当前使用 TUN 接管系统网络；企业 VPN 与指定出口继续按保护规则处理。":"当前使用系统代理；浏览器等遵循系统设置的应用会使用代理，终端及部分应用需要单独配置。")
                     guide("辅助服务授权",text:"首次连接需要 macOS 管理员授权，以安装网络辅助服务。日常连接复用授权；辅助服务或应用身份更新后，可能需要再次批准。密码由系统授权窗口接收。")

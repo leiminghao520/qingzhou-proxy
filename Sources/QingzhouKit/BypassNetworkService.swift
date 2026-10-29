@@ -8,7 +8,7 @@ public struct BypassNetworkService:Identifiable,Equatable,Sendable {
     public let active:Bool
     public init(id:String,name:String,interface:String,active:Bool) {self.id=id;self.name=name;self.interface=interface;self.active=active}
     public static func read()->[Self] {
-        guard let preferences=SCPreferencesCreate(nil,"轻舟网络服务只读查询" as CFString,nil),let services=SCNetworkServiceCopyAll(preferences) as? [SCNetworkService],let store=SCDynamicStoreCreate(nil,"轻舟网络状态只读查询" as CFString,nil,nil) else {return []}
+        guard let preferences=SCPreferencesCreate(nil,"汐航网络服务只读查询" as CFString,nil),let services=SCNetworkServiceCopyAll(preferences) as? [SCNetworkService],let store=SCDynamicStoreCreate(nil,"汐航网络状态只读查询" as CFString,nil,nil) else {return []}
         return services.compactMap {service in
             guard SCNetworkServiceGetEnabled(service),let identifier=SCNetworkServiceGetServiceID(service) as String?,let device=SCNetworkServiceGetInterface(service),let interface=SCNetworkInterfaceGetBSDName(device) as String? else{return nil}
             let ipv4=SCDynamicStoreCopyValue(store,("State:/Network/Service/"+identifier+"/IPv4") as CFString) as? [String:Any]

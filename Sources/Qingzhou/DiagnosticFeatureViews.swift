@@ -55,8 +55,8 @@ struct TargetPathPanel:View {
                 Button("查询") {inspect()}.disabled(target.isEmpty || model.locked)
                 Button("停止诊断") {task?.cancel()}.disabled(task==nil)
                 Menu("导出脱敏报告") {
-                    Button("文本") {saveDiagnosticData(try? session?.export(json:false),name:"轻舟目标路径.txt")}
-                    Button("JSON") {saveDiagnosticData(try? session?.export(json:true),name:"轻舟目标路径.json")}
+                    Button("文本") {saveDiagnosticData(try? session?.export(json:false),name:"汐航目标路径.txt")}
+                    Button("JSON") {saveDiagnosticData(try? session?.export(json:true),name:"汐航目标路径.json")}
                 }.disabled(session==nil)
             }
             ScrollView {LazyVStack(alignment:.leading,spacing:10) {
@@ -122,8 +122,8 @@ struct NetworkTimelineView:View {
                 }
                 Toggle("仅异常",isOn:$failures)
                 Menu("脱敏导出") {
-                    Button("文本") {saveDiagnosticData(try? NetworkEventStore.export(filtered,json:false),name:"轻舟网络事件.txt")}
-                    Button("JSON") {saveDiagnosticData(try? NetworkEventStore.export(filtered,json:true),name:"轻舟网络事件.json")}
+                    Button("文本") {saveDiagnosticData(try? NetworkEventStore.export(filtered,json:false),name:"汐航网络事件.txt")}
+                    Button("JSON") {saveDiagnosticData(try? NetworkEventStore.export(filtered,json:true),name:"汐航网络事件.json")}
                 }
                 Button("清空") {confirmingClear=true}
             }

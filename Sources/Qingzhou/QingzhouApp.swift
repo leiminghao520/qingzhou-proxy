@@ -26,18 +26,23 @@ import QingzhouKit
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     @StateObject private var model: AppModel
     init() { _model = StateObject(wrappedValue: AppModel(dependencies: AppDependencies())) }
+    @State private var showingAbout = false
     @AppStorage("interfaceMode") private var interfaceMode = InterfaceMode.simple
 
     var body: some Scene {
-        WindowGroup("轻舟代理") {
+        WindowGroup("汐航") {
             ContentView(model: model)
                 .tint(Theme.accentBlue)
                 .frame(minWidth: interfaceMode == .simple ? 820 : 1040, minHeight: interfaceMode == .simple ? 620 : 700)
                 .onAppear { delegate.model = model }
+                .sheet(isPresented:$showingAbout) { VStack { XihangAboutView(); Button("完成") { showingAbout=false }.keyboardShortcut(.cancelAction).padding(.bottom,24) } }
                 .task { await model.startupRecovery() }
         }
         .defaultSize(width: 900, height: 680)
         .windowResizability(.contentMinSize)
+        .commands {
+            CommandGroup(replacing:.appInfo) { Button("关于汐航") { showingAbout=true } }
+        }
 
         MenuBarExtra {
             Text("\(model.connectionSummary) · \(model.state.mode.label)")
@@ -91,7 +96,7 @@ import QingzhouKit
                 NSApplication.shared.activate(ignoringOtherApps: true)
                 NSApplication.shared.windows.first { $0.canBecomeMain }?.makeKeyAndOrderFront(nil)
             }
-            Button("退出轻舟代理") { NSApplication.shared.terminate(nil) }
+            Button("退出汐航") { NSApplication.shared.terminate(nil) }
         } label: {
             OfficeMenuBarLabel(connected:model.connectionAvailable,status:model.connectionSummary)
         }

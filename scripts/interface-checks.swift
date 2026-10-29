@@ -75,10 +75,142 @@ struct InterfaceChecks {
         func capture(_ name: String, _ appearance: NSAppearance.Name = .aqua) async throws {
             window.makeKeyAndOrderFront(nil)
             NSApplication.shared.activate(ignoringOtherApps: true)
+            NSApplication.shared.appearance = NSAppearance(named: appearance)
             window.appearance = NSAppearance(named: appearance)
             await settle()
             try screenshot(window, to: output.appendingPathComponent(name + ".png"))
             screenshotCount += 1
+        }
+        if CommandLine.arguments.contains("--layout-only") {
+            let node=Node(name:"东京 · 用于验证长名称和高延迟的线路",kind:.hysteria2,server:"fixture.invalid",port:443)
+            model.state.nodes=[node];model.state.selectedPolicy = .node(node.id)
+            model.latencyInvalidatedAt=Date().addingTimeInterval(-60)
+            preferences.set("professional",forKey:"interfaceMode")
+            await settle()
+            window.setContentSize(NSSize(width:1040,height:700))
+            for value in [775,9999,99999] {
+                model.state.latency[node.id.uuidString]=LatencyResult(milliseconds:value,testedAt:Date().addingTimeInterval(-86400))
+                try await capture("history-\(value)-dark",.darkAqua)
+            }
+            try await capture("history-99999-light")
+            model.state.latency[node.id.uuidString]=LatencyResult(milliseconds:99999)
+            try await capture("current-99999-dark",.darkAqua)
+            model.state.latency[node.id.uuidString]=LatencyResult(milliseconds:nil,failure:.timeout)
+            try await capture("timeout-dark",.darkAqua)
+            model.state.latency[node.id.uuidString]=LatencyResult(milliseconds:99999,testedAt:Date().addingTimeInterval(-86400))
+            preferences.set("simple",forKey:"interfaceMode")
+            await settle();window.setContentSize(NSSize(width:820,height:620))
+            try await capture("simple-minimum-high-latency",.darkAqua)
+            model.connection = .connected;model.monitor.traffic = .available
+            model.trafficDisplay.receive(upload:12000,download:1200000,now:Date())
+            preferences.set("professional",forKey:"interfaceMode")
+            await settle();window.setContentSize(NSSize(width:1040,height:700))
+            try await capture("scroll-top-dark",.darkAqua)
+            func allScrolls(_ view:NSView)->[NSScrollView] {
+                (view as? NSScrollView).map{[$0]} ?? view.subviews.flatMap{allScrolls($0)}
+            }
+            let scrolls=allScrolls(host)
+            try check(!scrolls.isEmpty,"原生滚动容器仍然存在")
+            try check(scrolls.allSatisfy{!$0.hasVerticalScroller},"页面纵向滚动条已隐藏")
+            if let scroll=scrolls.max(by:{($0.documentView?.bounds.height ?? 0)<($1.documentView?.bounds.height ?? 0)}),let document=scroll.documentView {
+                let offset=max(0,document.bounds.height-scroll.contentView.bounds.height)
+                try check(offset>0,"连接态页面具备实际滚动内容")
+                scroll.contentView.scroll(to:NSPoint(x:0,y:offset));scroll.reflectScrolledClipView(scroll.contentView)
+                try await capture("scroll-bottom-dark",.darkAqua)
+                try check(scroll.contentView.bounds.origin.y>0,"隐藏指示条后仍可滚动到底部")
+            }
+            model.connection = .disconnected
+            print("LAYOUT_INTERFACE_CHECKS_OK checks=\(checks) screenshots=\(screenshotCount)")
+            return
+        }
+        if CommandLine.arguments.contains("--brand") {
+            let first = Node(name: "香港 · 海风", kind: .hysteria2, server: "fixture.invalid", port: 443)
+            let long = Node(name: "东京 · 这是一条用于验证窄窗口中文和 Tokyo Premium Route 长名称的线路", kind: .vless, server: "fixture.invalid", port: 443)
+            var sub = Subscription(name: "日常线路订阅")
+            sub.usage = UsageInfo(upload: 104857600, download: 1073741824, total: 107374182400)
+            model.state.nodes = [first, long]
+            model.state.subscriptions = [sub]
+            model.state.selectedPolicy = .node(first.id)
+            model.state.latency[first.id.uuidString] = LatencyResult(milliseconds: 48)
+            model.state.latency[long.id.uuidString] = LatencyResult(milliseconds: 155,testedAt:Date().addingTimeInterval(-86400))
+            model.state.favorites = [first.id]
+            let before = try JSONSerialization.jsonObject(with: JSONEncoder().encode(model.state)) as! NSDictionary
+            for mode in [InterfaceMode.simple, .professional] {
+                preferences.set(mode.rawValue, forKey: "interfaceMode")
+                await settle()
+                window.setContentSize(NSSize(width: mode == .simple ? 820 : 1040, height: mode == .simple ? 680 : 760))
+                try await capture("home-" + mode.rawValue + "-light")
+                try await capture("home-" + mode.rawValue + "-dark", .darkAqua)
+            }
+            host.rootView = AnyView(NodesView(model: model, onEdit: { _ in }, onAdd: {}, onImport: {}).padding(24).background(LiquidCanvas()).tint(Theme.accentBlue))
+            try await capture("nodes-light")
+            try await capture("nodes-dark", .darkAqua)
+            host.rootView = AnyView(SimpleSubscriptionsView(model: model, onImport: {}).padding(24).background(LiquidCanvas()).tint(Theme.accentBlue))
+            try await capture("subscriptions-light")
+            try await capture("subscriptions-dark", .darkAqua)
+            host.rootView = AnyView(root)
+            preferences.set("simple", forKey: "interfaceMode")
+            await settle()
+            window.setContentSize(NSSize(width:820,height:620))
+            try await capture("home-simple-minimum")
+            try check(window.contentLayoutRect.width <= 821 && window.contentLayoutRect.height <= 621,"简洁模式保持 820×620 最小内容窗口（实际 \(window.contentLayoutRect.size)）")
+            model.state.nodes += (1...60).map { Node(name:"备用线路 · \($0)",kind:.trojan,server:"fixture.invalid",port:443) }
+            try await capture("many-lines-dark",.darkAqua)
+            model.state.nodes = [first,long]
+            model.connection = .connecting; model.busy = true
+            model.startupStage = "检查连接路径"; model.startupStartedAt = ProcessInfo.processInfo.systemUptime - 3
+            try await capture("connecting-dark", .darkAqua)
+            model.busy = false; model.connection = .connected; model.startupStage = nil
+            try check(model.connectedSince != nil,"连接状态记录会话起始时间")
+            model.connectivityResults = [.init("HTTPS", .passed, "隔离测试")]
+            model.monitor.traffic = .available
+            model.trafficDisplay.receive(upload: 12000, download: 1200000, now: Date())
+            try await capture("connected-dark", .darkAqua)
+            preferences.set("professional",forKey:"interfaceMode")
+            await settle()
+            window.setContentSize(NSSize(width:1040,height:760))
+            for minute in 0..<30 {
+                var sample=RateSample(upload:Int64(12000+minute*700),download:Int64(300000+abs(sin(Double(minute)*0.6))*2200000))
+                sample.time=Date().addingTimeInterval(Double(minute-30)*60)
+                model.trafficDisplay.sample.history.append(sample)
+            }
+            model.trafficDisplay.sample.history.sort {$0.time < $1.time}
+            try await capture("traffic-connected-dark",.darkAqua)
+            preferences.set("simple",forKey:"interfaceMode")
+            await settle()
+            model.monitor.traffic = .unavailable
+            try await capture("monitor-unavailable")
+            model.connection = .disconnecting;model.busy=true
+            try await capture("disconnecting-dark",.darkAqua)
+            model.busy=false
+            model.connection = .error; model.recoveryPending = true
+            try check(model.connectedSince == nil,"断开或失败后清除会话计时")
+            try await capture("recovery-required")
+            model.connection = .disconnected; model.recoveryPending = false
+            host.rootView = AnyView(root.environment(\._accessibilityReduceMotion, true).environment(\._accessibilityReduceTransparency, true))
+            try await capture("accessibility-dark", .darkAqua)
+            window.setContentSize(NSSize(width:1040,height:760))
+            let pages:[(String,AnyView)] = [
+                ("groups",AnyView(GroupsView(model:model))),
+                ("profiles",AnyView(ProfilesView(model:model))),
+                ("settings",AnyView(SettingsView(model:model).defaultAppStorage(preferences))),
+                ("diagnostics",AnyView(DiagnosticsView(model:model))),
+                ("rules",AnyView(RuleView(model:model))),
+                ("connections",AnyView(ConnectionsView(model:model))),
+                ("logs",AnyView(RuntimeLogView(buffer:model.logBuffer)))
+            ]
+            for (name,page) in pages {
+                host.rootView=AnyView(page.padding(24).background(LiquidCanvas()).tint(Theme.accentBlue))
+                try await capture(name+"-light")
+                try await capture(name+"-dark",.darkAqua)
+            }
+            host.rootView=AnyView(XihangAboutView().padding(24).background(LiquidCanvas()))
+            try await capture("about-dark",.darkAqua)
+            let after = try JSONSerialization.jsonObject(with: JSONEncoder().encode(model.state)) as! NSDictionary
+            try check(before == after, "品牌与外观展示不改变代理配置")
+            try check(!FileManager.default.fileExists(atPath: model.directory.appendingPathComponent("proxy-recovery.json").path), "界面验收没有创建代理接管记录")
+            print("BRAND_INTERFACE_CHECKS_OK checks=\(checks) screenshots=\(screenshotCount)")
+            return
         }
         if CommandLine.arguments.contains("--protection-only") {
             model.state.captureMode = .compatible

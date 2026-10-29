@@ -29,12 +29,12 @@ public enum CaptureOwnership {
     }
     public static func protectionIssues(owned:[ProtectedRoute],preserved:[ProtectedRoute],actual:[ProtectedRoute])->[String] {
         let required=owned.filter{!hasEquivalentHostPath($0,actual:actual)}
-        // 轻舟写入的路由和其他保留路径仍严格核验；系统组播接口的生命周期不代表公网保护失效。
+        // 汐航写入的路由和其他保留路径仍严格核验；系统组播接口的生命周期不代表公网保护失效。
         return routeIssues(expected:required+monitoredPreservedRoutes(preserved),actual:actual)
     }
     public static func monitoredPreservedRoutes(_ routes:[ProtectedRoute])->[ProtectedRoute] {
         routes.filter {route in
-            // 仅排除系统维护的本机、链路组播及链路本地作用域基路由；不豁免全局或轻舟自有路由。
+            // 仅排除系统维护的本机、链路组播及链路本地作用域基路由；不豁免全局或汐航自有路由。
             let systemMulticast=route.scope==route.interface && ["ff01::/32","ff02::/32"].contains {NetworkInspection.samePrefix(route.destination,$0)}
             let systemLinkLocal=route.scope==route.interface && IPPrefix(route.destination).map{IPPrefix("fe80::/10")!.contains($0)}==true
             return !systemMulticast && !systemLinkLocal

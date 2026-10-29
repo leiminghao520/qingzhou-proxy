@@ -7,12 +7,12 @@ extension AppModel {
     var connectionTitle:String {
         if recovering || connection == .disconnecting {return "正在恢复原网络设置"}
         if recoveryPending {return "网络恢复未完成，需要处理"}
-        if networkWaiting {return networkReleased ? "等待网络恢复 · 轻舟已停止接管":"等待网络恢复 · 将自动重连"}
+        if networkWaiting {return networkReleased ? "等待网络恢复 · 汐航已停止接管":"等待网络恢复 · 将自动重连"}
         if wakeRecovery.active || networkReconnecting {return "正在自动恢复连接"}
         if selectionNetworkUncertain {return "网络状态待确认"}
         if connection == .connected,connectivityHealth != .healthy {return connectivityHealth == .unhealthy ? "当前线路检测异常":"已接管 · 网络待确认"}
         if connection == .connected,activeRecovery != nil {return "已连接 · 使用备用方案"}
-        if networkReleased {return "轻舟已停止接管，已恢复原网络设置"}
+        if networkReleased {return "汐航已停止接管，已恢复原网络设置"}
         if connection == .error {return issueTitle ?? "连接未完成，请检查网络"}
         return connection.rawValue
     }
@@ -22,7 +22,7 @@ extension AppModel {
     }
     func recoveryEnvironment()->String {
         if let read=dependencies.recoveryEnvironmentOverride {return read()}
-        let dynamic=SCDynamicStoreCreate(nil,"轻舟回退环境" as CFString,nil,nil)
+        let dynamic=SCDynamicStoreCreate(nil,"汐航回退环境" as CFString,nil,nil)
         let services=BypassNetworkService.read().filter{$0.active && !CapturePlan.isVPN($0.interface) && $0.interface != "lo0"}.sorted{$0.id<$1.id}
         let parts=services.map{service -> String in
             let address=dynamic.flatMap{SCDynamicStoreCopyValue($0,("State:/Network/Service/"+service.id+"/IPv4") as CFString) as? [String:Any]}

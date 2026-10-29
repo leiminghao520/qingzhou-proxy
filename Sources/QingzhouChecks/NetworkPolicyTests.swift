@@ -216,7 +216,7 @@ final class NetworkPolicyTests:CheckCase {
         let required=HelperRecoveryPolicy.requiresRecovery(activeTunnel:active,running:running,journalPresent:journal,inspectionAvailable:available)
         if !active && !running && !journal && available {expectFalse(required,"旧 helper 无恢复记录不能阻塞系统代理")}else{expectTrue(required,"实际恢复证据不可忽略")}
     }}}}
-    let script=HelperInstaller.authorizationScript(app:URL(fileURLWithPath:"/tmp/轻舟 \"\\ app.app"));expectTrue(script.hasSuffix("with administrator privileges"));expectTrue(script.contains("install-helper.sh"));expectTrue(script.contains("\\\""));print("PASS HelperRecovery.evidenceRequiredInsteadOfSocketPresence")
+    let script=HelperInstaller.authorizationScript(app:URL(fileURLWithPath:"/tmp/汐航 \"\\ app.app"));expectTrue(script.hasSuffix("with administrator privileges"));expectTrue(script.contains("install-helper.sh"));expectTrue(script.contains("\\\""));print("PASS HelperRecovery.evidenceRequiredInsteadOfSocketPresence")
 }
 
 @MainActor func runDNSResolutionPolicyChecks() throws {

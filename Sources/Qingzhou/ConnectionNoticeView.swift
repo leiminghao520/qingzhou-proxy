@@ -25,7 +25,7 @@ struct ConnectionNoticeView:View {
                     if model.activeRecovery == nil {Button {model.errorMessage=nil} label:{Image(systemName:"xmark")}.buttonStyle(.plain).accessibilityLabel("关闭提示")}
                 }
                 if let impact=model.recoveryImpact {Text(impact).font(.callout)}
-                if model.networkReleased {Text("轻舟已停止接管，原有网络设置已恢复；代理目标可能暂时无法访问。").font(.callout)}
+                if model.networkReleased {Text("汐航已停止接管，原有网络设置已恢复；代理目标可能暂时无法访问。").font(.callout)}
                 if details {
                     Text(model.effectivePathSummary).font(.caption)
                     if let record=model.activeRecovery {

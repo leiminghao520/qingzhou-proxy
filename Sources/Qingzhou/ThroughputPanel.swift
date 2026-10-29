@@ -17,8 +17,8 @@ struct ThroughputPanel:View {
                         .disabled(model.locked || model.connection != .connected || model.throughputRunning || target.isEmpty)
                     Button("停止测试") {model.cancelThroughput()}.disabled(!model.throughputRunning)
                     Menu("导出脱敏报告") {
-                        Button("文本") {saveDiagnosticData(try? model.throughputResult?.export(json:false),name:"轻舟完整下载.txt")}
-                        Button("JSON") {saveDiagnosticData(try? model.throughputResult?.export(json:true),name:"轻舟完整下载.json")}
+                        Button("文本") {saveDiagnosticData(try? model.throughputResult?.export(json:false),name:"汐航完整下载.txt")}
+                        Button("JSON") {saveDiagnosticData(try? model.throughputResult?.export(json:true),name:"汐航完整下载.json")}
                     }.disabled(model.throughputResult==nil)
                 }
                 if model.throughputRunning {

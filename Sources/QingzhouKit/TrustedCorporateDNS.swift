@@ -29,9 +29,9 @@ public struct TrustedCorporateDNS:Codable,Equatable,Identifiable,Sendable {
     public func matches(_ resolver:DNSResolverScope,primary:String,domain:String)->Bool {
         resolver.interface==primary && !CapturePlan.isVPN(primary) && primary != "lo0" && resolver.service==serviceID && !resolver.servers.isEmpty && Set(resolver.servers).isSubset(of:Set(servers)) && domains.contains{domain==$0 || domain.hasSuffix("."+$0)}
     }
-    // 只读取当前主物理服务公布的原始 DNS，不采纳轻舟或其他隧道的补充解析器。
+    // 只读取当前主物理服务公布的原始 DNS，不采纳汐航或其他隧道的补充解析器。
     public static func current(domains:[String]) throws -> Self {
-        guard let store=SCDynamicStoreCreate(nil,"轻舟公司 DNS 识别" as CFString,nil,nil),
+        guard let store=SCDynamicStoreCreate(nil,"汐航公司 DNS 识别" as CFString,nil,nil),
               let global=SCDynamicStoreCopyValue(store,"State:/Network/Global/IPv4" as CFString) as? [String:Any],
               let service=global["PrimaryService"] as? String,let interface=global["PrimaryInterface"] as? String,
               let network=BypassNetworkService.read().first(where:{$0.id==service && $0.active && $0.interface==interface}),

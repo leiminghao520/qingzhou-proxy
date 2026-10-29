@@ -12,7 +12,7 @@ struct AppDependencies {
     var officeHiddenOverride:(()->Bool)?
     var officePathOverride:((SavedDiagnosticTarget,AppState,Bool,String?) throws -> TargetPathEvidence)?
     var officeProbeOverride:((SavedDiagnosticTarget,TargetPathEvidence,AppState,Bool) async -> DiagnosticResult)?
-    var makeCredentials:(Bool)->any CredentialStore = {$0 ? MemoryCredentials():KeychainStore()}
+    var makeCredentials:(Bool)->any CredentialStore = {$0 ? MemoryCredentials():UnifiedCredentialStore.native}
     var makeThroughputProbe:(ThroughputContext)->ThroughputProbe = {ThroughputProbe(context:$0)}
     var throughputCoreVersion:(String) async -> String = {path in
         await Task.detached {

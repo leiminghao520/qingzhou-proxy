@@ -9,7 +9,7 @@ public struct FullSubscription:Codable,Sendable {
     public var configurationJSON:String
     public var nodes:[String]
     public func preview() throws -> ImportPreview {
-        guard format=="qingzhou.subscription",version==1,!name.isEmpty,name.count<=100,!nodes.isEmpty,nodes.count<=2000,configurationJSON.utf8.count<=1024*1024 else{throw ProxyError("轻舟完整订阅版本或结构不支持")}
+        guard format=="qingzhou.subscription",version==1,!name.isEmpty,name.count<=100,!nodes.isEmpty,nodes.count<=2000,configurationJSON.utf8.count<=1024*1024 else{throw ProxyError("汐航完整订阅版本或结构不支持")}
         let bytes=Data(configurationJSON.utf8)
         let hash=SHA256.hash(data:bytes).map{String(format:"%02x",$0)}.joined()
         guard revision==hash else{throw ProxyError("完整订阅配置校验失败，保留旧配置")}

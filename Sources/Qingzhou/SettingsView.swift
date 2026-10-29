@@ -64,6 +64,23 @@ private struct SettingsContent:View,Equatable {
 
     var body: some View {
         Form {
+            Section {
+                HStack(spacing:16) {
+                    XihangMark().frame(width:44,height:48)
+                    VStack(alignment:.leading,spacing:4) {
+                        Text("汐航 · Xihang").font(.title3.bold())
+                        Text("让连接，自然流动").font(.caption).foregroundStyle(Theme.accentBlue)
+                    }
+                    Spacer()
+                    Text("\(BuildVersion.current) (\(BuildVersion.build))").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                }.padding(.vertical,8)
+            }
+            Section("凭据与授权") {
+                Text("连接凭据集中保存在系统钥匙串，成功读取后本次运行自动复用。启动、后台更新和自动恢复不弹出凭据密码窗口。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("旧版凭据首次使用时会逐步合并，macOS 仍可能逐项确认。辅助服务安装使用独立的管理员授权；普通连接不重复安装。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("帮助与使用指南") {
                 UsageGuideButton(model:model,title:"查看使用指南")
             }
@@ -106,7 +123,7 @@ private struct SettingsContent:View,Equatable {
                 Toggle("严格 DNS（解析失败时不回退系统 DNS）",isOn:$draft.network.strictDNS).disabled(model.locked)
 
                 HStack {
-                    settingLabel("网络绕过：已启用 \(model.state.enabledBypasses.count) / \(model.state.effectiveBypasses.count) 项",help:"域名、IP 和网段统一在分流规则页维护，支持批量导入及指定网络出口。系统代理模式下，保护域名绕过轻舟，交给系统网络及企业 VPN；所有运行模式均优先保护。核心 DIRECT 仍经过本地核心，与系统代理绕过不同。显式指定 HTTP/SOCKS 代理的命令不一定遵循此清单；TUN 仍使用原有内网保护逻辑。")
+                    settingLabel("网络绕过：已启用 \(model.state.enabledBypasses.count) / \(model.state.effectiveBypasses.count) 项",help:"域名、IP 和网段统一在分流规则页维护，支持批量导入及指定网络出口。系统代理模式下，保护域名绕过汐航，交给系统网络及企业 VPN；所有运行模式均优先保护。核心 DIRECT 仍经过本地核心，与系统代理绕过不同。显式指定 HTTP/SOCKS 代理的命令不一定遵循此清单；TUN 仍使用原有内网保护逻辑。")
                     Spacer()
                     Button("管理网络绕过…") {showingBypasses=true}.disabled(model.locked)
                 }
@@ -201,6 +218,7 @@ private struct SettingsContent:View,Equatable {
             }.padding(20).frame(minWidth:850,minHeight:650)
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
         .onAppear {draft.sync(model.state)}
         .onChange(of:revision) {_,_ in draft.sync(model.state)}
     }

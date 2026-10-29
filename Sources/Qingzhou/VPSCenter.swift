@@ -25,7 +25,7 @@ import QingzhouKit
     var speedTask:Task<Void,Never>?
     private var background:Task<Void,Never>?
     private var syncing=false
-    private let credentials=KeychainStore()
+    private let credentials=UnifiedCredentialStore.native
     private let directory:URL
     private let refreshEnabled:Bool
     init(directory:URL?=nil,refreshEnabled:Bool=true) {
@@ -35,7 +35,7 @@ import QingzhouKit
         guard refreshEnabled else{return}
         background=Task{[weak self] in
             while !Task.isCancelled {
-                if let self,self.binding?.recoveryExported==true {await self.syncBackup()}
+                if let self,self.binding?.recoveryExported==true {await CredentialAuthorization.$allowsInteraction.withValue(false) {await self.syncBackup()}}
                 try? await Task.sleep(for:.seconds(300))
             }
         }
@@ -165,7 +165,7 @@ import QingzhouKit
     }
     func exportRecovery(password:String) throws {
         guard password.count>=12 else{throw ProxyError("恢复口令至少十二个字符")}
-        let secret=try generateRecovery();let panel=NSSavePanel();panel.nameFieldStringValue="轻舟VPS恢复密钥.qzvpskey"
+        let secret=try generateRecovery();let panel=NSSavePanel();panel.nameFieldStringValue="汐航VPS恢复密钥.qzvpskey"
         guard panel.runModal() == .OK,let url=panel.url else{throw CancellationError()}
         try SecureFile.write(BackupService.encryptRecoveryKey(secret,password:password),to:url)
         binding?.recoveryExported=true;try save()

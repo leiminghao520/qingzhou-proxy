@@ -9,7 +9,7 @@ extension Service {
         let tunnelVerified=tunnels.count==prefixes.count && tunnels.allSatisfy{sample.identityIndex.state($0) == .owned}
         // 保护的是未绑定接口的业务，按实际建立的全局保护项核验。
         let protected=capturePlan?.protectedRoutes.map{ProtectedRoute(destination:$0.destination,gateway:$0.gateway,interface:$0.interface)}
-        // 原系统路径只核验仍有对应出口；不能把未由轻舟写入的路径当成自有路由认领。
+        // 原系统路径只核验仍有对应出口；不能把未由汐航写入的路径当成自有路由认领。
         let protectionVerified=protected.map {routes in routes.allSatisfy {expected in
             sample.ownershipRoutes.contains {actual in
                 NetworkInspection.samePrefix(actual.destination,expected.destination) && actual.interface==expected.interface && actual.gateway==expected.gateway && actual.scope==nil
@@ -48,7 +48,7 @@ extension Service {
                 }
                 details.append("原系统保护路径暂缺："+missing.prefix(3).map{$0.destination+" → "+$0.interface}.joined(separator:"，"))
             }
-            if !proxyVerified {details.append("服务配置仍属轻舟，系统汇总代理尚未就绪")}
+            if !proxyVerified {details.append("服务配置仍属汐航，系统汇总代理尚未就绪")}
         }
         else if protected==nil {reply.wakeRecoveryReason = .unverified;details.append("保护快照未验证")}
         if !details.isEmpty {reply.message="唤醒网络核验："+details.prefix(8).joined(separator:"；")}

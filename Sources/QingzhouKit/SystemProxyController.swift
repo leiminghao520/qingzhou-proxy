@@ -40,7 +40,7 @@ struct ProxyJournal: Codable { var records: [ProxyRecord] }
             guard AuthorizationCreate(nil,nil,flags,&auth) == errAuthorizationSuccess else { throw ProxyError("系统授权被取消或失败") }
             authorization = auth
         }
-        guard let p = SCPreferencesCreateWithAuthorization(nil,"轻舟代理" as CFString,nil,authorization) else { throw ProxyError("无法打开系统网络配置") }
+        guard let p = SCPreferencesCreateWithAuthorization(nil,"汐航" as CFString,nil,authorization) else { throw ProxyError("无法打开系统网络配置") }
         guard SCPreferencesLock(p,true) else { throw ProxyError("无法锁定网络配置") }
         return p
     }
@@ -52,7 +52,7 @@ struct ProxyJournal: Codable { var records: [ProxyRecord] }
         guard SCPreferencesCommitChanges(preferences), SCPreferencesApplyChanges(preferences) else { throw ProxyError("系统代理修改失败，请执行恢复原代理") }
     }
     public func observeManagedProxy(port:Int) throws {
-        guard let p=SCPreferencesCreate(nil,"轻舟代理只读观察" as CFString,nil),let set=SCNetworkSetCopyCurrent(p),let services=SCNetworkSetCopyServices(set) as? [SCNetworkService] else{throw ProxyError("无法读取系统代理")}
+        guard let p=SCPreferencesCreate(nil,"汐航只读观察" as CFString,nil),let set=SCNetworkSetCopyCurrent(p),let services=SCNetworkSetCopyServices(set) as? [SCNetworkService] else{throw ProxyError("无法读取系统代理")}
         var records:[ProxyRecord]=[]
         for service in services where SCNetworkServiceGetEnabled(service) {
             guard let id=SCNetworkServiceGetServiceID(service),let proto=SCNetworkServiceCopyProtocol(service,kSCNetworkProtocolTypeProxies),let values=SCNetworkProtocolGetConfiguration(proto) as? [String:Any] else{continue}
@@ -125,7 +125,7 @@ struct ProxyJournal: Codable { var records: [ProxyRecord] }
                 if externalPreserved {
                     let archive=journal.deletingLastPathComponent().appendingPathComponent("proxy-recovery-preserved-"+UUID().uuidString+".json")
                     try SecureFile.write(Data(contentsOf:journal),to:archive)
-                    log?("外部系统代理已保留，轻舟恢复记录已归档")
+                    log?("外部系统代理已保留，汐航恢复记录已归档")
                 }
             }
             try FileManager.default.removeItem(at:journal)
@@ -139,11 +139,11 @@ struct ProxyJournal: Codable { var records: [ProxyRecord] }
         try verifyReleased(records:records,preferences:p)
     }
     private func verifyReleased(records:[ProxyRecord],preferences:SCPreferences) throws {
-        guard let live=SCDynamicStoreCopyProxies(nil) as? [String:Any] else{throw ProxyError("无法确认当前代理已离开轻舟入口")}
+        guard let live=SCDynamicStoreCopyProxies(nil) as? [String:Any] else{throw ProxyError("无法确认当前代理已离开汐航入口")}
         for record in records {
             let applied=try dict(record.applied)
-            guard !ProxyRecovery.pointsToOwnedEndpoint(current:live,applied:applied) else{throw ProxyError("当前生效代理仍指向轻舟，尚不能退出")}
-            if let service=SCNetworkServiceCopy(preferences,record.serviceID as CFString),let proto=SCNetworkServiceCopyProtocol(service,kSCNetworkProtocolTypeProxies),SCNetworkProtocolGetEnabled(proto),let current=SCNetworkProtocolGetConfiguration(proto) as? [String:Any],ProxyRecovery.pointsToOwnedEndpoint(current:current,applied:applied) {throw ProxyError("网络服务仍指向轻舟入口，尚不能退出")}
+            guard !ProxyRecovery.pointsToOwnedEndpoint(current:live,applied:applied) else{throw ProxyError("当前生效代理仍指向汐航，尚不能退出")}
+            if let service=SCNetworkServiceCopy(preferences,record.serviceID as CFString),let proto=SCNetworkServiceCopyProtocol(service,kSCNetworkProtocolTypeProxies),SCNetworkProtocolGetEnabled(proto),let current=SCNetworkProtocolGetConfiguration(proto) as? [String:Any],ProxyRecovery.pointsToOwnedEndpoint(current:current,applied:applied) {throw ProxyError("网络服务仍指向汐航入口，尚不能退出")}
         }
     }
     // 唤醒复查只读核对代理和原 DNS 保护，不能因状态文字而认领当前入口。
@@ -164,7 +164,7 @@ struct ProxyJournal: Codable { var records: [ProxyRecord] }
     }
     public func startMonitoring() {
         var context = SCDynamicStoreContext(version:0,info:Unmanaged.passUnretained(self).toOpaque(),retain:nil,release:nil,copyDescription:nil)
-        monitor = SCDynamicStoreCreate(nil,"轻舟网络监控" as CFString,{ _, _, info in
+        monitor = SCDynamicStoreCreate(nil,"汐航网络监控" as CFString,{ _, _, info in
             guard let info else { return }
             let controller = Unmanaged<SystemProxyController>.fromOpaque(info).takeUnretainedValue()
             Task { @MainActor in
@@ -195,7 +195,7 @@ struct ProxyJournal: Codable { var records: [ProxyRecord] }
     }
     private func ownershipChanges()->[String]? {
         let records=observedRecords ?? (try? Data(contentsOf:journal)).flatMap{try? JSONDecoder().decode(ProxyJournal.self,from:$0).records}
-        guard let records,let preferences=SCPreferencesCreate(nil,"轻舟所有权核对" as CFString,nil) else{return nil}
+        guard let records,let preferences=SCPreferencesCreate(nil,"汐航所有权核对" as CFString,nil) else{return nil}
         var changes=Set<String>()
         for record in records {
             guard let service=SCNetworkServiceCopy(preferences,record.serviceID as CFString),let proto=SCNetworkServiceCopyProtocol(service,kSCNetworkProtocolTypeProxies),let current=SCNetworkProtocolGetConfiguration(proto) as? [String:Any],let expected=try? dict(record.applied) else{return nil}

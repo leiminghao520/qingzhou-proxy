@@ -1,4 +1,5 @@
 import SwiftUI
+import Pow
 import AppKit
 import UniformTypeIdentifiers
 import QingzhouKit
@@ -9,6 +10,7 @@ struct NodesView: View {
     var onAdd: () -> Void
     var onImport: () -> Void
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var noteNode: Node?
     @State private var note = ""
     @State private var sharing: ShareRequest?
@@ -66,10 +68,12 @@ struct NodesView: View {
                     .controlSize(.regular)
 
                     // 排序选择
-                    Picker("排序", selection: $page.sort) {
-                        ForEach(["HTTPS 延迟", "节点名称", "协议", "最近使用"], id: \.self) { Text($0) }
-                    }
-                    .frame(width: 140)
+                    Menu {
+                        ForEach(["HTTPS 延迟", "节点名称", "协议", "最近使用"],id:\.self) { value in
+                            Button {page.sort=value} label: {if value == page.sort {Label(value,systemImage:"checkmark")} else {Text(value)}}
+                        }
+                    } label: { Text("排序："+page.sort).font(.caption).foregroundStyle(Color.primary) }
+                    .menuStyle(.borderlessButton).frame(width:140).disabled(model.measuring)
 
                     // 保留用户视图偏好，同时明确按钮的当前状态与操作结果。
                     Toggle(isOn: Binding(get: { model.state.compactNodes }, set: { model.setCompact($0) })) {
@@ -112,18 +116,18 @@ struct NodesView: View {
                     filterChip("★ 收藏", active: page.favoriteOnly) {
                         page.favoriteOnly.toggle()
                     }
-                    filterChip("HY2", active: page.selectedKind == .hysteria2) {
+                    if model.state.nodes.contains(where: {$0.kind == .hysteria2}) || page.selectedKind == .hysteria2 { filterChip("HY2", active: page.selectedKind == .hysteria2) {
                         toggleKind(.hysteria2)
-                    }
-                    filterChip("VLESS", active: page.selectedKind == .vless) {
+                    } }
+                    if model.state.nodes.contains(where: {$0.kind == .vless}) || page.selectedKind == .vless { filterChip("VLESS", active: page.selectedKind == .vless) {
                         toggleKind(.vless)
-                    }
-                    filterChip("SS", active: page.selectedKind == .shadowsocks) {
+                    } }
+                    if model.state.nodes.contains(where: {$0.kind == .shadowsocks}) || page.selectedKind == .shadowsocks { filterChip("SS", active: page.selectedKind == .shadowsocks) {
                         toggleKind(.shadowsocks)
-                    }
-                    filterChip("Trojan", active: page.selectedKind == .trojan) {
+                    } }
+                    if model.state.nodes.contains(where: {$0.kind == .trojan}) || page.selectedKind == .trojan { filterChip("Trojan", active: page.selectedKind == .trojan) {
                         toggleKind(.trojan)
-                    }
+                    } }
                 }
 
                 Spacer()
@@ -171,7 +175,7 @@ struct NodesView: View {
             } else if !model.state.compactNodes {
                 // 节点卡片网格
                 ScrollView(showsIndicators: false) {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 300, maximum: 380), spacing: 16)], spacing: 16) {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 280), spacing: 16)], spacing: 16) {
                         ForEach(filteredNodes) { node in
                             nodeCard(node)
                         }
@@ -253,111 +257,60 @@ struct NodesView: View {
         }
     }
 
-    // 节点卡片
+    // 名称与延迟优先；选择策略和实际出口使用独立标记。
     private func nodeCard(_ node: Node) -> some View {
-        let isSelected = model.state.activePolicy == .node(node.id)
-        let isFav = model.state.favorites.contains(node.id)
-
-        return VStack(alignment: .leading, spacing: 12) {
-            // 协议、证书警告、收藏和选中状态
-            HStack(spacing: 8) {
-                ProtocolBadge(kind: node.kind)
-
-                if node.insecure {
-                    Image(systemName: "exclamationmark.shield.fill")
-                        .font(.caption)
-                        .foregroundStyle(Theme.amberAccent)
-                        .help("此节点跳过 TLS 证书验证")
+        let selected = model.state.activePolicy == .node(node.id)
+        let favorite = model.state.favorites.contains(node.id)
+        let active = model.connection == .connected && CoreAPIClient.actualTag(model.proxyInfo) == PolicyReference.node(node.id).tag
+        return VStack(alignment:.leading,spacing:16) {
+            HStack(alignment:.top,spacing:10) {
+                VStack(alignment:.leading,spacing:7) {
+                    Text(node.name).font(.system(size:17,weight:.semibold)).lineLimit(2).frame(height:42,alignment:.topLeading).help(node.name)
+                    Text(NodeSubscriptionSupport.source(node,state:model.state)).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                 }
-
-                Spacer()
-
-                Button {
-                    model.toggleFavorite(node.id)
-                } label: {
-                    Image(systemName: isFav ? "star.fill" : "star")
-                        .font(.system(size: 14))
-                        .foregroundStyle(isFav ? Theme.amberAccent : Color.secondary.opacity(0.5))
-                }
-                .buttonStyle(.plain)
-
-                if isSelected {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(Theme.connectedGreen)
-                        .font(.system(size: 16))
-                }
+                Spacer(minLength:0)
+                Button {model.toggleFavorite(node.id)} label: {
+                    Image(systemName:favorite ? "star.fill":"star").foregroundStyle(favorite ? Theme.amberAccent : Color.secondary)
+                }.buttonStyle(.plain).disabled(model.locked)
+                    .accessibilityLabel((favorite ? "取消收藏：":"收藏：")+node.name)
+                    .changeEffect(.jump(height:3),value:favorite,isEnabled:!reduceMotion)
             }
-
-            // 节点名称和服务器地址
-            VStack(alignment: .leading, spacing: 4) {
-                Text(node.name)
-                    .font(.system(size: 15, weight: .bold))
-                    .lineLimit(1)
-                Text(NodeSubscriptionSupport.source(node,state:model.state)).font(.caption2).foregroundStyle(.secondary)
-                if let guidance=NodeSubscriptionSupport.guidance(node,state:model.state){Text(guidance).font(.caption2).foregroundStyle(Theme.amberAccent)}
-                Text("\(node.server):\(node.port)")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                if let note = model.state.notes[node.id.uuidString], !note.isEmpty {
-                    Text(note)
-                        .font(.caption2)
-                        .foregroundStyle(Theme.accentBlue)
-                        .lineLimit(1)
-                }
-            }
-
-            Divider().opacity(0.5)
-
-            // 延迟及快捷操作
             HStack {
-                LatencyBadge(delayText: latency(node, model))
-
+                ProtocolBadge(kind:node.kind)
+                if node.insecure {Image(systemName:"exclamationmark.shield.fill").foregroundStyle(Theme.amberAccent).help("此节点跳过 TLS 证书验证")}
                 Spacer()
-
-                HStack(spacing: 6) {
-                    Button {
-                        model.measure([node.id])
-                    } label: {
-                        Image(systemName: "bolt")
-                            .font(.system(size: 11))
+                if active {XihangStatusPill(title:"使用中",color:Theme.connectedGreen)}
+                else if selected {XihangStatusPill(title:"已选择")}
+            }
+            if let guidance=NodeSubscriptionSupport.guidance(node,state:model.state) {Text(guidance).font(.caption2).foregroundStyle(Theme.amberAccent).lineLimit(2)}
+            Text("\(node.server):\(node.port)").font(.caption2.monospaced()).foregroundStyle(.secondary).lineLimit(1).help("\(node.server):\(node.port)")
+            if let note=model.state.notes[node.id.uuidString],!note.isEmpty {Text(note).font(.caption2).foregroundStyle(Theme.accentBlue).lineLimit(1)}
+            Divider().opacity(0.5)
+            HStack {
+                Button { Task { await model.select(node.id) } } label: {
+                    Label(selected ? "已选择":"选择线路",systemImage:selected ? "checkmark.circle.fill":"circle")
+                }.buttonStyle(.borderless).font(.caption).disabled(model.locked)
+                Spacer()
+                VStack(alignment:.trailing,spacing:4) {
+                    LatencyBadge(delayText:latency(node,model))
+                    if let result=model.state.latency[node.id.uuidString] {
+                        Text(result.testedAt.formatted(.dateTime.month().day().hour().minute())).font(.system(size:9)).foregroundStyle(.secondary)
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-
-                    Menu {
-                        Button("分享节点") { sharing = ShareRequest(node: node) }
-                        Button("修改备注") {
-                            note = model.state.notes[node.id.uuidString] ?? ""
-                            noteNode = node
-                        }
-                        if node.subscriptionID == nil {
-                            Button("编辑节点") { onEdit(node) }
-                        }
-                        Divider()
-                        Button("删除节点", role: .destructive) {
-                            Task { await model.deleteNode(node.id) }
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis")
-                            .font(.system(size: 11))
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
                 }
+                Button {model.measure([node.id])} label: {Image(systemName:"bolt")}.buttonStyle(.borderless).disabled(model.locked).help("检测此节点 HTTPS 延迟").accessibilityLabel("测速："+node.name)
+                Menu {
+                    Button("分享节点") {sharing=ShareRequest(node:node)}
+                    Button("修改备注") {note=model.state.notes[node.id.uuidString] ?? "";noteNode=node}
+                    if node.subscriptionID == nil {Button("编辑节点") {onEdit(node)}}
+                    Divider()
+                    Button("删除节点",role:.destructive) {Task {await model.deleteNode(node.id)}}
+                } label: {Image(systemName:"ellipsis")}.menuStyle(.borderlessButton).fixedSize().disabled(model.locked).accessibilityLabel("节点操作："+node.name)
             }
         }
-        .padding(16)
-        .background(isSelected ? Theme.connectedGreen.opacity(0.06) : Theme.cardBackground)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.cardCornerRadius)
-                .stroke(isSelected ? Theme.connectedGreen.opacity(0.6) : Theme.subtleBorder, lineWidth: isSelected ? 1.5 : 1)
-        )
-        .contentShape(Rectangle())
-        .onTapGesture {
-            Task { await model.select(node.id) }
-        }
+        .padding(20).frame(maxWidth:.infinity,alignment:.topLeading)
+        .liquidContentSurface()
+        .overlay(RoundedRectangle(cornerRadius:Theme.cardCornerRadius).strokeBorder(selected ? Theme.accentBlue.opacity(0.6):.clear,lineWidth:1.5).allowsHitTesting(false))
+        .modifier(XihangHover())
     }
 
     // 列表行
@@ -370,7 +323,7 @@ struct NodesView: View {
                 Task { await model.select(node.id) }
             } label: {
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(isSelected ? Theme.connectedGreen : .secondary)
+                    .foregroundStyle(isSelected ? Theme.accentBlue : .secondary)
             }
             .buttonStyle(.plain)
 

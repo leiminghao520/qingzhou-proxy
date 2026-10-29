@@ -8,7 +8,7 @@ import QingzhouKit
     defer {try? FileManager.default.removeItem(at:dir)}
     let prefsFile = dir.appendingPathComponent("preferences.plist")
     func preferences() throws -> SCPreferences {
-        guard let p = SCPreferencesCreate(nil,"轻舟测试" as CFString,prefsFile.path as CFString) else {throw ProxyError("无法创建隔离偏好文件")};return p
+        guard let p = SCPreferencesCreate(nil,"汐航测试" as CFString,prefsFile.path as CFString) else {throw ProxyError("无法创建隔离偏好文件")};return p
     }
     let p = try preferences()
     guard let iface = (SCNetworkInterfaceCopyAll() as? [SCNetworkInterface])?.first(where:{SCNetworkInterfaceGetInterfaceType($0) as String? == "Ethernet"}), let service = SCNetworkServiceCreate(p,iface), let set = SCNetworkSetCreate(p) else {throw ProxyError("无法创建隔离网络服务")}
@@ -35,7 +35,7 @@ import QingzhouKit
     let restoredStale=SCNetworkProtocolGetConfiguration(checkedProto) as! [String:Any]
     expectEqual(restoredStale["HTTPEnable"] as? Int,0);expectEqual(restoredStale["HTTPSEnable"] as? Int,0)
     expectFalse(controller.hasRecovery);print("PASS SystemProxyTests.deadLoopbackRestoredDisabled")
-    // 同一隔离文件复现外部只接管 HTTP、其余协议仍指向轻舟的情况。
+    // 同一隔离文件复现外部只接管 HTTP、其余协议仍指向汐航的情况。
     try controller.apply(port:27890)
     let externalPrefs=try preferences()
     let externalService=SCNetworkServiceCopy(externalPrefs,SCNetworkServiceGetServiceID(service)!)!

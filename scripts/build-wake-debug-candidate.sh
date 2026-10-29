@@ -7,7 +7,7 @@ bash scripts/swift-local.sh build --product Qingzhou
 bash scripts/swift-local.sh build --product QingzhouRunner
 bash scripts/swift-local.sh build --product QingzhouHelper
 stage="$(mktemp -d "$PWD/.build/wake-recovery/candidates/debug-0.13.4.XXXXXX")"
-app="$stage/轻舟代理.app"
+app="$stage/汐航.app"
 # 复用经过校验的资源，只替换正式 Debug 构建；不启动应用或安装组件。
 ditto "$release_app" "$app"
 cp .build/debug/Qingzhou "$app/Contents/MacOS/Qingzhou"

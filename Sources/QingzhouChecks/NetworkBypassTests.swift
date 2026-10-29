@@ -168,7 +168,7 @@ func runNetworkBypassChecks() {
     var state=AppState();try state.setBypasses([NetworkBypass(kind:.cidr,value:"127.0.0.1")])
     let observed=try BypassDiagnostics.inspect("127.0.0.1",state:state,active:false)
     expectTrue(observed.rows.contains{$0.contains("系统代理选择")})
-    expectTrue(observed.rows.contains{$0.contains("未取得本次轻舟隧道身份")})
+    expectTrue(observed.rows.contains{$0.contains("未取得本次汐航隧道身份")})
     for input in ["","https://example.com","example.com/path","example.com:443"] {expectThrows(try BypassDiagnostics.inspect(input,state:state,active:false))}
     print("PASS NetworkBypass.protocolMismatchAndReadonlyDiagnostics")
 }

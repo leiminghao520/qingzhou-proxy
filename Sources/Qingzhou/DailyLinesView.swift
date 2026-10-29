@@ -35,9 +35,13 @@ struct DailyLinesView: View {
                     .textFieldStyle(.roundedBorder).focused($searchFocused)
                     .accessibilityIdentifier("dailyLineSearch")
                 Toggle("收藏", isOn: $page.favoriteOnly).toggleStyle(.button)
-                Picker("排序", selection: $sort) {
-                    ForEach(["最近使用", "HTTPS 延迟", "节点名称"], id: \.self) { Text($0).tag($0) }
-                }.labelsHidden().frame(width: 120).disabled(model.measuring)
+                Menu {
+                    ForEach(["最近使用", "HTTPS 延迟", "节点名称"],id:\.self) { value in
+                        Button {sort=value} label: {if value == sort {Label(value,systemImage:"checkmark")} else {Text(value)}}
+                    }
+                } label: { Label(sort,systemImage:"arrow.up.arrow.down").font(.caption).foregroundStyle(Color.primary) }
+                .menuStyle(.borderlessButton).frame(width:110).disabled(model.measuring)
+
             }
             HStack {
                 Button {
@@ -90,7 +94,7 @@ struct DailyLinesView: View {
                 } description: { Text("试试其他关键词，或关闭收藏筛选。") }
                 actions: { Button("清除筛选") { page.clearFilters() } }
             } else {
-                ScrollView {
+                ScrollView(showsIndicators:false) {
                     LazyVStack(spacing: 4) {
                         ForEach(nodes) { node in line(node) }
                     }.padding(.vertical, 2)
@@ -142,7 +146,10 @@ struct DailyLinesView: View {
                         if let guidance=NodeSubscriptionSupport.guidance(node,state:model.state){Text(guidance).font(.caption2).foregroundStyle(Theme.amberAccent).lineLimit(2)}
                     }
                     Spacer(minLength: 8)
-                    Text(delayLabel(node)).font(.caption.monospacedDigit()).foregroundStyle(.secondary).fixedSize()
+                    VStack(alignment:.trailing,spacing:4) {
+                        if model.connection == .connected && CoreAPIClient.actualTag(model.proxyInfo) == PolicyReference.node(node.id).tag {XihangStatusPill(title:"使用中",color:Theme.connectedGreen)}
+                        Text(delayLabel(node)).font(.caption.monospacedDigit()).foregroundStyle(.secondary).fixedSize()
+                    }
                 }.contentShape(Rectangle())
             }
             .buttonStyle(.plain).disabled(model.locked)

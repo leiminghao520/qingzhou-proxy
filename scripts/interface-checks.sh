@@ -4,6 +4,7 @@ cd "$(dirname "$0")/.."
 scripts/swift-local.sh build --product Qingzhou
 stage="$PWD/.build/interface-checks"
 mkdir -p "$stage/InterfaceChecks.app/Contents/MacOS" "$stage/InterfaceChecks.app/Contents/Resources"
+if [ -d .build/debug/Pow_Pow.bundle ]; then cp -R .build/debug/Pow_Pow.bundle "$stage/InterfaceChecks.app/Contents/Resources/"; fi
 if [ -f .build/AppIcon.icns ]; then cp .build/AppIcon.icns "$stage/InterfaceChecks.app/Contents/Resources/AppIcon.icns"; fi
 cat > "$stage/InterfaceChecks.app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -11,7 +12,7 @@ cat > "$stage/InterfaceChecks.app/Contents/Info.plist" <<'PLIST'
 <plist version="1.0"><dict>
 <key>CFBundleExecutable</key><string>InterfaceChecks</string>
 <key>CFBundleIdentifier</key><string>cn.qingzhou.interfacechecks</string>
-<key>CFBundleName</key><string>轻舟界面检查</string>
+<key>CFBundleName</key><string>汐航界面检查</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>NSPrincipalClass</key><string>NSApplication</string>
@@ -28,7 +29,7 @@ sources=()
 for source in Sources/Qingzhou/*.swift; do
     if [[ "$source" != "Sources/Qingzhou/QingzhouApp.swift" ]]; then sources+=("$source"); fi
 done
-objects=(.build/debug/QingzhouKit.build/*.o .build/debug/CQingzhouRoute.build/*.o .build/debug/Yams.build/*.o .build/debug/CYaml.build/src/*.o)
+objects=(.build/debug/Pow.build/*.o .build/debug/QingzhouKit.build/*.o .build/debug/CQingzhouRoute.build/*.o .build/debug/Yams.build/*.o .build/debug/CYaml.build/src/*.o)
 swiftc -parse-as-library -swift-version 5 -I .build/debug/Modules -I Vendor/Yams/Sources/CYaml/include -Xcc -fmodule-map-file=.build/debug/CQingzhouRoute.build/module.modulemap \
     -module-cache-path .build/module-cache "${sources[@]}" "$stage/QingzhouApp.swift" \
     scripts/interface-checks.swift "${objects[@]}" -o "$stage/InterfaceChecks.app/Contents/MacOS/InterfaceChecks"

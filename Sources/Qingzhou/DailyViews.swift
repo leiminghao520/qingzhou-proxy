@@ -306,7 +306,7 @@ struct BackupView: View {
     private func export() {
         guard let store = model.store else { return }
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = "轻舟配置.qzb"
+        panel.nameFieldStringValue = "汐航配置.qzb"
         panel.begin { response in
             guard response == .OK, let url = panel.url else { return }
             working = true
@@ -460,7 +460,7 @@ struct ComprehensiveDiagnosticsView: View {
     
     private func exportDiagnostic(json:Bool) {
         guard let session=model.diagnosticSession else{return}
-        saveDiagnosticData(try? session.export(json:json),name:"轻舟诊断报告."+(json ? "json":"txt"))
+        saveDiagnosticData(try? session.export(json:json),name:"汐航诊断报告."+(json ? "json":"txt"))
     }
     private func statusColor(_ status: String) -> Color {
         switch status {
@@ -705,6 +705,8 @@ struct ShareView: View {
 // MARK: - 稳定的实时速率图表
 struct RateChart: View {
     let samples: [RateSample]
+    var embedded = false
+    @State private var selectedTime: Date?
     @State private var upperBound: Double = 1024
 
     // 固定三十分钟窗口，每分钟移动一次，避免每个样本都缩放时间轴。
@@ -740,6 +742,7 @@ struct RateChart: View {
                         Text("下载").font(.caption2).foregroundStyle(.secondary)
                     }
                 }
+                .fixedSize(horizontal:true,vertical:false)
             }
             
             if samples.isEmpty {
@@ -750,12 +753,18 @@ struct RateChart: View {
                         .foregroundStyle(.secondary)
                     Spacer()
                 }
-                .frame(height: 155)
+                .frame(height: embedded ? 75 : 100)
                 .frame(maxWidth: .infinity)
                 .background(Color.secondary.opacity(0.04))
                 .clipShape(RoundedRectangle(cornerRadius: 10))
             } else {
                 Chart {
+                    if let selectedTime,let sample=samples.min(by:{abs($0.time.timeIntervalSince(selectedTime)) < abs($1.time.timeIntervalSince(selectedTime))}) {
+                        RuleMark(x:.value("时间",sample.time)).foregroundStyle(Color.secondary.opacity(0.35))
+                            .annotation(position:.top,alignment:.leading) {
+                                Text("↓ \(formatRate(sample.download))  ↑ \(formatRate(sample.upload))").font(.caption2.monospacedDigit()).padding(6).background(Theme.cardBackground,in:RoundedRectangle(cornerRadius:6))
+                            }
+                    }
                     ForEach(samples) { sample in
                         AreaMark(
                             x: .value("时间", sample.time),
@@ -806,6 +815,7 @@ struct RateChart: View {
                         .interpolationMethod(.linear)
                     }
                 }
+                .chartXSelection(value:$selectedTime)
                 .chartXScale(domain: timeDomain)
                 .chartYScale(domain: 0...upperBound)
                 .chartYAxis {
@@ -835,12 +845,12 @@ struct RateChart: View {
         .onAppear { updateScale() }
         .onChange(of: samples.last?.id) { _, _ in updateScale() }
         .transaction { $0.animation = nil }
-        .padding(14)
-        .background(Theme.cardBackground)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
+        .padding(embedded ? 0 : 14)
+        // 圆角只绘制卡片背景，不裁剪嵌入模式中贴近边缘的图例文字。
+        .background(embedded ? Color.clear : Theme.cardBackground, in: RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
         .overlay(
             RoundedRectangle(cornerRadius: Theme.cardCornerRadius)
-                .stroke(Theme.subtleBorder, lineWidth: 1)
+                .stroke(embedded ? Color.clear : Theme.subtleBorder, lineWidth: 1)
         )
     }
 }

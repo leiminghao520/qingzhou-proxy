@@ -50,6 +50,9 @@ extension AppModel {
         }catch{recordSubscriptionFailure(id,error:error);log("订阅自动更新失败，保留旧节点")}
     }
     func maintenance() async {
+        await CredentialAuthorization.$allowsInteraction.withValue(false) { await maintenanceWithoutPrompts() }
+    }
+    private func maintenanceWithoutPrompts() async {
         latencyClock=dependencies.now()
         guard !locked,!wakeRecovery.active,!networkWaiting else{return}
         if transientRefreshPending {rescheduleTransientUpdates()}

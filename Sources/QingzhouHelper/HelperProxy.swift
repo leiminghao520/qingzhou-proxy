@@ -9,12 +9,12 @@ extension Service {
         guard let live=SCDynamicStoreCopyProxies(nil) as? [String:Any] else{throw ProxyError("当前生效代理无法读取，不能保留外部网络并释放恢复记录")}
         for record in records {
             let applied=try plist(record.applied)
-            if ProxyRecovery.pointsToOwnedEndpoint(current:live,applied:applied) {throw ProxyError("当前系统代理仍指向轻舟，不能按外部接管方式释放恢复记录")}
-            if let service=SCNetworkServiceCopy(preferences,record.service as CFString),let proto=SCNetworkServiceCopyProtocol(service,kSCNetworkProtocolTypeProxies),SCNetworkProtocolGetEnabled(proto),let current=SCNetworkProtocolGetConfiguration(proto) as? [String:Any],ProxyRecovery.pointsToOwnedEndpoint(current:current,applied:applied) {throw ProxyError("代理服务仍有轻舟入口，不能保留该残留")}
+            if ProxyRecovery.pointsToOwnedEndpoint(current:live,applied:applied) {throw ProxyError("当前系统代理仍指向汐航，不能按外部接管方式释放恢复记录")}
+            if let service=SCNetworkServiceCopy(preferences,record.service as CFString),let proto=SCNetworkServiceCopyProtocol(service,kSCNetworkProtocolTypeProxies),SCNetworkProtocolGetEnabled(proto),let current=SCNetworkProtocolGetConfiguration(proto) as? [String:Any],ProxyRecovery.pointsToOwnedEndpoint(current:current,applied:applied) {throw ProxyError("代理服务仍有汐航入口，不能保留该残留")}
         }
     }
     func proxyPreferences() throws -> SCPreferences {
-        guard let preferences=SCPreferencesCreate(nil,"轻舟兼容接管" as CFString,nil),SCPreferencesLock(preferences,true) else{throw ProxyError("无法锁定代理配置")};return preferences
+        guard let preferences=SCPreferencesCreate(nil,"汐航兼容接管" as CFString,nil),SCPreferencesLock(preferences,true) else{throw ProxyError("无法锁定代理配置")};return preferences
     }
     func plist(_ data:Data) throws -> [String:Any] {guard let value=try PropertyListSerialization.propertyList(from:data,format:nil) as? [String:Any] else{throw ProxyError("代理快照无效")};return value}
     func commitProxy(_ preferences:SCPreferences) throws {
@@ -68,7 +68,7 @@ extension Service {
             }
             let restored=strict ?? ProxyRecovery.restoredPreservingExternal(original:restoration,applied:applied,current:current)
             let enabled=strict == nil ? SCNetworkProtocolGetEnabled(proto):record.enabled
-            guard !preserveExternal || !enabled || !ProxyRecovery.pointsToOwnedEndpoint(current:restored,applied:applied) else{issues.append(label+" 仍指向轻舟入口");continue}
+            guard !preserveExternal || !enabled || !ProxyRecovery.pointsToOwnedEndpoint(current:restored,applied:applied) else{issues.append(label+" 仍指向汐航入口");continue}
             guard SCNetworkProtocolSetConfiguration(proto,restored as CFDictionary),SCNetworkProtocolSetEnabled(proto,enabled) else{issues.append(label+" 恢复写入失败");continue}
             if !record.hadProtocol,restored.isEmpty,!SCNetworkServiceRemoveProtocolType(service,kSCNetworkProtocolTypeProxies) {issues.append(label+" 临时代理协议移除失败")}
         }
@@ -76,7 +76,7 @@ extension Service {
     }
     func proxyConfigurationIssues()->[String] {
         guard let records=journal?.proxies,!records.isEmpty else{return ["系统代理应用快照缺失"]}
-        guard let preferences=SCPreferencesCreate(nil,"轻舟代理核对" as CFString,nil) else{return ["系统代理配置无法读取"]}
+        guard let preferences=SCPreferencesCreate(nil,"汐航核对" as CFString,nil) else{return ["系统代理配置无法读取"]}
         var issues:[String]=[]
         for (index,record) in records.enumerated() {
             guard let service=SCNetworkServiceCopy(preferences,record.service as CFString),let proto=SCNetworkServiceCopyProtocol(service,kSCNetworkProtocolTypeProxies),let expected=try? plist(record.applied) else{issues.append("系统代理服务 "+String(index+1)+" 或快照缺失");continue}

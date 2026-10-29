@@ -20,7 +20,7 @@ public enum TargetPathService {
         do {
         if SavedDiagnosticTarget.isIP(host) {addresses=[host]}
         else {
-            guard let store=SCDynamicStoreCreate(nil,"轻舟收藏目标只读诊断" as CFString,nil,nil),let global=SCDynamicStoreCopyValue(store,"State:/Network/Global/IPv4" as CFString) as? [String:Any],let primary=global["PrimaryInterface"] as? String else {throw ProxyError("无法确认原网络 DNS 作用域")}
+            guard let store=SCDynamicStoreCreate(nil,"汐航收藏目标只读诊断" as CFString,nil,nil),let global=SCDynamicStoreCopyValue(store,"State:/Network/Global/IPv4" as CFString) as? [String:Any],let primary=global["PrimaryInterface"] as? String else {throw ProxyError("无法确认原网络 DNS 作用域")}
             let backend=NativeRouteBackend();backend.cancelled=cancelled
             let sample=try backend.snapshot()
             let keys=SCDynamicStoreCopyKeyList(store,"State:/Network/Service/Qingzhou-.*/DNS" as CFString) as? [String] ?? []
@@ -131,7 +131,7 @@ private final class TargetSocketProbe:@unchecked Sendable {
             guard (1...65535).contains(proxyPort) else {throw ProxyError("本地代理端口无效")}
             var proxy=ProxyConfiguration(socksv5Proxy:.hostPort(host:"127.0.0.1",port:NWEndpoint.Port(rawValue:UInt16(proxyPort))!))
             proxy.allowFailover=false
-            let context=NWParameters.PrivacyContext(description:"轻舟目标独立代理探测")
+            let context=NWParameters.PrivacyContext(description:"汐航目标独立代理探测")
             context.disableLogging();context.proxyConfigurations=[proxy];parameters.setPrivacyContext(context)
         }
         // 代理保留域名供核心匹配规则；直连使用已核验地址，禁止代理故障后回退直连。

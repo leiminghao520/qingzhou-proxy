@@ -277,8 +277,9 @@ struct SubscriptionsView: View {
         let (used, total) = extractUsageBytes(sub.usage)
         
         return VStack(alignment: .leading, spacing: 12) {
-            // Header
+            // 订阅摘要
             HStack {
+                Image(systemName:"square.stack.3d.up.fill").font(.title3).foregroundStyle(Theme.accentBlue).padding(12).background(Theme.accentBlue.opacity(0.10),in:RoundedRectangle(cornerRadius:12))
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 8) {
                         Text(sub.name)

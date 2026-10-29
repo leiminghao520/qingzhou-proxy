@@ -99,7 +99,7 @@ if args.count==3 && args[1]=="original-route-check" {
     }catch{print("ORIGINAL_ROUTE_CHECK_FAILED "+error.localizedDescription);exit(1)}
 }
 if args.count==2 && args[1]=="capture-snapshot" {
-    do {let store=SCDynamicStoreCreate(nil,"轻舟只读快照" as CFString,nil,nil)!;let global=SCDynamicStoreCopyValue(store,"State:/Network/Global/IPv4" as CFString) as! [String:Any];let routes=try NetworkInspection.command("/usr/sbin/netstat",["-rn"]);let snapshot=try NetworkSnapshot.read(store:store,primary:global["PrimaryInterface"] as! String,routes:routes);let plan=try CapturePlan.make(snapshot:snapshot,extraCIDRs:[],extraDomains:[]);print("SNAPSHOT_OK routes=\(snapshot.routes.count) protected=\(plan.protectedRoutes.count)");for resolver in snapshot.resolvers {print("DNS interface=\(resolver.interface) servers=\(resolver.servers.count) default=\(resolver.defaultResolver) domains=\(resolver.protectedDomains.count)")};exit(0)}catch{print("SNAPSHOT_FAILED "+error.localizedDescription);exit(1)}
+    do {let store=SCDynamicStoreCreate(nil,"汐航只读快照" as CFString,nil,nil)!;let global=SCDynamicStoreCopyValue(store,"State:/Network/Global/IPv4" as CFString) as! [String:Any];let routes=try NetworkInspection.command("/usr/sbin/netstat",["-rn"]);let snapshot=try NetworkSnapshot.read(store:store,primary:global["PrimaryInterface"] as! String,routes:routes);let plan=try CapturePlan.make(snapshot:snapshot,extraCIDRs:[],extraDomains:[]);print("SNAPSHOT_OK routes=\(snapshot.routes.count) protected=\(plan.protectedRoutes.count)");for resolver in snapshot.resolvers {print("DNS interface=\(resolver.interface) servers=\(resolver.servers.count) default=\(resolver.defaultResolver) domains=\(resolver.protectedDomains.count)")};exit(0)}catch{print("SNAPSHOT_FAILED "+error.localizedDescription);exit(1)}
 }
 if args.count==4 && args[1]=="full-capture-fixture" {
     do {
@@ -168,12 +168,12 @@ if args.count==4 && args[1]=="full-subscription-install" {
         guard let url=URL(string:source),url.scheme=="https",url.lastPathComponent=="qingzhou.json" else{throw ProxyError("完整订阅地址无效")}
         let text=try String(contentsOfFile:args[2],encoding:.utf8)
         let preview=try ProfileImporter.parse(text)
-        guard preview.fullConfiguration != nil else{throw ProxyError("需要轻舟完整订阅")}
+        guard preview.fullConfiguration != nil else{throw ProxyError("需要汐航完整订阅")}
         let directory=FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("Qingzhou")
         let fd=open(directory.appendingPathComponent("session.lock").path,O_RDWR)
         guard fd>=0 else{throw ProxyError("配置锁缺失")};defer{close(fd)}
-        guard flock(fd,LOCK_EX|LOCK_NB)==0 else{throw ProxyError("请先正常退出轻舟")}
-        let credentials=KeychainStore()
+        guard flock(fd,LOCK_EX|LOCK_NB)==0 else{throw ProxyError("请先正常退出汐航")}
+        let credentials=UnifiedCredentialStore.native
         let store=try NodeStore(file:directory.appendingPathComponent("state.json"),credentials:credentials)
         // 变更前保存含凭据的加密快照，备份口令仅进入钥匙串。
         let snapshot=try BackupService.snapshot(store.catalog,credentials:credentials)
@@ -321,11 +321,29 @@ func run(_ name:String,_ instance:CheckCase,_ body:() throws -> Void) {
     do {try instance.tearDownWithError()} catch {CheckHarness.failure("测试清理失败",file:#filePath,line:#line)}
     scenarios += 1;print("\(CheckHarness.failures == before ? "PASS" : "FAIL") \(name)")
 }
+func runUnifiedCredentialChecks() {
+    let t=UnifiedCredentialTests()
+    run("Credentials.mergeAndSingleRead",t){try t.testMergeAndSingleRead()}
+    run("Credentials.missingAndTombstones",t){try t.testMissingAndTombstones()}
+    run("Credentials.failureAtomicity",t){try t.testFailureAtomicity()}
+    run("Credentials.corruptionAndDenied",t){try t.testCorruptionAndDeniedAreNotMissing()}
+    run("Credentials.cancellationStopsOperation",t){try t.testCancellationStopsOperation()}
+    run("Credentials.silentPolicyAndCache",t){try t.testSilentPolicyAndSessionCache()}
+}
+if args.count==2 && args[1]=="credential-checks" {
+    runUnifiedCredentialChecks()
+    let ux=KeychainUXTests()
+    run("Credentials.existingAuthorization",ux){try ux.testAuthorizationRetryAndCache()}
+    run("Credentials.existingErrors",ux){try ux.testDistinctErrorsAndAtomicCache()}
+    print("RESULT credential_scenarios=\(scenarios) assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
+    exit(CheckHarness.failures==0 ? 0:1)
+}
 runNetworkBypassChecks()
 if args.count==2 && args[1]=="bypass-checks" {
     print("RESULT bypass_scenarios=\(scenarios) assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
     exit(CheckHarness.failures==0 ? 0:1)
 }
+runUnifiedCredentialChecks()
 do {let t=RepairTests();run("Repair.compatibilityMigration",t){try t.testCompatibilityMigrationAndImport()};run("Repair.importTypes",t){try t.testImportTypesAndNoResolve()};run("Repair.orderedDNS",t){try t.testOrderedDNSAndMode()};run("Repair.unknownFallback",t){t.testUnknownFallbackAndHealth()};run("Repair.dnsCompression",t){t.testDNSPacketCompression()};run("Repair.searchDomainIsolation",t){try t.testSearchDomainIsolation()}}
 do { let instance = ConfigTests(); run("ConfigTests.testHysteriaPreservesUserpassAndObfs",instance) { try instance.testHysteriaPreservesUserpassAndObfs() } }
 do { let instance = ConfigTests(); run("ConfigTests.testProtocolConfigurations",instance) { try instance.testProtocolConfigurations() } }

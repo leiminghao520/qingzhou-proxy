@@ -114,13 +114,13 @@ import Foundation
         try await restoreAll(includeHelper:HelperRecoveryPolicy.requiresRecovery(activeTunnel:activeMode?.usesTunnel == true,running:helperRunning,journalPresent:evidence.journalPresent,inspectionAvailable:evidence.available),preserveExternal:preserveExternal)
     }
     public func verifyReleasedForQuit() async throws {
-        guard !core.isRunning,httpCompatibility?.isRunning != true else{throw ProxyError("轻舟本地核心仍在运行，尚不能退出")}
+        guard !core.isRunning,httpCompatibility?.isRunning != true else{throw ProxyError("汐航本地核心仍在运行，尚不能退出")}
         try proxy.verifyReleased()
         let evidence=HelperRecoveryPolicy.inspect()
         if HelperRecoveryPolicy.requiresRecovery(activeTunnel:activeMode?.usesTunnel == true,running:helperRunning,journalPresent:evidence.journalPresent,inspectionAvailable:evidence.available) {
             let status=try await requestHelper(TunRequest(operation:"status",verifyNetwork:true))
             helperRunning=status.running
-            guard !status.running,status.safeToQuit==true else{throw ProxyError("尚不能确认轻舟的路由、DNS 和代理已释放；恢复记录已保留")}
+            guard !status.running,status.safeToQuit==true else{throw ProxyError("尚不能确认汐航的路由、DNS 和代理已释放；恢复记录已保留")}
         }
         ownedTunDNS=nil;activeMode=nil
         await helper.closeChannel()

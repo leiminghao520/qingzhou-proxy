@@ -39,7 +39,7 @@ extension AppModel {
             try await verifyConnectionReleased();networkReleased=true
             wakeRecoveryStatus=status
             connection = .error
-            errorMessage=status.label+"；已释放轻舟接管，外部网络已保留"
+            errorMessage=status.label+"；已释放汐航接管，外部网络已保留"
         }catch{recoveryPending=true;wakeRecoveryStatus=status;report(error)}
     }
     func wakeStartupError(_ results:[ConnectivityResult])->Error {
@@ -159,6 +159,9 @@ extension AppModel {
         return StartupConnectivityPolicy.recovery(results)
     }
     func rebuildWakeSession() async -> WakeRecoveryCheck {
+        await CredentialAuthorization.$allowsInteraction.withValue(false) {await rebuildWakeSessionWithoutPrompts()}
+    }
+    private func rebuildWakeSessionWithoutPrompts() async -> WakeRecoveryCheck {
         guard !busy,!stopRequested,!Task.isCancelled else{return .inconclusive(.cancelled)}
         busy=true;wakeRebuilding=true
         defer {wakeRebuilding=false;busy=false}

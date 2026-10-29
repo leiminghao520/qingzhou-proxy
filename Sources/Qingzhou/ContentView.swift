@@ -41,32 +41,13 @@ struct ContentView: View {
         NavigationSplitView {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 12) {
-                    if let appIcon = NSImage(named: NSImage.applicationIconName) {
-                        Image(nsImage: appIcon)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 38, height: 38)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                            .shadow(color: .black.opacity(0.18), radius: 3, x: 0, y: 1.5)
-                    } else {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 8)
-                                .fill(LinearGradient(
-                                    colors: [Theme.accentBlue, Theme.purpleAccent],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                ))
-                                .frame(width: 38, height: 38)
-                            Image(systemName: "paperplane.fill")
-                                .font(.system(size: 18, weight: .bold))
-                                .foregroundStyle(.white)
-                        }
-                    }
+                    XihangMark().frame(width:29,height:31).padding(8)
+                        .background(Color(red:0.05,green:0.09,blue:0.17),in:RoundedRectangle(cornerRadius:12))
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("轻舟代理")
+                        Text("汐航")
                             .font(.headline.weight(.bold))
-                        Text("Qingzhou Proxy · \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版")")
+                        Text("Xihang")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
@@ -107,7 +88,7 @@ struct ContentView: View {
                                             badgeColor: badgeColor,
                                             selectionNamespace: navigationGlass
                                         ) {
-                                            withAnimation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.86)) { page = item }
+                                            withAnimation(reduceMotion ? nil : .easeInOut(duration:0.25)) { page = item }
                                         }
                                     }
                                 }
@@ -120,7 +101,7 @@ struct ContentView: View {
 
                 Divider().opacity(0.6)
 
-                if interfaceMode == .professional {
+                if interfaceMode == .professional && page != .overview {
                     VStack(spacing: 8) {
                         HStack(spacing: 8) {
                             Circle()
@@ -207,6 +188,13 @@ struct ContentView: View {
                     )
                     .padding(10)
                 }
+                if interfaceMode == .simple || page == .overview {
+                    HStack(spacing:8) {
+                        Circle().fill(model.connectionAvailable ? Theme.connectedGreen : model.hasConnectionActivity ? Theme.amberAccent : Color.secondary).frame(width:6,height:6)
+                        Text(model.connectionTitle).font(.caption).lineLimit(1)
+                        Spacer()
+                    }.padding(.horizontal,20).padding(.vertical,12)
+                }
                 LiquidModePicker(selection: $interfaceMode)
                     .padding(12)
                 AppearanceMenu()
@@ -239,6 +227,7 @@ struct ContentView: View {
             .background { LiquidCanvas() }
         }
         .preferredColorScheme(appearance.colorScheme)
+        .scrollIndicators(.hidden)
         .onAppear {
             page = interfaceMode == .simple ? .home : .overview
         }
@@ -309,7 +298,7 @@ struct ContentView: View {
             SimpleConnectionView(model: model, onImport: { importing = true }, onLines: { page = .lines }, onSubscriptions: { page = .subscriptions }, onDiagnose: { utility = .diagnostics }, onEdit: { editing = EditorRequest(node: $0) }, onProfessional: { interfaceMode = .professional })
         case .lines:
             SimpleLinesView(model: model, onImport: { importing = true }, onEdit: { editing = EditorRequest(node: $0) }, onProfessional: { interfaceMode = .professional })
-        case .overview: OverviewView(model: model)
+        case .overview: OverviewView(model: model, onLines: { page = .nodes }, onSubscriptions: { page = .subscriptions })
         case .profiles: ProfilesView(model: model)
         case .explanation: RuleExplanationView(model: model)
         case .diagnostics: DiagnosticsView(model: model)
