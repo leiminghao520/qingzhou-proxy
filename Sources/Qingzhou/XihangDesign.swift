@@ -159,7 +159,7 @@ struct XihangTrafficPanel: View {
                 HStack(spacing:24) { rates; Spacer(minLength:0); auxiliary }
                 VStack(alignment:.leading,spacing:16) { rates; auxiliary }
             }
-            if expanded && connected && available { Divider().opacity(0.5); RateChart(samples:display.sample.history,embedded:true) }
+            if expanded && connected && available { Divider().opacity(0.5); RateChart(samples:display.sample.history,embedded:true).equatable() }
             else if expanded {
                 HStack(spacing:10) {
                     XihangMark(monochrome:true).frame(width:24,height:26).foregroundStyle(.secondary)

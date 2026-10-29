@@ -8,7 +8,7 @@ struct OverviewView: View {
 
     var body: some View {
         ScrollView(showsIndicators:false) {
-            VStack(alignment:.leading,spacing:20) {
+            LazyVStack(alignment:.leading,spacing:20) {
                 HStack {
                     VStack(alignment:.leading,spacing:4) {
                         Text("概览").font(.title2.bold())

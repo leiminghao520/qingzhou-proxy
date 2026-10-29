@@ -60,7 +60,7 @@ struct OfficeLiveRateCards:View {
 }
 struct OfficeRateChart:View {
     @ObservedObject var display:OfficeTrafficDisplay
-    var body:some View {RateChart(samples:display.sample.history)}
+    var body:some View {RateChart(samples:display.sample.history).equatable()}
 }
 
 // 菜单栏使用模板图，随系统自动反色；连接状态通过辅助功能与菜单正文表达。

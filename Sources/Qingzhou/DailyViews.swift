@@ -703,11 +703,39 @@ struct ShareView: View {
 }
 
 // MARK: - 稳定的实时速率图表
-struct RateChart: View {
+struct RateChart: View, Equatable {
     let samples: [RateSample]
     var embedded = false
     @State private var selectedTime: Date?
     @State private var upperBound: Double = 1024
+
+    static func == (lhs:Self,rhs:Self) -> Bool {
+        lhs.embedded == rhs.embedded && lhs.samples.count == rhs.samples.count &&
+        zip(lhs.samples,rhs.samples).allSatisfy { a,b in
+            a.id == b.id && a.time == b.time && a.upload == b.upload && a.download == b.download
+        }
+    }
+
+    // 每段保留上下行各自的峰值与谷值，以及窗口首尾；只压缩绘图，不改原始读数。
+    static func plottingSamples(_ samples:[RateSample],limit:Int=256) -> [RateSample] {
+        guard samples.count>limit,limit>=6 else {return samples}
+        let buckets=max(1,(limit-2)/4),interior=samples.count-2
+        var indices=[0]
+        for bucket in 0..<buckets {
+            let start=1+bucket*interior/buckets,end=1+(bucket+1)*interior/buckets
+            guard start<end else {continue}
+            var lowUp=start,highUp=start,lowDown=start,highDown=start
+            for i in start..<end {
+                if samples[i].upload<samples[lowUp].upload {lowUp=i}
+                if samples[i].upload>samples[highUp].upload {highUp=i}
+                if samples[i].download<samples[lowDown].download {lowDown=i}
+                if samples[i].download>samples[highDown].download {highDown=i}
+            }
+            indices.append(contentsOf:Set([lowUp,highUp,lowDown,highDown]).sorted())
+        }
+        indices.append(samples.count-1)
+        return indices.map{samples[$0]}
+    }
 
     // 固定三十分钟窗口，每分钟移动一次，避免每个样本都缩放时间轴。
     private var timeDomain: ClosedRange<Date> {
@@ -765,7 +793,7 @@ struct RateChart: View {
                                 Text("↓ \(formatRate(sample.download))  ↑ \(formatRate(sample.upload))").font(.caption2.monospacedDigit()).padding(6).background(Theme.cardBackground,in:RoundedRectangle(cornerRadius:6))
                             }
                     }
-                    ForEach(samples) { sample in
+                    ForEach(Self.plottingSamples(samples)) { sample in
                         AreaMark(
                             x: .value("时间", sample.time),
                             y: .value("速率", sample.download),
