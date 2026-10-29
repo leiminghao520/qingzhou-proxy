@@ -3,10 +3,12 @@ import QingzhouKit
 
 extension AppModel {
     func cancelWakeRecovery() {
+        networkWaiting=false
         wakeRecovery.cancel();wakeIntent=nil;wakeNeedsRebuild=false;routineRecovery=false
         wakeRecoveryStatus=WakeRecoveryStatus(.idle)
     }
     func cancelWakeRecoveryAndWait() async {
+        networkWaiting=false
         wakeIntent=nil;wakeNeedsRebuild=false;routineRecovery=false
         await wakeRecovery.cancelAndWait()
         wakeRecoveryStatus=WakeRecoveryStatus(.idle)
@@ -29,16 +31,19 @@ extension AppModel {
             monitor.health="连接暂无法确认，保留会话继续复查"
             return
         }
-        if status.reason == .exitUnavailable {return}
-        busy=true;defer{busy=false}
+        if status.reason == .exitUnavailable {userWantsConnection=false;networkWaiting=false;return}
+        userWantsConnection=false;networkWaiting=false
+        busy=true;wakeRebuilding=true;defer{wakeRebuilding=false;busy=false}
         do {
             try await disconnectInternal(preserveExternal:true)
+            try await verifyConnectionReleased();networkReleased=true
             wakeRecoveryStatus=status
             connection = .error
             errorMessage=status.label+"；已释放轻舟接管，外部网络已保留"
         }catch{recoveryPending=true;wakeRecoveryStatus=status;report(error)}
     }
     func wakeStartupError(_ results:[ConnectivityResult])->Error {
+        if results.contains(where:{$0.status == .failed && $0.category == "DNS"}) {return ConnectionFailure(.dns,"实际连接的 DNS 解析失败")}
         switch WakeRecoveryCheck.connectivity(results) {
         case .failed(let reason),.stop(let reason),.inconclusive(let reason):return WakeRecoveryError(reason)
         default:return WakeRecoveryError(.unverified)
@@ -69,13 +74,12 @@ extension AppModel {
                 self.wakeIntent=nil;self.routineRecovery=false
                 let uncertain=routine && self.connection == .connected && [.unverified,.timeout,.helperRecovery].contains(status.reason)
                 self.errorMessage=uncertain ? nil:status.label
-                if routine {Task { @MainActor [weak self] in await self?.finishRoutineRecovery(status,epoch:token) }}
-                else {Task { @MainActor [weak self] in await Task.yield();self?.drainPendingDisconnect() }}
+                self.recoveryFinishTask=Task { @MainActor [weak self] in await self?.finishRoutineRecovery(status,epoch:token) }
             }
-            if status.phase == .recovered {self.routineRecovery=false;self.wakeIntent=nil;self.coreFailed=false;self.helperFailureReason=nil;self.failedHealthCycles=0;self.healthFailures=HealthFailureCounter()}
+            if status.phase == .recovered {self.routineRecovery=false;self.wakeIntent=nil;self.networkWaiting=false;self.networkReleased=false;self.coreFailed=false;self.helperFailureReason=nil;self.failedHealthCycles=0;self.healthFailures=HealthFailureCounter();self.exitHealth=ExitHealthTracker()}
         }
         var recoveryToken:UUID?
-        wakeRecovery.start(id:intent.id,stableDelay:healthPower.remaining(uptime:healthPowerUptime()),isCurrent:{ [weak self] in
+        wakeRecovery.start(id:intent.id,stableDelay:healthPower.remaining(uptime:healthPowerUptime()),maxRebuildAttempts:3,isCurrent:{ [weak self] in
             guard let self else{return false}
             return self.wakeIntent != nil && self.currentProfileID==intent.profile && !self.stopRequested && !self.healthPower.suspended && self.healthDisplayAwake()
         },check:{ [weak self] in
@@ -101,12 +105,14 @@ extension AppModel {
             let services=BypassNetworkService.read()
             guard state.pinnedBypasses.allSatisfy({item in services.contains{$0.id==item.serviceID && $0.active}}) else{return .stop(.exitUnavailable)}
         }
+        if !wakeNetworkReady() {return await releaseWhileWaitingForNetwork()}
+        networkWaiting=false
         if wakeNeedsRebuild {
             do {try NetworkSafety.check();try NetworkInspection.checkConflicts(routes:NetworkInspection.command("/usr/sbin/netstat",["-rn"]))}
             catch {return .stop(.ownershipConflict)}
-            return .failed(.networkNotReady)
+            return .failed(.controlUnavailable)
         }
-        if state.captureMode.usesTunnel || capture.helperRunning {
+        if effectiveState.captureMode.usesTunnel || capture.helperRunning {
             do {
                 let status=try await capture.wakeStatus()
                 if status.wakeRecoveryReason != nil {log("唤醒网络核验："+Redactor.redact(status.message))}
@@ -119,14 +125,14 @@ extension AppModel {
                 if status.phase=="networkProtectionFailed" {return .stop(.ownershipConflict)}
                 if status.networkNotReady==true {return .failed(.networkNotReady)}
                 // 旧辅助服务缺少核验结果时不能据此认领或重建网络。
-                if status.running && state.captureMode.usesTunnel {
-                    let checks=[status.routesVerified,status.dnsVerified,status.protectionVerified]+(state.captureMode == .compatible ? [status.proxyVerified]:[])
+                if status.running && effectiveState.captureMode.usesTunnel {
+                    let checks=[status.routesVerified,status.dnsVerified,status.protectionVerified]+(effectiveState.captureMode == .compatible ? [status.proxyVerified]:[])
                     // 旧服务的失败布尔值不能证明外部所有权；保持会话且不据此重建。
                     if checks.contains(where:{$0==false}) {return .inconclusive(.unverified)}
                     if checks.contains(where:{$0==nil}) {return .inconclusive(.unverified)}
                     if !wakeNetworkReady() {return .failed(.networkNotReady)}
                 } else if !status.running {return .stop(.configuration)}
-                if state.captureMode == .systemProxy,status.supportsManagedSystemProxy==true,status.proxyVerified != true {return .stop(.ownershipConflict)}
+                if effectiveState.captureMode == .systemProxy,status.supportsManagedSystemProxy==true,status.proxyVerified != true {return .stop(.ownershipConflict)}
             }catch is HelperRequestBusy {return .helperRecovering}
             catch{return .inconclusive(.unverified)}
         } else {
@@ -145,7 +151,7 @@ extension AppModel {
             if error.category=="超时" || error.category=="取消" {return .inconclusive(.timeout)}
             return .failed(.controlUnavailable)
         }catch{return .inconclusive(.unverified)}
-        async let path=wakeHTTPSProbe(state.captureMode.usesTunnel ? nil:state.listenPort)
+        async let path=wakeHTTPSProbe(effectiveState.captureMode.usesTunnel ? nil:state.listenPort)
         async let node=ConnectivityProbe.wakeNode(client:client,mode:state.mode)
         let results=await [path,node]
         guard !Task.isCancelled,wakeRecovery.id==recoveryToken,epoch==connectionToken,!healthPower.suspended,healthDisplayAwake(),wakeIntent != nil else{return .inconclusive(.cancelled)}
@@ -166,6 +172,12 @@ extension AppModel {
             connection = .connecting
             try await startService(state)
             try Task.checkCancellation()
+            guard SelectionConnectivityPolicy.evaluate(connectivityResults,requiresNode:state.mode != .direct && state.activePolicy != .direct) == .verified else {
+                let result=WakeRecoveryCheck.connectivity(connectivityResults)
+                try await disconnectInternal(preserveExternal:true)
+                try await verifyConnectionReleased();networkReleased=true;wakeNeedsRebuild=true
+                return result == .healthy ? .inconclusive(.unverified):result
+            }
             wakeNeedsRebuild=false
             return .healthy
         } catch {

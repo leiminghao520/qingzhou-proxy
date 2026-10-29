@@ -8,11 +8,12 @@ import QingzhouKit
 }
 
 struct NetworkSettingsDraft:Equatable {
+    var strictDNS:Bool
     var capture:CaptureMode
     var dns:DNSPreference
     var family:AddressFamilyPolicy
     var http:Bool
-    init(_ state:AppState) {capture=state.captureMode;dns=state.dnsPreference;family=state.effectiveAddressFamilyPolicy;http=state.httpCompatibilityEnabled}
+    init(_ state:AppState) {strictDNS=state.strictDNS ?? false;capture=state.captureMode;dns=state.dnsPreference;family=state.effectiveAddressFamilyPolicy;http=state.httpCompatibilityEnabled}
 }
 struct ShortcutSettingsDraft:Equatable {
     var key:UInt32

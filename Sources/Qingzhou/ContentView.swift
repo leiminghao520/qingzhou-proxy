@@ -124,11 +124,11 @@ struct ContentView: View {
                     VStack(spacing: 8) {
                         HStack(spacing: 8) {
                             Circle()
-                                .fill(model.connection == .connected ? Theme.connectedGreen : Theme.disconnectedGray)
+                                .fill(model.connectionAvailable ? Theme.connectedGreen : model.hasConnectionActivity ? Theme.amberAccent:Theme.disconnectedGray)
                                 .frame(width: 8, height: 8)
 
                             VStack(alignment: .leading, spacing: 1) {
-                                Text(model.recovering ? "正在恢复网络":model.stopRequested ? "等待安全断开":model.networkReconnecting ? "网络恢复中 · 自动重连":model.networkRechecking ? "网络变化 · 检查中":model.connection.rawValue)
+                                Text(model.connectionTitle)
                                     .font(.system(size: 11, weight: .bold))
                                     .lineLimit(1)
                                 Text(model.connection == .connected ? model.actualName : "尚未连接")
@@ -142,14 +142,14 @@ struct ContentView: View {
 
                             Button {
                                 Task {
-                                    if model.connection == .connected { await model.disconnect() }
+                                    if model.hasConnectionActivity { await model.disconnect() }
                                     else { await model.connect() }
                                 }
                             } label: {
                                 if model.busy && model.connection != .connected {
                                     ProgressView().controlSize(.small)
                                 } else {
-                                    Text(model.connection == .connected ? "断开" : "开启")
+                                    Text(model.hasConnectionActivity ? "断开" : "开启")
                                         .font(.system(size: 11, weight: .bold))
                                         .padding(.horizontal, 10)
                                         .padding(.vertical, 4)
@@ -162,7 +162,7 @@ struct ContentView: View {
                             .frame(width:54,height:26)
                             .buttonStyle(.plain)
                             .contentShape(Capsule())
-                            .disabled(model.stopDisabled || (model.state.activePolicy == nil && model.state.mode != .direct && model.connection != .connected) || (model.recoveryPending && model.connection != .connected))
+                            .disabled(model.stopDisabled || (model.state.activePolicy == nil && model.state.mode != .direct && model.connection != .connected) || (model.recoveryPending && !model.hasConnectionActivity))
                         }
 
                         HStack(spacing: 4) {
@@ -188,7 +188,7 @@ struct ContentView: View {
 
                         // 接管方式与速率分行，窄侧栏优先保留可操作的连接状态。
                         HStack {
-                            Text(model.state.captureMode.label).font(.system(size:10)).fixedSize()
+                            Text(model.effectiveState.captureMode.label).font(.system(size:10)).fixedSize()
                             Spacer(minLength:4)
                             if model.healthChecking {Text("检测中").font(.system(size:10)).foregroundStyle(.secondary)}
                         }
@@ -241,6 +241,9 @@ struct ContentView: View {
         .preferredColorScheme(appearance.colorScheme)
         .onAppear {
             page = interfaceMode == .simple ? .home : .overview
+        }
+        .onReceive(model.office.$importRequested) {requested in
+            if requested {model.office.importRequested=false;importing=true}
         }
         .onReceive(model.office.$diagnosticRequested) {requested in
             if requested {Task {@MainActor in model.office.diagnosticRequested=false;utility = .diagnostics;NSApplication.shared.activate(ignoringOtherApps:true);NSApplication.shared.windows.first{$0.canBecomeMain}?.makeKeyAndOrderFront(nil)}}
@@ -296,11 +299,8 @@ struct ContentView: View {
         .sheet(isPresented: Binding(get: { model.preview != nil }, set: { if !$0 { model.cancelPreview() } })) {
             PreviewSheet(model: model)
         }
-        .alert("操作提示", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
-            Button("知道了") { model.errorMessage = nil }
-        } message: {
-            Text(model.errorMessage ?? "")
-        }
+        .safeAreaInset(edge:.top,spacing:0) {ConnectionNoticeView(model:model)}
+
     }
 
     @ViewBuilder private var content: some View {

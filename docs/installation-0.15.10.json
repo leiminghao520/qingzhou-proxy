@@ -1,0 +1,68 @@
+{
+  "version": "0.15.10",
+  "gitHead": "f1da505fdd3166ccbe7701174f518aa863861a05",
+  "sourceTreeSHA256": "6e78f892ba44e6cd451a4e99c1f6e949a51a35537f5771002cd281cc853b5c26",
+  "includesUncommittedChanges": true,
+  "components": {
+    "Contents/Resources/age": {
+      "size": 5911920,
+      "sha256": "58cbb1377d6e7c2566f1674b80590268d83c908f86b49cff76ac48982d3d5f94"
+    },
+    "Contents/Resources/age-keygen": {
+      "size": 3444016,
+      "sha256": "3a8b8b0089841abfd4f6701df135dd38bda8eec9758bce8b096155e4a27368ab"
+    },
+    "Contents/Resources/age.LICENSE": {
+      "size": 1458,
+      "sha256": "f5bbba1618a84c37b9b89fa6995b3e917a888999b179fac1a2dd5e059a527283"
+    },
+    "Contents/MacOS/Qingzhou": {
+      "size": 16401600,
+      "sha256": "3fb8ea743c006ab47e717109b177f8da82c683cc7bffd849a2c58cbede8b6eec"
+    },
+    "Contents/Resources/sing-box": {
+      "size": 83415744,
+      "sha256": "9233fcb60199adb58f8615b401f1f50b9c17cbc2c4f52a25239c728e9ded4519"
+    },
+    "Contents/Resources/QingzhouRunner": {
+      "size": 83072,
+      "sha256": "1831a0ffe7ebdbbf4d780628b9d53bb66ec79331f24b1e6a15d17a47f4f8d949"
+    },
+    "Contents/Resources/QingzhouHelper": {
+      "size": 7440784,
+      "sha256": "2aa76ef485b7f7eafd03ff6953060c39c3b1f8e7473d8f7010559b937e15637f"
+    },
+    "Contents/Resources/qzhttp": {
+      "size": 9578064,
+      "sha256": "df83e0a6bbd5d650a1f2cec550afaf901267be29f9a3c1330cc8235ffa909dda"
+    },
+    "Contents/Resources/shadowrocket-default.json": {
+      "size": 460266,
+      "sha256": "ff2fbcbf29b2fa77953f65f2d0ef1d2ef13874474621d96c18744902753a4145"
+    },
+    "Contents/Resources/domestic-rules.json": {
+      "size": 552560,
+      "sha256": "0476ef1945f877d2832cd815ba052feb9057d77dacca338b9e006ff65cf8a3c9"
+    },
+    "Contents/Resources/domestic-rules-lock.json": {
+      "size": 601,
+      "sha256": "4da14040298648f30267cc7a56de91935164a911c7527431dde59d433f586738"
+    },
+    "Contents/Resources/domestic-domain.LICENSE": {
+      "size": 1067,
+      "sha256": "b9d84a22870d3f21c91a4c6e410c9cc51d00902f5233ad0c84011479244bf7d2"
+    }
+  },
+  "installedPath": "/Applications/轻舟代理.app",
+  "installedDate": "2026-10-29",
+  "helperVerified": true,
+  "build": 80,
+  "uiVerification": "0.15.10 已启动，辅助服务更新完成并已核对；保持未连接",
+  "cleanupVerified": true,
+  "cleanupPaths": [
+    "/Users/leiminghao/Documents/Codex/2026-10-12/new-chat/work/GitHub/qingzhou-proxy/.build",
+    "/Users/leiminghao/Documents/Codex/2026-10-12/new-chat/work/GitHub/qingzhou-proxy/outputs/qingzhou-0.15.10-20261029-110623.TcJnba",
+    "/Applications/.qingzhou-before-80.app",
+    "/tmp/qingzhou-install-20261029-build.log"
+  ]
+}

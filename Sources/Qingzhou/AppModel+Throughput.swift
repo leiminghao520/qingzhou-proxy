@@ -19,7 +19,7 @@ extension AppModel {
             throughputError="请输入不含用户名或密码的 HTTPS 下载地址"; return
         }
         cancelThroughput(invalidate:true)
-        let generation=throughputGeneration,connectionID=epoch,profile=currentProfileID,mode=state.captureMode
+        let generation=throughputGeneration,connectionID=epoch,profile=currentProfileID,mode=effectiveState.captureMode
         let port=mode.usesTunnel ? nil:state.listenPort, client=api
         throughputRunning=true
         throughputTask=Task { [weak self] in

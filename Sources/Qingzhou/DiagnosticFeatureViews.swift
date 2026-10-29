@@ -77,7 +77,7 @@ struct TargetPathPanel:View {
     private func invalidate() {generation=UUID();task?.cancel();task=nil;session=nil}
     private func inspect() {
         model.cancelDiagnostic();invalidate()
-        let token=generation,input=target,state=model.state,profile=model.currentProfileID,epoch=model.epoch
+        let token=generation,input=target,state=model.effectiveState,profile=model.currentProfileID,epoch=model.epoch
         let active=model.connection == .connected && model.activeBypasses==state.effectiveBypasses
         let executor=model.dependencies.diagnosticExecutor,helper=model.dependencies.diagnosticHelper
         let tag=state.mode == .direct ? nil:model.connection == .connected ? CoreAPIClient.actualTag(model.proxyInfo):state.activePolicy?.tag

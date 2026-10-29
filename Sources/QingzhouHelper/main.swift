@@ -16,6 +16,8 @@ final class Service {
     var routeMetrics:RouteOperationMetrics?
     var progressReply:((String)->Void)?
     var connectionTiming:ConnectionTiming?
+    var failurePhase:String?
+    var failureKind:ConnectionFailureKind?
     var phase="idle" {didSet {if phase != oldValue {connectionTiming?.begin(phase);progressReply?(phase)}}}
     var captureGeneration=UUID()
     var domainRouteSummary:[String]=[]
@@ -374,7 +376,7 @@ return};var issues:[String]=[]
             startNetworkMonitor()
             startPinnedMonitor(state)
             }
-        }catch{let original=error;try rollbackStartup();throw original}
+        }catch{let original=error;failurePhase=failurePhase ?? phase;failureKind=failureKind ?? ConnectionFailureKind.classify(error);do{try rollbackStartup()}catch{throw ConnectionFailure(.recovery,"启动失败："+original.localizedDescription+"；恢复失败："+error.localizedDescription)};throw original}
     }
     private func rollbackStartup() throws {
         connectionTiming?.finish(succeeded:false)
@@ -383,6 +385,7 @@ return};var issues:[String]=[]
         catch {connectionTiming?.finish(succeeded:false);throw error}
     }
     func handle(_ request:TunRequest,fd:Int32)->TunReply {
+        failurePhase=nil;failureKind=nil
         let timing=ConnectionTiming()
         routeMetrics=RouteOperationMetrics()
         (routeBackend as? NativeRouteBackend)?.metrics=routeMetrics
@@ -409,7 +412,8 @@ return};var issues:[String]=[]
             return reply
         } catch {
             timing.finish(succeeded:false)
-            var reply=TunReply(ok:false,message:"TUN 阶段 "+phase+"："+Redactor.redact(error.localizedDescription),coreDiagnostics:["prepare","activate"].contains(request.operation) ? coreDiagnostics.recent:nil,running:helperIsRunning,phase:phase,networkNotReady:error is NetworkEnvironmentNotReady,stageTimings:timing.samples+(routeMetrics?.samples ?? []))
+            var reply=TunReply(ok:false,message:"接管阶段 "+(failurePhase ?? phase)+"："+Redactor.redact(error.localizedDescription),coreDiagnostics:["prepare","activate"].contains(request.operation) ? coreDiagnostics.recent:nil,running:helperIsRunning,phase:phase,networkNotReady:error is NetworkEnvironmentNotReady,stageTimings:timing.samples+(routeMetrics?.samples ?? []))
+            reply.failurePhase=failurePhase ?? phase;reply.failureKind=phase=="recovery" ? .recovery:(failureKind ?? ConnectionFailureKind.classify(error));reply.recoveryPhase=phase
             reply.tunnelInterface=journal?.interface
             reply.supportsManagedSystemProxy=true;reply.supportsTrustedCorporateDNS=true;reply.supportsWakeRecovery=true;reply.supportsExternalRecovery=true;reply.recoveryPending=journal != nil
             return reply
@@ -430,11 +434,11 @@ return};var issues:[String]=[]
             guard request.protocolVersion==5,let state=request.state,state.captureMode == .systemProxy else {throw ProxyError("指定出口辅助协议或模式无效，请更新辅助服务")}
             do {try startPinnedBypasses(request,fd:fd)}catch{let original=error;try stop();throw original}
             return TunReply(ok:true,message:"指定出口路由与拒绝保护已准备",running:true,protectionSummary:pinnedPaths.map{$0.destination+" → "+$0.interface},phase:phase)
-        case "prepare":lastFailure=nil;do{try start(request,fd:fd)}catch{let original=error;try rollbackStartup();throw original};phase="prepared";return TunReply(ok:true,message:"核心已准备，网络尚未接管",running:true,dnsServer:journal.map{String($0.address4.split(separator:"/")[0])})
+        case "prepare":lastFailure=nil;do{try start(request,fd:fd)}catch{let original=error;failurePhase=failurePhase ?? phase;failureKind=failureKind ?? ConnectionFailureKind.classify(error);do{try rollbackStartup()}catch{throw ConnectionFailure(.recovery,"启动失败："+original.localizedDescription+"；恢复失败："+error.localizedDescription)};throw original};phase="prepared";return TunReply(ok:true,message:"核心已准备，网络尚未接管",running:true,dnsServer:journal.map{String($0.address4.split(separator:"/")[0])})
         case "activate":
             guard request.protocolVersion==5,owner==fd,process?.isRunning==true,let activate=activatePrepared else{throw ProxyError("TUN 准备状态无效")}
             phase="activation"
-            do{try activate();activatePrepared=nil;phase="active";return TunReply(ok:true,message:"TUN 路由及 DNS 已接管；应用连接另行检测",running:true)}catch{let original=error;try rollbackStartup();throw original}
+            do{try activate();activatePrepared=nil;phase="active";return TunReply(ok:true,message:"TUN 路由及 DNS 已接管；应用连接另行检测",running:true)}catch{let original=error;failurePhase=failurePhase ?? phase;failureKind=failureKind ?? ConnectionFailureKind.classify(error);do{try rollbackStartup()}catch{throw ConnectionFailure(.recovery,"启动失败："+original.localizedDescription+"；恢复失败："+error.localizedDescription)};throw original}
         case "stop","recover":
             // 与辅助服务的网络重建共用串行队列；检查和恢复之间不允许插入另一轮重建。
             if request.deferToNetworkResume==true,networkResumeSession != nil {

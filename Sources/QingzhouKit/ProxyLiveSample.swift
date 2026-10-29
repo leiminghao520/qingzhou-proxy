@@ -5,6 +5,15 @@ public struct ProxyLiveSample {
     public let expected:[String:Any]
     public let current:[String:Any]?
     public init(expected:[String:Any],current:[String:Any]?) {self.expected=expected;self.current=current}
+    public var hasForeignEndpoint:Bool {
+        guard let current else{return false}
+        for prefix in ["HTTP","HTTPS","SOCKS"] where (current[prefix+"Enable"] as? NSNumber)?.boolValue==true {
+            let host=current[prefix+"Proxy"] as? String
+            let sameHost=host==expected[prefix+"Proxy"] as? String || ["127.0.0.1","localhost","::1"].contains(host ?? "") && ["127.0.0.1","localhost","::1"].contains(expected[prefix+"Proxy"] as? String ?? "")
+            if !sameHost || current[prefix+"Port"] as? Int != expected[prefix+"Port"] as? Int {return true}
+        }
+        return (current["ProxyAutoConfigEnable"] as? NSNumber)?.boolValue==true || (current["ProxyAutoDiscoveryEnable"] as? NSNumber)?.boolValue==true
+    }
     public var issues:[String] {
         guard let current else{return ["系统汇总代理状态尚未发布"]}
         var issues:[String]=[]

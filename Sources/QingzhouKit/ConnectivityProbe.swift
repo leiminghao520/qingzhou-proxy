@@ -63,11 +63,14 @@ public enum ConnectivityProbe {
         await wakeNode(client:client,mode:mode)
     }
     public static func wakeNode(client:CoreAPIClient,mode:ProxyMode) async -> ConnectivityResult {
+        if mode == .direct {return ConnectivityResult("当前节点通道检测",.notApplicable,"全部直连模式")}
+        return await target(client:client)
+    }
+    public static func target(client:CoreAPIClient,root:String="proxy") async -> ConnectivityResult {
         let title="当前节点通道检测"
-        if mode == .direct {return ConnectivityResult(title,.notApplicable,"全部直连模式")}
         do {
             let info=try await client.preparedProxies()
-            guard let tag=CoreAPIClient.actualTag(info) else{return ConnectivityResult(title,.failed,"控制接口缺少实际节点")}
+            guard let tag=CoreAPIClient.actualTag(info,root:root) else{return ConnectivityResult(title,.failed,"控制接口缺少实际节点")}
             if tag=="direct" || tag=="reject" {return ConnectivityResult(title,.notApplicable,"当前策略未选择节点")}
             guard tag.hasPrefix("node-"),let id=UUID(uuidString:String(tag.dropFirst(5))) else{return ConnectivityResult(title,.failed,"控制接口节点格式")}
             switch await client.measureNode(id) {

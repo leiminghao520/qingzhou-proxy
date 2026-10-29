@@ -13,10 +13,11 @@ extension Service {
             }
             owner=fd
             do {
+                phase="proxyActivation"
                 try applyProxy(port:port,exceptions:request.proxyExceptions ?? [],protectedDomains:request.proxyProtectedDomains ?? [])
                 try verifyProxyActivation();phase="active"
                 return TunReply(ok:true,message:"系统代理已由辅助服务接管",running:true,proxyVerified:true,phase:phase)
-            }catch{let original=error;try stop(preserveExternal:true);throw original}
+            }catch{let original=error;failurePhase=phase;failureKind=ConnectionFailureKind.classify(error);do{try stop(preserveExternal:true)}catch{throw ConnectionFailure(.recovery,"代理激活失败："+original.localizedDescription+"；恢复失败："+error.localizedDescription)};throw original}
     }
     func stopManagedSystemProxy(preserveExternal:Bool) throws {
             defer{owner=nil;activeRequest=nil}

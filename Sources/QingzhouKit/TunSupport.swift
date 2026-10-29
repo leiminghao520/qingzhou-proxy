@@ -19,6 +19,9 @@ public struct TunRequest:Codable,Sendable {
     public init(operation:String,state:AppState?=nil,credentials:[String:String]?=nil,control:CoreControlContext?=nil,verifyNetwork:Bool=false,httpCompatibilityPort:Int?=nil,systemProxyPort:Int?=nil,preserveExternal:Bool=false){self.preserveExternal=preserveExternal;self.systemProxyPort=systemProxyPort;self.httpCompatibilityPort=httpCompatibilityPort;self.verifyNetwork=verifyNetwork;self.operation=operation;self.state=state;self.credentials=credentials;self.control=control}
 }
 public struct TunReply: Codable, Sendable {
+    public var failurePhase:String?
+    public var recoveryPhase:String?
+    public var failureKind:ConnectionFailureKind?
     public var supportsManagedSystemProxy:Bool?
     public var wakeRecoveryReason:WakeRecoveryReason?
     public var supportsTrustedCorporateDNS:Bool?
@@ -56,7 +59,7 @@ public struct TunReply: Codable, Sendable {
 }
 
 extension TunReply {
-    public var networkReconnecting: Bool { phase == "networkReconnecting" || phase == "networkReplan" }
+    public var networkReconnecting: Bool { ["networkReconnecting", "networkReplan", "networkWaiting"].contains(phase ?? "") }
 }
 
 public enum HelperPaths {
@@ -307,6 +310,7 @@ extension TunReply {
         guard !ok else {return}
         let detail=message+(coreDiagnostics?.suffix(5).map{"\n核心："+$0}.joined() ?? "")
         if networkNotReady == true {throw NetworkEnvironmentNotReady(detail)}
+        if let kind=failureKind {throw HelperOperationFailure(phase:failurePhase,kind:kind,detail:detail)}
         throw ProxyError(detail)
     }
 }

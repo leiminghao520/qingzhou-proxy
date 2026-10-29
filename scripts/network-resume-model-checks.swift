@@ -182,6 +182,7 @@ final class WakeModelProtocol:URLProtocol {
         model.wakeCheckOverride={.stop(.authentication)};model.coreFailed=false
         model.handleHealthPowerEvent(.willSleep);model.handleHealthPowerEvent(.didWake);model.handleHealthPowerEvent(.screensWake)
         await model.wakeRecovery.waitUntilFinished()
+        await model.recoveryFinishTask?.value
         check(model.wakeIntent==nil && model.wakeRecoveryStatus.phase == .manual,"转入手动处理后撤销恢复意图，不永久阻止原有核心退出清理")
         model.wakeCheckOverride={wakeProbes+=1;return .healthy}
 
@@ -315,9 +316,9 @@ final class WakeModelProtocol:URLProtocol {
             try await model.capture.start(routineTunnel,credentials:MemoryCredentials(),control:control)
             model.beginRoutineRecovery(reason:.nodeUnavailable)
             await model.wakeRecovery.waitUntilFinished()
-            for _ in 0..<30 {await Task.yield()}
-            check(wakeBuilds==before+5 && model.connection == .connected && model.wakeRecoveryStatus.phase == .recovered,"日常明确故障超过三次仍继续恢复，不强制断开")
-            check(model.wakeIntent==nil && !model.wakeRecovery.active && !model.routineRecovery && releaseCalls==0,"恢复成功清除恢复意图，不执行额外断开")
+            await model.recoveryFinishTask?.value
+            check(wakeBuilds==before+3 && model.connection == .error && model.wakeRecoveryStatus.reason == .retryExhausted,"节点持续明确故障三次后结束重建并释放接管")
+            check(model.wakeIntent==nil && !model.wakeRecovery.active && !model.routineRecovery && releaseCalls>0,"恢复耗尽后撤销意图并实际执行网络释放")
             model.cancelWakeRecovery();model.connection = .connected
             model.wakeRecovery=WakeRecoveryCoordinator(sleep:{_ in try await Task.sleep(nanoseconds:30_000_000_000)})
             model.beginRoutineRecovery(reason:.nodeUnavailable)

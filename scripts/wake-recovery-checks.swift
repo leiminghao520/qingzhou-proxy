@@ -46,7 +46,7 @@ final class WakeProtocol:URLProtocol {
             return (c.status,rebuilds,delays)
         }
         let normal=await run([.healthy]);check(normal.0.phase == .recovered && normal.1==0 && normal.2==[15],"正常唤醒保留原会话并等待十五秒")
-        let delayed=await run([.failed(.networkNotReady),.healthy]);check(delayed.1==0 && delayed.2==[15,3],"单轮失败不重建")
+        let delayed=await run([.failed(.networkNotReady),.healthy]);check(delayed.1==0 && delayed.2==[15,30],"基础网络不可用时低频等待而不重建")
         let transient=await run([.inconclusive(.timeout),.healthy]);check(transient.0.phase == .recovered && transient.1==0,"超时不作为节点失效证据")
         let unknown=await run(Array(repeating:.inconclusive(.unverified),count:130)+[.healthy]);check(unknown.0.phase == .recovered && unknown.1==0,"未知检测超过原总预算仍只读复查，最终自行恢复")
         check(unknown.2.max()==30 && unknown.2.count==131,"长期未知复查退避到三十秒，避免高频空转")
@@ -119,6 +119,23 @@ final class WakeProtocol:URLProtocol {
         let unsettled=WakeRecoveryCoordinator(sleep:{_ in})
         unsettled.start(isCurrent:{true},check:{ordered+=1;return ordered>130 ? .healthy:ordered%3==0 ? .inconclusive(.unverified):.failed(.pathUnavailable)},rebuild:{fatalError("未确认失败不能写网络")})
         await unsettled.waitUntilFinished();check(unsettled.status.phase == .recovered,"持续交替的未知结果保留意图，恢复前不写网络")
+        var offlineChecks=0,offlineWrites=0
+        let longOffline=WakeRecoveryCoordinator(sleep:{_ in})
+        longOffline.start(stableDelay:0,maxRebuildAttempts:3,isCurrent:{true},check:{offlineChecks+=1;return offlineChecks<25 ? .failed(.networkNotReady):.healthy},rebuild:{offlineWrites+=1;return .healthy})
+        await longOffline.waitUntilFinished()
+        check(longOffline.status.phase == .recovered && offlineWrites==0,"十分钟基础网络等待不消耗重建预算")
+        var limitedWrites=0
+        let bounded=WakeRecoveryCoordinator(sleep:{_ in})
+        bounded.start(stableDelay:0,maxRebuildAttempts:3,isCurrent:{true},check:{.failed(.nodeUnavailable)},rebuild:{limitedWrites+=1;return .failed(.nodeUnavailable)})
+        await bounded.waitUntilFinished()
+        check(limitedWrites==3 && bounded.status.reason == .retryExhausted,"节点持续明确失败三次重建后转释放处理")
+        var eventChecks=0
+        let eventWait=WakeRecoveryCoordinator()
+        eventWait.start(stableDelay:0,isCurrent:{true},check:{eventChecks+=1;return eventChecks==1 ? .failed(.networkNotReady):.healthy},rebuild:{fatalError("网络恢复前不得重建")})
+        for _ in 0..<1000 {if eventWait.status.reason == .networkNotReady {break};await Task.yield()}
+        eventWait.networkChanged()
+        await eventWait.waitUntilFinished()
+        check(eventChecks==2 && eventWait.status.phase == .recovered,"网络事件立即唤醒等待中的同一恢复任务")
         let defaultClock=WakeRecoveryCoordinator()
         defaultClock.start(stableDelay:0,isCurrent:{true},check:{.healthy},rebuild:{.healthy})
         await defaultClock.waitUntilFinished();check(defaultClock.status.phase == .recovered,"正式时钟适配器可运行并保留健康会话")

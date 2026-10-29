@@ -6,6 +6,7 @@ import QingzhouKit
     @Published private(set) var health:[OfficeHealthSnapshot]=[]
     @Published var sessions:[UUID:DiagnosticSession]=[:]
     @Published var running=Set<UUID>()
+    @Published var importRequested=false
     @Published var diagnosticRequested=false
     @Published var linesRequested=false
     @Published var developerRequested=false
@@ -90,7 +91,7 @@ extension AppModel {
     func inspectSavedTarget(_ target:SavedDiagnosticTarget,connect:Bool=false) {
         guard !locked,office.tasks[target.id]==nil else{return}
         guard (state.savedDiagnosticTargets ?? []).contains(target) else {errorMessage="收藏目标已变更，请重新选择";return}
-        let state=self.state,context=officeContext,active=connection == .connected && activeBypasses==state.effectiveBypasses,connected=connection == .connected
+        let state=self.effectiveState,context=officeContext,active=connection == .connected && activeBypasses==state.effectiveBypasses,connected=connection == .connected
         let helper=dependencies.diagnosticHelper,executor=dependencies.diagnosticExecutor
         let pathOverride=dependencies.officePathOverride,probeOverride=dependencies.officeProbeOverride
         let cancellation=DiagnosticCancellation(),session=DiagnosticSession(profileID:currentProfileID,connectionID:epoch,nodeID:nil)
@@ -130,13 +131,14 @@ extension AppModel {
             self.office.set("target-"+target.id.uuidString,title:target.name,status:failed ? .failed:passed ? .healthy:.unverified,detail:connect ? "连接测试结果；业务登录需独立验证":"已查询 DNS、规则和路由；业务连接未验证",now:self.dependencies.now())
         }
     }
-    func createOfficeProfile(name:String,template:OfficeSceneTemplate,domains:[String],cidrs:[String],dns:DNSPreference,targets:[SavedDiagnosticTarget]) async {
-        guard !locked,let store else{return};busy=true;defer{busy=false}
+    @discardableResult
+    func createOfficeProfile(name:String,template:OfficeSceneTemplate,domains:[String],cidrs:[String],dns:DNSPreference,targets:[SavedDiagnosticTarget]) async -> Bool {
+        guard !locked,let store else{return false};busy=true;defer{busy=false}
         do {
             let configuration=try template.configuration(domains:domains,cidrs:cidrs,dns:dns,targets:targets)
             var catalog=store.catalog;catalog.profiles.append(ClientProfile(name:name,configuration:configuration))
             try catalog.validate();try await apply(store.prepareCatalog(catalog),reconfigure:false,source:"办公模板")
-        }catch{report(error)}
+        ;return true}catch{report(error);return false}
     }
 }
 

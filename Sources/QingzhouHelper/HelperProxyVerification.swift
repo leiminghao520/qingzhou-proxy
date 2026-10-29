@@ -8,14 +8,16 @@ extension Service {
         var last:[String]=[]
         repeat {
             let configured=proxyConfigurationIssues()
-            guard configured.isEmpty else {throw ProxyError("兼容代理配置核对失败："+configured.joined(separator:"；"))}
+            guard configured.isEmpty else {throw ConnectionFailure(.ownership,"兼容代理配置核对失败："+configured.joined(separator:"；"))}
             last=proxyLiveSample()?.issues ?? ["系统汇总代理状态无法读取"]
             if last.isEmpty {proxyMismatchSince=nil;return}
             let remaining=deadline-proxyVerificationClock()
             if remaining<=0 {break}
             proxyVerificationWait(min(0.05,remaining))
         } while proxyVerificationClock()<=deadline
-        throw ProxyError("兼容代理汇总状态在两秒内未生效："+last.joined(separator:"；"))
+        let sample=proxyLiveSample()
+        let kind:ConnectionFailureKind=sample?.hasForeignEndpoint==true ? .ownership:.tunnel
+        throw ConnectionFailure(kind,"兼容代理汇总状态在两秒内未生效："+last.joined(separator:"；"))
     }
     func proxyOwnershipIssues()->[String] {
         let configured=proxyConfigurationIssues()

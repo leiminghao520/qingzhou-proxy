@@ -3,6 +3,12 @@ import QingzhouKit
 
 // 应用入口统一装配依赖；测试可以替换下载、时钟和存储而不触碰日常数据。
 struct AppDependencies {
+    var recoveryRuntimeHealthyOverride:(()->Bool)?
+    var recoveryEnvironmentOverride:(()->String)?
+    var recoveryReleasedOverride:(() async throws -> Void)?
+    var recoverySafetyOverride:(() throws -> Void)?
+    var recoveryWait:(TimeInterval) async throws -> Void = {try await Task.sleep(nanoseconds:UInt64($0*1_000_000_000))}
+
     var officeHiddenOverride:(()->Bool)?
     var officePathOverride:((SavedDiagnosticTarget,AppState,Bool,String?) throws -> TargetPathEvidence)?
     var officeProbeOverride:((SavedDiagnosticTarget,TargetPathEvidence,AppState,Bool) async -> DiagnosticResult)?

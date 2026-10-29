@@ -3,6 +3,8 @@ import QingzhouKit
 
 // 隔离运行正式接管事务，所有网络写入和时钟均由内存夹具替代。
 final class Service {
+    var failurePhase:String?
+    var failureKind:ConnectionFailureKind?
     let root:URL
     var owner:Int32?,activeRequest:TunRequest?,journal:Journal?
     var phase="idle",clock:TimeInterval=0
@@ -53,7 +55,7 @@ final class Service {
             let s=fixture();s.applyFailure=failure=="apply";s.verifyFailure=failure=="verify";s.saveFailure=failure=="save"
             try rejects{_=try s.startManagedSystemProxy(request,fd:10)}
             try check(s.applied==(failure=="save" ? 0:1),"保存失败不得写入网络")
-            if failure != "save"{try check(s.journal==nil && s.owner==nil && s.restored==1,"失败后回滚释放")}
+            if failure != "save"{try check(s.failurePhase=="proxyActivation" && s.phase=="restored","回滚后仍保留原失败阶段");try check(s.journal==nil && s.owner==nil && s.restored==1,"失败后回滚释放")}
         }
         let interrupted=fixture();interrupted.journal=Journal(proxyOnly:true,dnsKey:"",previousDNS:nil,expectedDNS:Data(),address4:"",address6:"");try interrupted.save()
         try interrupted.stopManagedSystemProxy(preserveExternal:true)

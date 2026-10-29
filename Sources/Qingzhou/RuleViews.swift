@@ -413,8 +413,7 @@ struct RemoteEditor: View {
                 Spacer()
                 Button("下载并添加") {
                     Task {
-                        await model.addRemote(name: name, url: url, target: target)
-                        if model.errorMessage == nil { dismiss() } else { error = model.errorMessage }
+                        if await model.addRemote(name: name, url: url, target: target) { dismiss() } else { error = model.errorMessage }
                     }
                 }
                 .buttonStyle(.borderedProminent)

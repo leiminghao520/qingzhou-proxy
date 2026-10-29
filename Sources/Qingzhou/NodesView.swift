@@ -191,12 +191,12 @@ struct NodesView: View {
             VStack(spacing: 18) {
                 Text("个人备注").font(.headline)
                 TextEditor(text: $note).frame(height: 120)
+                if let message=model.issueTitle {Text(message).font(.caption).foregroundStyle(.red)}
                 HStack {
                     Button("取消") { noteNode = nil }
                     Spacer()
                     Button("保存备注") {
-                        model.saveNote(node.id, note: note)
-                        if model.errorMessage == nil { noteNode = nil }
+                        if model.saveNote(node.id, note: note) { noteNode = nil }
                     }
                     .buttonStyle(.borderedProminent)
                 }

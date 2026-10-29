@@ -64,6 +64,10 @@ private struct SettingsContent:View,Equatable {
 
     var body: some View {
         Form {
+            Section("帮助与使用指南") {
+                UsageGuideButton(model:model,title:"查看使用指南")
+            }
+
             if draft.dirty {
                 Section("未应用的设置草稿") {
                     Text("切换页面会保留草稿；点击各项保存按钮才会生效。")
@@ -99,6 +103,8 @@ private struct SettingsContent:View,Equatable {
                 } label: {settingLabel("DNS 解析策略",help:"可选择经代理的 HTTPS DNS 或原系统解析；企业域名继续沿用现有网络保护和作用域解析逻辑。")}
                 .disabled(model.locked)
 
+                Toggle("严格 DNS（解析失败时不回退系统 DNS）",isOn:$draft.network.strictDNS).disabled(model.locked)
+
                 HStack {
                     settingLabel("网络绕过：已启用 \(model.state.enabledBypasses.count) / \(model.state.effectiveBypasses.count) 项",help:"域名、IP 和网段统一在分流规则页维护，支持批量导入及指定网络出口。系统代理模式下，保护域名绕过轻舟，交给系统网络及企业 VPN；所有运行模式均优先保护。核心 DIRECT 仍经过本地核心，与系统代理绕过不同。显式指定 HTTP/SOCKS 代理的命令不一定遵循此清单；TUN 仍使用原有内网保护逻辑。")
                     Spacer()
@@ -113,7 +119,7 @@ private struct SettingsContent:View,Equatable {
                     Task {
                         draft.sync(model.state)
                         guard !draft.networkConflict else {model.errorMessage="网络设置已被其他操作修改，请撤销草稿后重新编辑";return}
-                        if await model.applyCaptureSettings(mode:draft.network.capture,dns:draft.network.dns,family:draft.network.family,httpCompatibility:draft.network.http) {draft.acceptNetwork(model.state)}
+                        if await model.applyCaptureSettings(mode:draft.network.capture,dns:draft.network.dns,family:draft.network.family,httpCompatibility:draft.network.http,strictDNS:draft.network.strictDNS) {draft.acceptNetwork(model.state)}
                     }
                 }.disabled(model.locked)
                 if !model.protectionSummary.isEmpty {DisclosureGroup("生效的内网绕过项") {ForEach(model.protectionSummary,id:\.self){Text($0).font(.caption)}}}

@@ -6,10 +6,10 @@ import QingzhouKit
 
 extension AppModel {
     func startTelemetry(_ client:CoreAPIClient,profileID:UUID?) {
-        stopTelemetry();history.begin();healthFailures=HealthFailureCounter();rateHistory=[];trafficByNode=[:];trafficByTarget=[:];observedConnections=[:];fallbackStates=[:];failedHealthCycles=0;api=client;let token=UUID();epoch=token;monitor=RuntimeMonitorState();monitor.active=true
+        stopTelemetry();history.begin();healthFailures=HealthFailureCounter();exitHealth=ExitHealthTracker();lastAutomaticRefresh = .distantPast;automaticRefreshRequested=true;rateHistory=[];trafficByNode=[:];trafficByTarget=[:];observedConnections=[:];fallbackStates=[:];failedHealthCycles=0;api=client;let token=UUID();epoch=token;monitor=RuntimeMonitorState();monitor.active=true
         healthTask=Task{[weak self] in while !Task.isCancelled {
             if let self,self.epoch==token,!self.locked,!self.healthChecking {self.scheduleHealthRefresh(delay:0)}
-            try? await Task.sleep(nanoseconds:60_000_000_000)
+            try? await Task.sleep(nanoseconds:self?.usesAutomaticExit()==true ? 15_000_000_000:60_000_000_000)
         }}
         telemetryRefreshRequested=true;policyRefreshRequested=true
         // 辅助服务生命周期独立核验，不随连接列表和策略刷新降频。
@@ -105,6 +105,7 @@ extension AppModel {
     }
     func updateHelperNetworkStatus(_ status:TunReply) {
         if status.message == "网络变化，正在重新检查",helperStatus != status.message {invalidateOfficeResults(network:true)}
+        networkWaiting=status.phase == "networkWaiting"
         publishOfficeHelper(status)
         if helperStatus != status.message {helperStatus=status.message}
         let summary=status.protectionSummary ?? []
@@ -120,7 +121,7 @@ extension AppModel {
             let healthy=status.running && status.phase != "networkProtectionFailed"
             recordEvent(.network,healthy ? .succeeded:.failed,healthy ? .reconnected:.helperFailed)
             networkReconnecting=false;failedHealthCycles=0;healthFailures=HealthFailureCounter()
-            if healthy {log("网络自动重连完成，正在复查连通性");scheduleHealthRefresh(delay:0)}
+            if healthy {automaticRefreshRequested=true;networkReleased=false;log("网络自动重连完成，正在复查连通性");scheduleHealthRefresh(delay:0)}
         }
     }
 

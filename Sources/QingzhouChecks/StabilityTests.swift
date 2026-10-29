@@ -77,6 +77,32 @@ final class StabilityTests:CheckCase {
         let expired=DNSWorkQueue(clock:{now},execute:{jobs.append($0)})
         expired.submit(run:{_ in runs+=1000},reject:{rejected+=1});now+=5;jobs.removeFirst()();expectEqual(expired.snapshot.timeouts,1)
     }
+    func testConnectionReliability() {
+        let passed=ConnectivityResult("节点",.passed,"")
+        let failed=ConnectivityResult("节点",.failed,"节点通道")
+        expectEqual(SelectionConnectivityPolicy.evaluate([],requiresNode:true),.unconfirmed)
+        expectEqual(SelectionConnectivityPolicy.evaluate([failed,failed,failed],requiresNode:true),.failed)
+        expectEqual(SelectionConnectivityPolicy.evaluate([failed,passed,failed],requiresNode:true),.verified)
+        expectEqual(SelectionConnectivityPolicy.evaluate([passed,failed,passed],requiresNode:false),.verified)
+        for status in [ConnectivityResult.Status.pending,.notApplicable] {
+            expectEqual(SelectionConnectivityPolicy.evaluate([passed,.init("节点",status,""),passed],requiresNode:true),.unconfirmed)
+        }
+        for category in ["超时","无法确定","控制接口","控制接口响应格式","控制接口缺少实际节点","控制接口节点格式","节点测速响应格式"] {
+            expectEqual(SelectionConnectivityPolicy.evaluate([passed,.init("节点",.failed,category),passed],requiresNode:true),.unconfirmed)
+        }
+        for category in ["鉴权","取消","选择未生效"] {
+            expectEqual(SelectionConnectivityPolicy.evaluate([.init("路径",.failed,category),passed,passed],requiresNode:true),.failed)
+        }
+        let a=UUID(),b=UUID();var tracker=ExitHealthTracker()
+        expectFalse(tracker.update(a,status:.unavailable));expectFalse(tracker.update(b,status:.available))
+        expectTrue(tracker.update(a,status:.unavailable));expectFalse(tracker.update(a,status:.unknown))
+        tracker.retain([b]);expectFalse(tracker.update(a,status:.unavailable))
+        var backoff=NetworkResumeBackoff()
+        expectEqual((0..<9).map{_ in backoff.nextRecoveryDelay()},[1,2,4,8,15,30,30,30,30])
+        expectFalse(SubscriptionFailure.isTransientMessage(nil))
+        expectFalse(SubscriptionFailure.isTransientMessage(SubscriptionFailure.unauthorized.localizedDescription))
+        expectTrue(SubscriptionFailure.isTransientMessage(SubscriptionFailure.network.localizedDescription))
+    }
     func testSubscriptionClassificationAndRetry() {
         let cases:[(URLError.Code,SubscriptionFailure)]=[(.cannotFindHost,.dns),(.dnsLookupFailed,.dns),(.timedOut,.timeout),(.secureConnectionFailed,.tls),(.serverCertificateHasBadDate,.tls),(.serverCertificateUntrusted,.tls),(.serverCertificateHasUnknownRoot,.tls),(.serverCertificateNotYetValid,.tls),(.clientCertificateRejected,.tls),(.clientCertificateRequired,.tls),(.cancelled,.cancelled),(.notConnectedToInternet,.network)]
         for (code,expected) in cases {expectEqual(SubscriptionFailure.classify(URLError(code)),expected)}
@@ -92,7 +118,7 @@ final class StabilityTests:CheckCase {
         }
         expectEqual(SubscriptionFailure.retryState(SubscriptionFailure.network,previousCount:1,now:now).after,now.addingTimeInterval(300))
         expectEqual(SubscriptionFailure.retryState(SubscriptionFailure.network,previousCount:2,now:now).after,now.addingTimeInterval(1800))
-        expectEqual(SubscriptionFailure.retryState(SubscriptionFailure.network,previousCount:3,now:now).after,nil)
+        expectEqual(SubscriptionFailure.retryState(SubscriptionFailure.network,previousCount:3,now:now).after,now.addingTimeInterval(3600))
         expectFalse(UpdateSchedule.due(updatedAt:nil,enabled:true,retryCount:4,retryAfter:nil,now:now))
     }
 }

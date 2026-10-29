@@ -64,14 +64,14 @@ extension Service {
                 phase = "networkProtectionFailed"
                 return
             }
-            guard original is NetworkEnvironmentNotReady,
-                  let delay = session.backoff.nextDelay() else {
+            guard original is NetworkEnvironmentNotReady else {
                 cancelNetworkResume()
                 lastFailure = "网络自动恢复已停止：" + original.localizedDescription + "；原网络已恢复"
                 phase = "networkProtectionFailed"
                 return
             }
-            phase = "networkReconnecting"
+            let delay = session.backoff.nextRecoveryDelay()
+            phase = session.backoff.attempts >= 7 ? "networkWaiting" : "networkReconnecting"
             // 控制通道关闭时，服务仍能识别并取消此连接的待重试任务。
             owner = session.owner
             lastFailure = "网络重新连接中，第 \(session.backoff.attempts) 次等待：" + original.localizedDescription

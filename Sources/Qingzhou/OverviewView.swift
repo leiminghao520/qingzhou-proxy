@@ -10,6 +10,7 @@ struct OverviewView: View {
         ScrollView(showsIndicators: false) {
             VStack(alignment: .leading, spacing: 20) {
                 // 首页连接控制区域
+                FirstConnectionGuide(model:model,onImport:{model.office.importRequested=true})
                 connectionHeroCard
                 if model.wakeRecoveryStatus.phase != .idle && model.wakeRecoveryStatus.phase != .cancelled {
                     Text(model.wakeRecoveryStatus.label).font(.callout).foregroundStyle(model.wakeRecoveryStatus.phase == .manual ? .orange:.secondary)
@@ -146,13 +147,13 @@ struct OverviewView: View {
             // 连接信息
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
-                    Text(model.connection.rawValue)
+                    Text(model.connectionTitle)
                         .font(.title3.bold())
                         .lineLimit(1)
                         .fixedSize(horizontal:true,vertical:false)
 
                     // 接管方式标签
-                    Text(model.state.captureMode.label)
+                    Text(model.effectiveState.captureMode.label)
                         .font(.caption2.bold())
                         .foregroundStyle(Theme.accentBlue)
                         .padding(.horizontal, 6)
@@ -160,7 +161,7 @@ struct OverviewView: View {
                         .background(Theme.accentBlue.opacity(0.12))
                         .clipShape(Capsule())
                         .fixedSize(horizontal:true,vertical:false)
-                        .help(model.state.captureMode.label)
+                        .help(model.effectiveState.captureMode.label)
                 }
 
                 HStack(spacing: 8) {
@@ -198,6 +199,7 @@ struct OverviewView: View {
         .fixedSize(horizontal:true,vertical:true)
     }
     @ViewBuilder private var heroControls:some View {
+        UsageGuideButton(model:model)
             // 代理模式分段选择
             Picker("", selection: Binding(get: { model.state.mode }, set: { mode in Task { await model.setMode(mode) } })) {
                 ForEach(ProxyMode.allCases, id: \.self) { mode in
@@ -219,7 +221,7 @@ struct OverviewView: View {
             // 连接与断开按钮
             Button {
                 Task {
-                    if model.connection == .connected { await model.disconnect() }
+                    if model.hasConnectionActivity { await model.disconnect() }
                     else { await model.connect() }
                 }
             } label: {
@@ -229,14 +231,14 @@ struct OverviewView: View {
                     } else {
                         Image(systemName: model.connection == .connected ? "stop.fill" : "play.fill")
                     }
-                    Text(model.connection == .connected ? "断开" : "连接")
+                    Text(model.hasConnectionActivity ? "断开" : "连接")
                 }
                 .font(.system(size: 14, weight: .semibold))
                 .frame(minWidth: 70)
             }
             .liquidAction(prominent: true, tint: model.connection == .connected ? Theme.dangerRed : Theme.accentBlue)
             .controlSize(.large)
-            .disabled(model.stopDisabled || (model.state.activePolicy == nil && model.state.mode != .direct && model.connection != .connected) || (model.recoveryPending && model.connection != .connected))
+            .disabled(model.stopDisabled || (model.state.activePolicy == nil && model.state.mode != .direct && model.connection != .connected) || (model.recoveryPending && !model.hasConnectionActivity))
     }
 
     private var connectionHeroCard:some View {
@@ -258,7 +260,7 @@ struct OverviewView: View {
 
     private var statusGlowColor: Color {
         switch model.connection {
-        case .connected: return Theme.connectedGreen
+        case .connected: return model.connectionAvailable ? Theme.connectedGreen:Theme.amberAccent
         case .connecting, .disconnecting: return Theme.connectingYellow
         case .error: return Theme.dangerRed
         case .disconnected: return Theme.disconnectedGray
@@ -267,7 +269,7 @@ struct OverviewView: View {
 
     private var statusSymbol: String {
         switch model.connection {
-        case .connected: return "checkmark.shield.fill"
+        case .connected: return model.connectionAvailable ? "checkmark.shield.fill":"exclamationmark.triangle.fill"
         case .connecting, .disconnecting: return "arrow.triangle.2.circlepath"
         case .error: return "exclamationmark.triangle.fill"
         case .disconnected: return "power.circle.fill"

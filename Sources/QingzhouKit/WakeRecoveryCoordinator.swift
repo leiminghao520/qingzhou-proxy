@@ -50,16 +50,30 @@ public struct WakeRecoveryStatus:Equatable,Sendable {
     private var task:Task<Void,Never>?
     private var generation=UUID()
     private let sleep:Sleep
+    private var delayTask:Task<Void,Error>?
+    private var delayWakeRequested=false
     public var changed:((WakeRecoveryStatus,UUID)->Void)?
     public init(sleep:@escaping Sleep={try await Task.sleep(nanoseconds:UInt64(max(0,$0)*1_000_000_000))}) {self.sleep=sleep}
     public func cancel() {
         guard let id else{return}
-        task?.cancel();task=nil;self.id=nil;generation=UUID()
+        delayTask?.cancel();task?.cancel();task=nil;self.id=nil;generation=UUID()
         status=WakeRecoveryStatus(.cancelled);changed?(status,id)
     }
     public func cancelAndWait() async {let running=task;cancel();await running?.value}
     public func waitUntilFinished() async {let running=task;await running?.value}
-    public func start(id token:UUID=UUID(),stableDelay:TimeInterval=15,isCurrent:@escaping ()->Bool,
+    public func networkChanged() {
+        if status.reason == .networkNotReady || status.phase == .retryWaiting {delayWakeRequested=true;delayTask?.cancel()}
+    }
+    private func wait(_ seconds:TimeInterval) async throws {
+        delayWakeRequested=false
+        let waiting=Task {try await self.sleep(seconds)}
+        delayTask=waiting
+        defer{delayTask=nil}
+        do {try await withTaskCancellationHandler(operation:{try await waiting.value},onCancel:{waiting.cancel()})}
+        catch is CancellationError {if !delayWakeRequested {throw CancellationError()};try Task.checkCancellation()}
+        try Task.checkCancellation()
+    }
+    public func start(id token:UUID=UUID(),stableDelay:TimeInterval=15,maxRebuildAttempts:Int?=nil,isCurrent:@escaping ()->Bool,
                       check:@escaping () async -> WakeRecoveryCheck,
                       rebuild:@escaping () async -> WakeRecoveryCheck) {
         guard !active else{return}
@@ -71,7 +85,7 @@ public struct WakeRecoveryStatus:Equatable,Sendable {
             @MainActor func publish(_ state:WakeRecoveryStatus) {guard current() else{return};self.status=state;self.changed?(state,token)}
             defer {if self.generation==run && self.id==token {self.task=nil;self.id=nil}}
             do {
-                publish(WakeRecoveryStatus(.waiting));try await self.sleep(stableDelay)
+                publish(WakeRecoveryStatus(.waiting));try await self.wait(stableDelay)
                 var failures=0,unknown=0,helperWaits=0,attempt=0
                 while current() {
                     var pollDelay=3.0
@@ -90,18 +104,27 @@ public struct WakeRecoveryStatus:Equatable,Sendable {
                         pollDelay=Double(unknown)*3
                     case .failed(let reason):
                         if reason.terminal {publish(WakeRecoveryStatus(.manual,attempt:attempt,reason:reason));return}
+                        // 没有基础网络时仅低频等待，不重复启动核心、安装辅助服务或消耗恢复预算。
+                        if reason == .networkNotReady {
+                            failures=0;unknown=0;helperWaits=0
+                            publish(WakeRecoveryStatus(.waiting,attempt:attempt,reason:reason))
+                            try await self.wait(30)
+                            continue
+                        }
                         failures+=1;unknown=0;helperWaits=0
                         if failures>=2 {
                             let nextAttempt=attempt+1
                             publish(WakeRecoveryStatus(.retryWaiting,attempt:nextAttempt,reason:reason))
                             // 持续故障按一、三、十、三十、六十秒退避，直到恢复或用户取消。
-                            try await self.sleep([1.0,3,10,30,60][min(attempt,4)]);guard current() else{return}
+                            try await self.wait([1.0,3,10,30,60][min(attempt,4)]);guard current() else{return}
                             // 退避期间辅助服务可能已完成重建；写操作前重新核对，避免双重重连。
                             let latest=await check();guard current() else{return}
                             if latest == .healthy {publish(WakeRecoveryStatus(.recovered,attempt:attempt));return}
                             if case .stop(let why)=latest {publish(WakeRecoveryStatus(.manual,attempt:attempt,reason:why));return}
                             if case .failed(let why)=latest,why.terminal {publish(WakeRecoveryStatus(.manual,attempt:attempt,reason:why));return}
-                            guard case .failed=latest else {failures=0;try await self.sleep(3);continue}
+                            guard case .failed=latest else {failures=0;try await self.wait(3);continue}
+                            if case .failed(.networkNotReady)=latest {failures=0;continue}
+                            if let limit=maxRebuildAttempts,attempt>=limit {publish(WakeRecoveryStatus(.manual,attempt:attempt,reason:.retryExhausted));return}
                             attempt=nextAttempt
                             publish(WakeRecoveryStatus(.rebuilding,attempt:attempt))
                             let rebuilt=await rebuild();guard current() else{return}
@@ -110,7 +133,7 @@ public struct WakeRecoveryStatus:Equatable,Sendable {
                             failures=0
                         }
                     }
-                    try await self.sleep(pollDelay)
+                    try await self.wait(pollDelay)
                 }
             } catch {if current() {publish(WakeRecoveryStatus(.manual,reason:.cancelled))}}
         }

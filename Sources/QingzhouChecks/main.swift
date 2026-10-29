@@ -376,7 +376,7 @@ do {let t=DynamicVPNTests();run("DynamicVPN.optionalDNSAndGeneration",t){try t.t
 do {let t=CorporateDNSTests();run("CorporateDNS.selection",t){try t.testSelection()};run("CorporateDNS.responses",t){try t.testResponses()};run("CorporateDNS.transactions",t){try t.testTransactions()};run("CorporateDNS.officeWiFi",t){try t.testOfficeWiFi()}}
 do{let t=CapturePlanTests();run("CapturePlan.protection",t){try t.testProtectionAndResolverSelection()};run("CapturePlan.loopback",t){try t.testLoopbackRelay()};run("CapturePlan.dnsRetries",t){try t.testDNSRetriesAndNoPublicFallback()};run("CapturePlan.routesOwnership",t){try t.testRouteParsingAndOwnership()};run("CapturePlan.core",t){try t.testCoreConfigurationProtectionPrecedence()}}
 do{let t=KeychainUXTests();run("KeychainUX.authorization",t){try t.testAuthorizationRetryAndCache()};run("KeychainUX.errors",t){try t.testDistinctErrorsAndAtomicCache()}}
-do{let t=StabilityTests();run("Stability.snapshotRetryAndLatency",t){t.testSnapshotRetryAndLatency()};run("Stability.dnsQueueBoundsBudgetAndStop",t){t.testDNSQueueBoundsBudgetAndStop()};run("Stability.subscriptionClassificationAndRetry",t){t.testSubscriptionClassificationAndRetry()}}
+do{let t=StabilityTests();run("Stability.connectionReliability",t){t.testConnectionReliability()};run("Stability.snapshotRetryAndLatency",t){t.testSnapshotRetryAndLatency()};run("Stability.dnsQueueBoundsBudgetAndStop",t){t.testDNSQueueBoundsBudgetAndStop()};run("Stability.subscriptionClassificationAndRetry",t){t.testSubscriptionClassificationAndRetry()}}
 do {let t=OptimizationFeatureTests()
 run("OptimizationFeatures.rotatingLog",t){try t.testRotatingLogAndBounds()}
 run("OptimizationFeatures.subscriptionAmbiguity",t){try t.testMatchingAmbiguityAndMetadata()}

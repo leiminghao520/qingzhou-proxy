@@ -10,11 +10,15 @@ final class DailyControlProtocol: URLProtocol {
     static var selections: [String] = []
     static var rejected = Set<String>()
     static var slowDelay = false
+    static var groups: [String:String] = [:]
+    static var deadNodes = Set<String>()
+    static var automaticNode:String?
+    static var automaticRefreshes=0
     private var stopped = false
     private let responseLock = NSLock()
     static func reset(_ tag: String, reject: Set<String> = [], slow: Bool = false) {
         lock.lock(); defer { lock.unlock() }
-        selected = tag; selections = []; rejected = reject; slowDelay = slow
+        selected = tag; selections = []; rejected = reject; slowDelay = slow; groups=[:];deadNodes=[];automaticNode=nil;automaticRefreshes=0
     }
     static func calls() -> [String] { lock.lock(); defer { lock.unlock() }; return selections }
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -34,11 +38,22 @@ final class DailyControlProtocol: URLProtocol {
             }
             let name = ((try? JSONSerialization.jsonObject(with: bytes ?? Data())) as? [String: String])?["name"] ?? ""
             Self.selections.append(name)
-            if Self.rejected.contains(name) { code = 500 } else { Self.selected = name }
+            if Self.rejected.contains(name) { code = 500 }
+            else if request.url!.lastPathComponent == "proxy" {Self.selected=name}
+            else {Self.groups[request.url!.lastPathComponent]=name}
         } else if request.url!.path.hasSuffix("/delay") {
             body = "{\"delay\":42}"; slow = Self.slowDelay
+            let parts=request.url!.path.split(separator:"/")
+            if parts.count>1,Self.deadNodes.contains(String(parts[1])) {code=503}
+            if request.url!.path == "/group/auto/delay" {
+                Self.automaticRefreshes+=1
+                if let next=Self.automaticNode {Self.groups["auto"]=next}
+                body="{}"
+            }
         } else {
-            body = "{\"proxies\":{\"proxy\":{\"type\":\"Selector\",\"name\":\"proxy\",\"now\":\"\(Self.selected)\"}}}"
+            var proxies:[String:Any] = ["proxy":["type":"Selector","name":"proxy","now":Self.selected]]
+            for (tag,now) in Self.groups {proxies[tag] = ["type":tag == "auto" ? "URLTest":"Selector","name":tag,"now":now]}
+            body=String(decoding:try! JSONSerialization.data(withJSONObject:["proxies":proxies]),as:UTF8.self)
         }
         Self.lock.unlock()
         let status = code, data = Data(body.utf8)
@@ -81,7 +96,7 @@ final class DailyControlProtocol: URLProtocol {
         let old = PolicyReference.node(one), target = PolicyReference.node(two)
         let healthy = [ConnectivityResult("网站", .passed, ""), .init("节点", .passed, ""), .init("入口", .passed, "")]
         let failed = [ConnectivityResult("网站", .failed, "鉴权"), .init("节点", .failed, "鉴权"), .init("入口", .passed, "")]
-        let degraded = [ConnectivityResult("网站", .passed, ""), .init("节点", .failed, "超时"), .init("入口", .failed, "代理入口")]
+        let degraded = [ConnectivityResult("网站", .passed, ""), .init("节点", .failed, "超时"), .init("入口", .passed, "")]
         func reset(connected: Bool = true, reject: Set<String> = [], slow: Bool = false) throws {
             model.busy = false; model.connection = .disconnected; model.selectionStatus = nil
             var state = store.state; state.selectedPolicy = old; state.selectedID = one; state.captureMode = .systemProxy; state.recentUse = [:]
@@ -114,7 +129,7 @@ final class DailyControlProtocol: URLProtocol {
         model.connectivityProbe = { _, _, _ in degraded }
         await model.selectPolicy(target)
         try check(DailyControlProtocol.calls() == [target.tag] && model.state.activePolicy == target, "节点超时和入口探测错误不会回退用户选择")
-        try check(model.selectionStatus?.phase == .succeeded && model.connectivityResults == degraded && model.connectivityHealth != .healthy, "换线完成保留真实探测失败，不伪报健康")
+        try check(model.selectionStatus?.phase == .unconfirmed && model.selectionNetworkUncertain && model.connectivityResults == degraded && model.connectivityHealth != .healthy, "超时仅标记选择未确认，不伪报成功")
         try reset()
         var probes = 0
         model.connectivityProbe = { _, _, _ in probes += 1; return probes == 1 ? failed : healthy }
@@ -122,6 +137,67 @@ final class DailyControlProtocol: URLProtocol {
         try check(DailyControlProtocol.calls() == [target.tag, old.tag] && model.state.activePolicy == old, "新节点失败后恢复原选择且不提交候选")
         try check(model.selectionStatus?.message.contains("已恢复原节点") == true && !model.selectionNetworkUncertain && model.connectivityResults == healthy, "回退及检测成功才确认恢复")
         try check(model.state.recentUse[two.uuidString] == nil, "失败切换不污染最近使用")
+        try reset()
+        var attempts=0
+        let dead=[ConnectivityResult("网站",.failed,"HTTP 响应"),.init("节点",.failed,"节点通道"),.init("入口",.failed,"HTTP 响应")]
+        model.connectivityProbe={_,_,_ in attempts+=1;return attempts==1 ? dead:healthy}
+        await model.selectPolicy(target)
+        try check(model.state.activePolicy==old && DailyControlProtocol.calls()==[target.tag,old.tag],"三项全失败必须撤销新选择")
+        try check(model.selectionStatus?.message.contains("已恢复原节点")==true,"回滚核验通过才显示已恢复")
+        try reset()
+        model.connectivityProbe={_,_,_ in dead}
+        await model.selectPolicy(target)
+        try check(model.selectionNetworkUncertain && model.selectionStatus?.message.contains("已恢复原节点")==false,"回滚探测全失败不伪报恢复")
+        try reset()
+        var grouped=model.state
+        let manualGroup=PolicyGroup(name:"手动组",kind:.select,members:[old,target],selected:old)
+        grouped.groups=[manualGroup];try model.persist(grouped)
+        DailyControlProtocol.groups[PolicyReference.group(manualGroup.id).tag]=old.tag
+        DailyControlProtocol.deadNodes=[target.tag]
+        model.connectivityProbe={_,_,_ in healthy}
+        await model.selectMember(manualGroup,target)
+        try check(model.state.groups.first?.selected==old && DailyControlProtocol.calls()==[target.tag,old.tag],"策略组死节点与主列表共用失败回滚")
+        try check(model.currentSelectionStatus?.groupID==manualGroup.id,"策略组反馈保留重试目标组")
+        DailyControlProtocol.deadNodes=[]
+        await model.retrySelection()
+        try check(model.state.groups.first?.selected==target && model.selectionStatus?.phase == .succeeded,"策略组反馈重试不改变默认选择")
+        try reset()
+        model.state.selectedPolicy = .automatic
+        model.state.ruleFinal = .selected
+        DailyControlProtocol.selected="auto";DailyControlProtocol.groups["auto"]=old.tag
+        DailyControlProtocol.automaticNode=target.tag
+        model.lastAutomaticRefresh = .distantPast
+        let autoToken=model.epoch
+        await model.refreshAutomaticIfNeeded(model.api!,token:autoToken)
+        try check(model.state.activePolicy == .automatic && model.actualName==model.state.label(target),"后台 A 转 B 后页面选择仍为自动选择，实际出口更新")
+        try check(DailyControlProtocol.calls().isEmpty && DailyControlProtocol.automaticRefreshes==1,"自动优选不向选择器写入固定节点")
+        model.state.selectedPolicy=old;model.state.ruleFinal = .selected
+        model.lastAutomaticRefresh = .distantPast
+        await model.refreshAutomaticIfNeeded(model.api!,token:autoToken)
+        try check(DailyControlProtocol.automaticRefreshes==1,"手动节点故障路径不会刷新或切换自动组")
+        model.state.ruleFinal=target
+        try check(model.defaultExitNodeID()==two,"规则模式默认出口独立于当前通用选择")
+        model.state.ruleFinal = .selected
+        model.state.rules=[RoutingRule(kind:.suffix,value:"special.invalid",action:.proxy,target:target)]
+        DailyControlProtocol.selected=old.tag;DailyControlProtocol.deadNodes=[old.tag]
+        model.healthDisplayAwake={true};model.wakeNetworkReady={true}
+        model.wakeRecovery=WakeRecoveryCoordinator(sleep:{_ in try await Task.sleep(nanoseconds:30_000_000_000)})
+        model.proxyInfo=try await model.api!.proxies();model.exitHealth=ExitHealthTracker()
+        await model.healthCheck(model.api!,token:model.epoch)
+        try check(model.wakeIntent==nil,"默认出口第一轮明确失败不立即重建")
+        await model.healthCheck(model.api!,token:model.epoch)
+        try check(model.wakeIntent != nil,"默认出口两轮失败，即使规则节点健康仍触发恢复")
+        model.cancelWakeRecovery()
+        model.networkWaiting=true
+        model.cancelWakeRecovery()
+        try check(!model.networkWaiting,"切配置或取消恢复时清除等待标记，不残留假重连状态")
+        try reset()
+        var subscription=Subscription(name:"重试订阅",updatedAt:Date(timeIntervalSince1970:100))
+        subscription.retryCount=4;subscription.retryAfter=nil;subscription.lastError=SubscriptionFailure.network.localizedDescription
+        var authorization=Subscription(name:"鉴权订阅");authorization.retryCount=4;authorization.lastError=SubscriptionFailure.unauthorized.localizedDescription
+        var retryState=model.state;retryState.subscriptions=[subscription,authorization];try model.persist(retryState)
+        model.rescheduleTransientUpdates()
+        try check(model.state.subscriptions[0].retryAfter != nil && model.state.subscriptions[1].retryAfter==nil,"网络恢复重新调度暂态失败，鉴权失败仍等待人工")
         try reset(reject: [old.tag])
         model.connectivityProbe = { _, _, _ in failed }
         await model.selectPolicy(target)
@@ -147,6 +223,7 @@ final class DailyControlProtocol: URLProtocol {
         try await wait { checking }; model.epoch = UUID(); release?.resume(); await stale.value
         try check(model.state.activePolicy == old && model.selectionStatus == nil && DailyControlProtocol.calls() == [target.tag], "旧连接代次不提交选择且不向新会话回退")
         try reset()
+        model.connectivityProbe={_,_,_ in healthy}
         await model.selectPolicy(.automatic)
         try check(model.state.activePolicy == .automatic && model.verifiedSelectionTag == nil, "已连接自动选择通过检查且不误标手动节点")
         try reset()

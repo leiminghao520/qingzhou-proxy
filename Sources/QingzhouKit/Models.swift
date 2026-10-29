@@ -77,6 +77,7 @@ public struct RemoteRuleSource:Codable,Identifiable,Sendable {
     public init(name:String,sourceRef:String=UUID().uuidString,target:PolicyReference = .selected){self.name=name;self.sourceRef=sourceRef;self.target=target}
 }
 public struct AppState: Codable, Sendable {
+    public var strictDNS:Bool?
     public var savedDiagnosticTargets:[SavedDiagnosticTarget]?
     public var trustedCorporateDNS:[TrustedCorporateDNS]?
     public var networkBypasses:[NetworkBypass]?
@@ -90,10 +91,10 @@ public struct AppState: Codable, Sendable {
     public var rulesEnabled:Bool {get {mode == .rule} set {mode = newValue ? .rule : .global}}
     public var activePolicy:PolicyReference? {selectedPolicy ?? selectedID.map(PolicyReference.node)}
     public init() {}
-    enum CodingKeys:String,CodingKey {case trustedCorporateDNS,savedDiagnosticTargets,networkBypasses,httpCompatibilityEnabled,protectedDomains,addressFamilyPolicy,shadowrocket,shortcutEnabled,shortcutKey,shortcutModifiers,tunExcludedCIDRs,captureMode,dnsPreference,notes,recentUse,compactNodes,schemaVersion,nodes,subscriptions,rules,mode,listenPort,selectedID,selectedPolicy,groups,remoteRules,favorites,latency,ruleFinal,autoConnect,loginAtStartup}
+    enum CodingKeys:String,CodingKey {case strictDNS,trustedCorporateDNS,savedDiagnosticTargets,networkBypasses,httpCompatibilityEnabled,protectedDomains,addressFamilyPolicy,shadowrocket,shortcutEnabled,shortcutKey,shortcutModifiers,tunExcludedCIDRs,captureMode,dnsPreference,notes,recentUse,compactNodes,schemaVersion,nodes,subscriptions,rules,mode,listenPort,selectedID,selectedPolicy,groups,remoteRules,favorites,latency,ruleFinal,autoConnect,loginAtStartup}
     enum LegacyKeys:String,CodingKey {case rulesEnabled}
     public init(from decoder:Decoder) throws {
-        let c=try decoder.container(keyedBy:CodingKeys.self);savedDiagnosticTargets=try c.decodeIfPresent([SavedDiagnosticTarget].self,forKey:.savedDiagnosticTargets);try SavedDiagnosticTarget.validate(savedDiagnosticTargets ?? []);httpCompatibilityEnabled=try c.decodeIfPresent(Bool.self,forKey:.httpCompatibilityEnabled) ?? false;shadowrocket=try c.decodeIfPresent(ShadowrocketConfiguration.self,forKey:.shadowrocket);schemaVersion=try c.decodeIfPresent(Int.self,forKey:.schemaVersion) ?? 1
+        let c=try decoder.container(keyedBy:CodingKeys.self);strictDNS=try c.decodeIfPresent(Bool.self,forKey:.strictDNS);savedDiagnosticTargets=try c.decodeIfPresent([SavedDiagnosticTarget].self,forKey:.savedDiagnosticTargets);try SavedDiagnosticTarget.validate(savedDiagnosticTargets ?? []);httpCompatibilityEnabled=try c.decodeIfPresent(Bool.self,forKey:.httpCompatibilityEnabled) ?? false;shadowrocket=try c.decodeIfPresent(ShadowrocketConfiguration.self,forKey:.shadowrocket);schemaVersion=try c.decodeIfPresent(Int.self,forKey:.schemaVersion) ?? 1
         nodes=try c.decodeIfPresent([Node].self,forKey:.nodes) ?? [];subscriptions=try c.decodeIfPresent([Subscription].self,forKey:.subscriptions) ?? [];rules=try c.decodeIfPresent([RoutingRule].self,forKey:.rules) ?? []
         let old=try decoder.container(keyedBy:LegacyKeys.self);mode=try c.decodeIfPresent(ProxyMode.self,forKey:.mode) ?? ((try old.decodeIfPresent(Bool.self,forKey:.rulesEnabled) ?? true) ? .rule : .global)
         listenPort=try c.decodeIfPresent(Int.self,forKey:.listenPort) ?? 7890;selectedID=try c.decodeIfPresent(UUID.self,forKey:.selectedID);selectedPolicy=try c.decodeIfPresent(PolicyReference.self,forKey:.selectedPolicy)
@@ -114,7 +115,7 @@ public enum UpdateSchedule {
         if retryCount>0 {return retryAfter.map{$0<=now} == true}
         return updatedAt.map{now.timeIntervalSince($0)>=86400} ?? true
     }
-    public static func nextRetry(_ count:Int,now:Date=Date()) -> Date? {guard (1...3).contains(count) else{return nil};return now.addingTimeInterval([60.0,300,1800][count-1])}
+    public static func nextRetry(_ count:Int,now:Date=Date()) -> Date? {guard count>0 else{return nil};return now.addingTimeInterval([60.0,300,1800,3600][min(count,4)-1])}
 }
 public protocol CredentialStore: AnyObject {
     func get(_ ref: String) throws -> String

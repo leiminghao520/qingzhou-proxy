@@ -41,7 +41,13 @@ import QingzhouKit
 
         MenuBarExtra {
             Text("\(model.connectionSummary) · \(model.state.mode.label)")
-            Text(model.actualName + " · " + model.state.captureMode.label)
+            Text(model.actualName + " · " + model.effectiveState.captureMode.label)
+            if model.activeRecovery != nil {
+                Text(model.effectivePathSummary)
+                Button("重试原方案"){Task{await model.retryOriginal()}}.disabled(model.locked)
+                Button("采用当前方案"){model.adoptRecovery()}.disabled(model.locked)
+            }
+            if let title=model.issueTitle {Text(title)}
             OfficeMenuHealth(office:model.office,hasCorporate:!model.state.protectedDomains.isEmpty || !model.state.enabledBypasses.isEmpty)
             if !(model.state.savedDiagnosticTargets ?? []).isEmpty {
                 Menu("常用目标路径检查") {
@@ -51,13 +57,13 @@ import QingzhouKit
                     Button("全部目标与诊断") {model.office.diagnosticRequested=true}
                 }.disabled(model.locked)
             }
-            Button(model.connection == .connected ? "断开" : model.connection == .connecting ? "取消连接" : "连接") {
+            Button(model.networkWaiting ? "停止自动重连" : model.connection == .connected ? "断开" : model.connection == .connecting ? "取消连接" : "连接") {
                 Task {
-                    if model.connection == .connected || model.connection == .connecting { await model.disconnect() }
+                    if model.hasConnectionActivity { await model.disconnect() }
                     else { await model.connect() }
                 }
             }
-            .disabled(model.stopDisabled || (model.state.activePolicy == nil && model.state.mode != .direct && model.connection != .connected) || (model.recoveryPending && model.connection != .connected))
+            .disabled(model.stopDisabled || (model.state.activePolicy == nil && model.state.mode != .direct && model.connection != .connected) || (model.recoveryPending && !model.hasConnectionActivity))
 
             if interfaceMode == .simple {
                 Menu("线路") {
@@ -87,7 +93,7 @@ import QingzhouKit
             }
             Button("退出轻舟代理") { NSApplication.shared.terminate(nil) }
         } label: {
-            OfficeMenuBarLabel(connected:model.connection == .connected)
+            OfficeMenuBarLabel(connected:model.connectionAvailable,status:model.connectionSummary)
         }
     }
     @ViewBuilder private var advancedMenuActions: some View {

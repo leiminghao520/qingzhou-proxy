@@ -86,6 +86,14 @@ public actor CoreAPIClient {
         _=try await send(request("/proxies/"+group,method:"PUT",body:["name":target.tag]))
     }
     public func setMode(_ mode:ProxyMode) async throws {_=try await send(request("/configs",method:"PATCH",body:["mode":mode.rawValue]))}
+    public func verifySelection(_ target:PolicyReference,group:String="proxy") async throws {
+        let info=try await proxies()
+        guard info[group]?.now==target.tag else {throw CoreAPIError("选择未生效")}
+    }
+    // 让 URLTest 更新自身成员健康及实际出口，绝不把自动策略改成固定节点。
+    public func refreshAutomatic() async throws {
+        _ = try await send(request("/group/auto/delay",query:[URLQueryItem(name:"url",value:ConfigBuilder.testURL),URLQueryItem(name:"timeout",value:"8000")]))
+    }
     public func delay(_ nodeID:UUID,url:String=ConfigBuilder.testURL) async throws -> Int {
         let tag=PolicyReference.node(nodeID).tag
         let data=try await send(request("/proxies/"+tag+"/delay",query:[URLQueryItem(name:"url",value:url),URLQueryItem(name:"timeout",value:"8000")]))
@@ -160,8 +168,9 @@ public actor CoreAPIClient {
         if activeRequests==0 {session.invalidateAndCancel()}
         else {session.getAllTasks{tasks in tasks.forEach{$0.cancel()}}}
     }
-    public static func actualTag(_ proxies:[String:ProxyInfo]) -> String? {
-        var next=proxies["proxy"]?.now;var seen=Set<String>()
+    public static func actualTag(_ proxies:[String:ProxyInfo]) -> String? {actualTag(proxies,root:"proxy")}
+    public static func actualTag(_ proxies:[String:ProxyInfo],root:String) -> String? {
+        var next=proxies[root]?.now;var seen=Set<String>()
         while let tag=next {guard !tag.isEmpty,seen.insert(tag).inserted else{return nil};if let nested=proxies[tag]?.now {next=nested} else if proxies[tag]?.all != nil || proxies[tag]?.type.lowercased()=="urltest" {return nil} else{return tag}}
         return nil
     }

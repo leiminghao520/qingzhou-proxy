@@ -279,14 +279,27 @@ final class Service {
         check(restoreConflict.starts == 0 && restoreConflict.networkResumeSession == nil, "旧设置恢复失败时不得启动核心")
         check(restoreConflict.lastFailure?.contains("恢复冲突") == true, "恢复失败保留真实原因")
 
-        let limit = try fixture()
-        var limitCallbacks: [() -> Void] = [], delays: [Double] = []
-        limit.networkResumeSchedule = { delay, callback in delays.append(delay);limitCallbacks.append(callback) }
-        limit.startHook = { throw NetworkEnvironmentNotReady("IPv6 网络持续不可用") }
-        limit.beginNetworkResume(request, fd: 11)
-        while !limitCallbacks.isEmpty { limitCallbacks.removeFirst()() }
-        check(delays == [1, 2, 4, 8, 15, 30, 30] && limit.starts == 8, "重试有次数和退避上限，事件风暴不能无限重连")
-        check(limit.phase == "networkProtectionFailed" && limit.networkResumeSession == nil, "预算耗尽后恢复并报告停止")
+        for outage in [10.0,120.0,600.0] {
+            let limit = try fixture()
+            var callbacks: [() -> Void] = [], elapsed=0.0
+            limit.networkResumeSchedule = { delay, callback in callbacks.append {elapsed += delay;callback()} }
+            limit.startHook = {if elapsed<outage {throw NetworkEnvironmentNotReady("网络持续不可用")} }
+            limit.beginNetworkResume(request, fd: 11)
+            var steps=0
+            while !callbacks.isEmpty && steps<50 {steps+=1;callbacks.removeFirst()()}
+            check(limit.phase == "active" && elapsed>=outage,"断网 \(Int(outage)) 秒后仍能恢复原会话")
+            check(limit.networkResumeSession == nil,"成功后释放重试记录")
+        }
+        let waiting = try fixture()
+        var waitingCallbacks:[() -> Void]=[]
+        waiting.networkResumeSchedule={_,callback in waitingCallbacks.append(callback)}
+        waiting.startHook={throw NetworkEnvironmentNotReady("长断网")}
+        waiting.beginNetworkResume(request,fd:12)
+        for _ in 0..<12 {waitingCallbacks.removeFirst()()}
+        check(waiting.phase == "networkWaiting" && waiting.networkResumeSession != nil,"超过原重试上限仍保留等待意图")
+        try waiting.stop()
+        waitingCallbacks.removeFirst()()
+        check(waiting.networkResumeSession == nil && waiting.owner == nil,"长等待后手动停止使旧回调失效")
 
         // 企业 VPN 在绕过计划冻结后补上网段：链接正式写入逻辑，确认不覆盖、不认领。
         let corporate = try fixture()

@@ -255,14 +255,14 @@ struct SubscriptionsView: View {
         .sheet(item: $editing) { sub in
             VStack(alignment: .leading, spacing: 18) {
                 Text("修改订阅名称").font(.title2.bold())
+                if let message=model.issueTitle {Text(message).font(.caption).foregroundStyle(.red)}
                 TextField("订阅名称", text: $name)
                     .textFieldStyle(.roundedBorder)
                 HStack {
                     Button("取消") { editing = nil }
                     Spacer()
                     Button("保存") {
-                        model.updateSubscription(sub.id, name: name)
-                        if model.errorMessage == nil { editing = nil }
+                        if model.updateSubscription(sub.id, name: name) { editing = nil }
                     }
                     .buttonStyle(.borderedProminent)
                 }

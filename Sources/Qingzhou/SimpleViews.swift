@@ -76,24 +76,19 @@ struct SimpleConnectionView: View {
     private var needsSelection: Bool {
         model.state.mode != .direct && (model.state.activePolicy.map { !PolicyValidator.exists($0, in: model.state) } ?? true)
     }
-    private var status: String {
-        if model.selectionNetworkUncertain { return "代理运行中 · 网络状态待确认" }
-        if model.recovering { return "正在恢复网络" }
-        if model.stopRequested { return "等待安全断开" }
-        if model.wakeRecovery.active || model.wakeRecoveryStatus.phase == .manual { return model.wakeRecoveryStatus.label }
-        if model.networkRechecking { return "网络变化 · 正在检查" }
-        return model.connection == .connected ? "代理已连接" : model.connection.rawValue
-    }
+    private var status: String { model.connectionTitle }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Text("连接").font(.title2.bold())
                 Spacer()
+                UsageGuideButton(model:model)
                 Picker("代理模式", selection: Binding(get: { model.state.mode }, set: { value in Task { await model.setMode(value) } })) {
                     ForEach(ProxyMode.allCases, id: \.self) { Text($0.label).tag($0) }
                 }.labelsHidden().frame(width: 140).disabled(model.locked)
             }
+            FirstConnectionGuide(model:model,onImport:onImport)
             if model.recoveryPending {
                 HStack {
                     Label("网络设置尚未恢复", systemImage: "exclamationmark.triangle.fill").foregroundStyle(Theme.amberAccent)
@@ -120,11 +115,11 @@ struct SimpleConnectionView: View {
                         Button("添加订阅或节点", action: onImport).liquidAction(prominent: true).disabled(model.locked)
                     } else {
                         Button {
-                            Task { if model.connection == .connected || model.connection == .connecting { await model.disconnect() } else { await model.connect() } }
+                            Task { if model.hasConnectionActivity { await model.disconnect() } else { await model.connect() } }
                         } label: {
-                            Text(model.connection == .connected ? "断开连接" : model.connection == .connecting ? "取消连接" : "连接")
+                            Text(model.networkWaiting ? "停止自动重连" : model.connection == .connected ? "断开连接" : model.connection == .connecting ? "取消连接" : "连接")
                         }.liquidAction(prominent: true, tint: model.connection == .connected ? Theme.dangerRed : Theme.accentBlue)
-                            .disabled(model.stopDisabled || (model.connection != .connected && model.connection != .connecting && (needsSelection || model.recoveryPending)))
+                            .disabled(model.stopDisabled || (!model.hasConnectionActivity && (needsSelection || model.recoveryPending)))
                             .accessibilityIdentifier("primaryConnectionButton")
                     }
                 }
@@ -139,7 +134,7 @@ struct SimpleConnectionView: View {
                     }
                     Spacer()
                     VStack(alignment: .trailing, spacing: 3) {
-                        Text(model.state.captureMode.label).font(.caption).foregroundStyle(.secondary)
+                        Text(model.effectiveState.captureMode.label).font(.caption).foregroundStyle(.secondary)
                         if model.connection == .connected {
                             OfficeRateLine(display: model.trafficDisplay, available: model.monitor.traffic == .available && !model.monitorPaused).font(.caption)
                         }
@@ -199,6 +194,7 @@ struct SimpleSubscriptionsView: View {
                         Text(sub.name).font(.headline)
                         Text("\(model.state.nodes.filter { $0.subscriptionID == sub.id }.count) 条线路 · 最近更新：\(sub.updatedAt.formatted(date: .abbreviated, time: .shortened))")
                             .font(.caption).foregroundStyle(.secondary)
+                        SubscriptionHealthSummary(sub:sub)
                         if sub.pendingReview {
                             Label("更新有重要变化，请先预览确认", systemImage: "exclamationmark.bubble")
                                 .font(.callout).foregroundStyle(Theme.amberAccent)
@@ -242,12 +238,15 @@ struct SimpleSettingsView: View {
                     Text("两种界面共用配置，切换不会断开连接。").font(.caption).foregroundStyle(.secondary)
                 }
                 Section("网络与帮助") {
-                    LabeledContent("当前接管方式", value: model.state.captureMode.label)
+                    LabeledContent("当前接管方式", value: model.effectiveState.captureMode.label)
                     Button("高级设置…", action: onAdvanced)
                     Button("网络诊断…", action: onDiagnose)
                     Button("开发工具代理助手…") {model.office.developerRequested=true}
                     Button("恢复网络设置") { Task { await model.recover() } }
                         .disabled(model.loadingFailed || model.recovering)
+                }
+                Section("帮助与使用指南") {
+                    UsageGuideButton(model:model,title:"查看使用指南")
                 }
                 Section("关于轻舟") {
                     LabeledContent("版本", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版")

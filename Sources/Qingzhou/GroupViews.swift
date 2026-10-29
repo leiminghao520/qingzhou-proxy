@@ -372,8 +372,7 @@ struct GroupEditor: View {
             return
         }
         Task {
-            await model.saveGroup(candidate)
-            if model.errorMessage == nil { dismiss() } else { error = model.errorMessage }
+            if await model.saveGroup(candidate) { dismiss() } else { error = model.errorMessage }
         }
     }
 }

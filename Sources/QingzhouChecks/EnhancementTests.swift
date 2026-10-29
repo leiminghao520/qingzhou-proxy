@@ -104,7 +104,7 @@ final class EnhancementTests:CheckCase {
         expectTrue(UpdateSchedule.due(updatedAt:nil,enabled:true,now:now));expectFalse(UpdateSchedule.due(updatedAt:nil,enabled:false,now:now));expectFalse(UpdateSchedule.due(updatedAt:nil,enabled:true,pending:true,now:now))
         expectFalse(UpdateSchedule.due(updatedAt:now,enabled:true,now:now));expectTrue(UpdateSchedule.due(updatedAt:now.addingTimeInterval(-86400),enabled:true,now:now))
         expectFalse(UpdateSchedule.due(updatedAt:nil,enabled:true,retryCount:1,retryAfter:now.addingTimeInterval(60),now:now));expectTrue(UpdateSchedule.due(updatedAt:nil,enabled:true,retryCount:1,retryAfter:now,now:now))
-        expectEqual(UpdateSchedule.nextRetry(1,now:now),now.addingTimeInterval(60));expectEqual(UpdateSchedule.nextRetry(3,now:now),now.addingTimeInterval(1800));expectNil(UpdateSchedule.nextRetry(4))
+        expectEqual(UpdateSchedule.nextRetry(1,now:now),now.addingTimeInterval(60));expectEqual(UpdateSchedule.nextRetry(3,now:now),now.addingTimeInterval(1800));expectEqual(UpdateSchedule.nextRetry(4,now:now),now.addingTimeInterval(3600))
         let usage=UsageInfo.parse("upload=100; download=200; total=1000; expire=200000")
         expectEqual(usage?.upload,100);expectEqual(usage?.total,1000);expectEqual(usage?.expire,200000);expectNil(UsageInfo.parse(nil));expectNil(UsageInfo.parse("nonsense"))
     }

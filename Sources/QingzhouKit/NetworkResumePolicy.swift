@@ -11,6 +11,13 @@ public struct NetworkEnvironmentNotReady: Error, LocalizedError, Sendable {
 public struct NetworkResumeBackoff {
     public private(set) var attempts = 0
     public init() {}
+    // 已授权会话的恢复没有总次数上限，长断网后按三十秒低频复查；首次准备仍有独立有限预算。
+    public mutating func nextRecoveryDelay() -> TimeInterval {
+        let delays: [TimeInterval] = [1, 2, 4, 8, 15, 30, 30]
+        let delay = delays[min(attempts, delays.count - 1)]
+        attempts = min(attempts + 1, 1_000_000)
+        return delay
+    }
     public mutating func nextDelay() -> TimeInterval? {
         let delays: [TimeInterval] = [1, 2, 4, 8, 15, 30, 30]
         guard attempts < delays.count else { return nil }

@@ -33,11 +33,13 @@ struct OfficeMenuTrafficSample:Equatable {
 
 struct OfficeMenuBarLabel:View {
     let connected:Bool
+    var status:String=""
     var body:some View {
         // 菜单栏只保留固定尺寸图标，避免实时速率更新挤动其他菜单项。
         Image(systemName:connected ? "paperplane.fill":"paperplane")
             .frame(width:18,height:18)
-            .accessibilityLabel(connected ? "轻舟代理，已连接":"轻舟代理，未连接")
+            .accessibilityLabel(status.isEmpty ? (connected ? "轻舟代理，已连接":"轻舟代理，未连接") : "轻舟代理，"+status)
+            .help(status)
     }
 }
 struct OfficeRateLine:View {

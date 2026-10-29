@@ -210,7 +210,11 @@ struct ProxyJournal: Codable { var records: [ProxyRecord] }
     private func checkNetwork() {
         let value=signature();let environmentChanged=monitoredSignature.map{$0 != value} ?? false
         monitoredSignature=value
-        guard ownedPort != nil else {ownershipMismatchCount=0;return}
+        guard ownedPort != nil else {
+            ownershipMismatchCount=0
+            if environmentChanged {onEnvironmentChange?()}
+            return
+        }
         // DNS、网络状态及系统合成代理字段变化不代表持久代理所有权丢失。
         guard let changes=ownershipChanges() else {
             if environmentChanged{log?("网络监控：所有权暂无法核对，保留连接")}

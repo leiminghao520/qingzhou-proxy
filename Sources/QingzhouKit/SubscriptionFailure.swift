@@ -3,6 +3,10 @@ import Foundation
 public enum SubscriptionFailure: String, Error, LocalizedError, CaseIterable {
     case network, dns, tls, timeout, unauthorized, gone, rateLimited, server, format, tooLarge, invalidURL, http, cancelled
     public var retryable:Bool {[.network,.dns,.timeout,.rateLimited,.server].contains(self)}
+    public static func isTransientMessage(_ message:String?)->Bool {
+        guard let message else{return false}
+        return allCases.contains{$0.retryable && $0.localizedDescription==message}
+    }
     public var errorDescription:String? {
         switch self {
         case .network:return "网络不可用，请检查网络连接后重试"

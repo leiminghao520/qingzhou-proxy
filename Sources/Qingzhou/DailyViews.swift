@@ -138,14 +138,14 @@ struct ProfilesView: View {
                 
                 Button {
                     Task {
-                        model.errorMessage=nil
-                        if copy {await model.createProfile(name:name,copy:true)}
+                        let succeeded:Bool
+                        if copy {succeeded=await model.createProfile(name:name,copy:true)}
                         else {
                             let split:(String)->[String] = {$0.split(whereSeparator:{$0=="," || $0=="\n"}).map{String($0).trimmingCharacters(in:.whitespaces)}}
                             let targets=split(officeTargets).map{SavedDiagnosticTarget(name:$0,host:$0)}
-                            await model.createOfficeProfile(name:name,template:officeTemplate,domains:split(office),cidrs:split(officeCIDRs),dns:officeDNS,targets:targets)
+                            succeeded=await model.createOfficeProfile(name:name,template:officeTemplate,domains:split(office),cidrs:split(officeCIDRs),dns:officeDNS,targets:targets)
                         }
-                        if model.errorMessage == nil {name="";office="";officeCIDRs="";officeTargets=""}
+                        if succeeded {name="";office="";officeCIDRs="";officeTargets=""}
                     }
                 } label: {
                     Label("创建新配置", systemImage: "plus.circle.fill")
@@ -166,14 +166,14 @@ struct ProfilesView: View {
         .sheet(item: $renaming) { profile in
             VStack(spacing: 18) {
                 Text("修改配置名称").font(.headline)
+                if let message=model.issueTitle {Text(message).font(.caption).foregroundStyle(.red)}
                 TextField("名称", text: $rename).textFieldStyle(.roundedBorder)
                 HStack {
                     Button("取消") { renaming = nil }
                     Spacer()
                     Button("保存修改") {
                         Task {
-                            await model.renameProfile(profile.id, name: rename)
-                            if model.errorMessage == nil { renaming = nil }
+                            if await model.renameProfile(profile.id, name: rename) { renaming = nil }
                         }
                     }
                     .buttonStyle(.borderedProminent)
@@ -270,9 +270,9 @@ struct BackupView: View {
                         Button("确认恢复全部配置", role: .destructive) {
                             Task {
                                 working = true
-                                await model.restoreBackup(snapshot)
+                                let succeeded=await model.restoreBackup(snapshot)
                                 working = false
-                                if model.errorMessage == nil {
+                                if succeeded {
                                     password = ""; confirm = ""; self.snapshot = nil
                                     dismiss()
                                 }
@@ -874,8 +874,7 @@ struct RuleDraftView: View {
                     next.target = target
                     next.action = target == .direct ? .direct : target == .reject ? .reject : .proxy
                     Task {
-                        await model.addRule(next)
-                        if model.errorMessage == nil { dismiss() }
+                        if await model.addRule(next) { dismiss() }
                     }
                 }
                 .buttonStyle(.borderedProminent)
