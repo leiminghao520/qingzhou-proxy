@@ -2,7 +2,16 @@
 set -euo pipefail
 # 用户以 sudo 执行此脚本，批准固定组件和当前应用身份；不接受外部核心或任意执行命令。
 if [ "$(id -u)" != 0 ] || [ -z "${SUDO_UID:-}" ]; then echo '请由当前登录用户用 sudo 安装辅助服务。'; exit 1; fi
-app="${1:?请指定本次构建的轻舟代理.app 路径}"
+source_app="${1:?请指定本次构建的轻舟代理.app 路径}"
+test -d "$source_app"; test ! -L "$source_app"
+# 先复制到 root 独占的暂存目录，后续签名校验、CDHash 读取和安装都只针对这份副本，
+# 避免普通用户进程在校验与复制之间替换应用包内的文件（TOCTOU）。
+stage="$(/usr/bin/mktemp -d /private/tmp/qingzhou-install.XXXXXX)"
+trap '/bin/rm -rf "$stage"' EXIT
+/usr/bin/ditto --noqtn "$source_app" "$stage/app.app"
+/usr/sbin/chown -R root:wheel "$stage"
+/bin/chmod -R go-w "$stage"
+app="$stage/app.app"
 /usr/bin/codesign --verify --deep --strict "$app"
 resources="$app/Contents/Resources"
 for file in QingzhouHelper sing-box; do test -f "$resources/$file"; test ! -L "$resources/$file"; done
@@ -10,6 +19,7 @@ root=/Library/PrivilegedHelperTools/cn.qingzhou.proxy
 plist=/Library/LaunchDaemons/cn.qingzhou.proxy.helper.plist
 if [ -f "$plist" ]; then /bin/launchctl bootout system "$plist" || true; fi
 if [ -f "$root/recovery.json" ]; then echo '仍有恢复记录，拒绝覆盖安装。请先在应用中恢复，或按手动恢复说明处理。'; exit 1; fi
+if compgen -G "$root/recovery.corrupt-*.json" > /dev/null; then echo '存在已隔离的损坏恢复记录（recovery.corrupt-*.json），拒绝覆盖安装。请核对 scutil --dns 与 netstat -rn 后手动删除该文件。'; exit 1; fi
 /usr/bin/install -d -o root -g wheel -m 755 "$root"
 /usr/bin/install -o root -g wheel -m 755 "$resources/QingzhouHelper" "$root/QingzhouHelper"
 /usr/bin/install -o root -g wheel -m 755 "$resources/sing-box" "$root/sing-box"

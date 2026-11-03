@@ -6,6 +6,7 @@ root=/Library/PrivilegedHelperTools/cn.qingzhou.proxy
 plist=/Library/LaunchDaemons/cn.qingzhou.proxy.helper.plist
 if [ -f "$plist" ]; then /bin/launchctl bootout system "$plist" || true; fi
 if [ -f "$root/recovery.json" ]; then echo '恢复记录仍存在，未删除组件。请先按手动恢复说明处理，再卸载。'; exit 1; fi
+if compgen -G "$root/recovery.corrupt-*.json" > /dev/null; then echo '存在已隔离的损坏恢复记录（recovery.corrupt-*.json），未删除组件。请核对 scutil --dns 与 netstat -rn 后手动删除该文件。'; exit 1; fi
 for file in control.sock runtime.json manifest.json QingzhouHelper sing-box; do /bin/rm -f "$root/$file"; done
 /bin/rmdir "$root" 2>/dev/null || true
 /bin/rm -f "$plist"
