@@ -19,20 +19,52 @@ public struct ConnectionMetadata:Decodable,Sendable,Equatable {
 public struct CoreConnection:Decodable,Identifiable,Sendable,Equatable {
     public var id:String;public var metadata:ConnectionMetadata;public var upload:Int64;public var download:Int64;public var start:String;public var chains:[String];public var rule:String?;public var rulePayload:String?
     public var target:String {(metadata.host?.isEmpty==false ? metadata.host! : metadata.destinationIP ?? "未知")+":"+(metadata.destinationPort ?? "")}
-    public var duration:String {let f=ISO8601DateFormatter();f.formatOptions=[.withInternetDateTime,.withFractionalSeconds];let date=f.date(from:start) ?? ISO8601DateFormatter().date(from:start);guard let date else{return "未知"};return "\(max(0,Int(Date().timeIntervalSince(date)))) 秒"}
+    // 格式化器创建成本高且线程安全，连接列表刷新时复用同一实例。
+    nonisolated(unsafe) private static let fractionalFormatter:ISO8601DateFormatter={let f=ISO8601DateFormatter();f.formatOptions=[.withInternetDateTime,.withFractionalSeconds];return f}()
+    nonisolated(unsafe) private static let plainFormatter=ISO8601DateFormatter()
+    public var duration:String {let date=Self.fractionalFormatter.date(from:start) ?? Self.plainFormatter.date(from:start);guard let date else{return "未知"};return "\(max(0,Int(Date().timeIntervalSince(date)))) 秒"}
 }
 public struct ConnectionSnapshot:Decodable,Sendable {public var downloadTotal:Int64;public var uploadTotal:Int64;public var connections:[CoreConnection]}
+// 会话级委托按块接收响应，超过上限立即取消；逐字节迭代 AsyncBytes 在连接列表较大时 CPU 开销明显。
+final class BoundedResponseCollector:NSObject,URLSessionDataDelegate,@unchecked Sendable {
+    private struct Pending {var data=Data();var response:URLResponse?;var exceeded=false;let continuation:CheckedContinuation<(Data,URLResponse),Error>}
+    private let lock=NSLock()
+    private var pending:[Int:Pending]=[:]
+    let limit:Int
+    init(limit:Int){self.limit=limit}
+    func start(_ task:URLSessionDataTask,_ continuation:CheckedContinuation<(Data,URLResponse),Error>) {lock.lock();pending[task.taskIdentifier]=Pending(continuation:continuation);lock.unlock();task.resume()}
+    func urlSession(_ session:URLSession,dataTask:URLSessionDataTask,didReceive response:URLResponse,completionHandler:@escaping (URLSession.ResponseDisposition)->Void) {
+        let tooLarge=response.expectedContentLength>Int64(limit)
+        lock.lock();pending[dataTask.taskIdentifier]?.response=response;if tooLarge{pending[dataTask.taskIdentifier]?.exceeded=true};lock.unlock()
+        completionHandler(tooLarge ? .cancel:.allow)
+    }
+    func urlSession(_ session:URLSession,dataTask:URLSessionDataTask,didReceive data:Data) {
+        lock.lock();let exceeded=(pending[dataTask.taskIdentifier]?.data.count ?? 0)+data.count>limit
+        // 通过字典下标原地追加，避免每个分块复制整段缓冲。
+        if exceeded {pending[dataTask.taskIdentifier]?.exceeded=true} else {pending[dataTask.taskIdentifier]?.data.append(data)}
+        lock.unlock();if exceeded{dataTask.cancel()}
+    }
+    func urlSession(_ session:URLSession,task:URLSessionTask,didCompleteWithError error:Error?) {
+        lock.lock();let item=pending.removeValue(forKey:task.taskIdentifier);lock.unlock()
+        guard let item else{return}
+        if item.exceeded {item.continuation.resume(throwing:ProxyError("核心响应超过限制"))}
+        else if let error {item.continuation.resume(throwing:error)}
+        else if let response=item.response ?? task.response {item.continuation.resume(returning:(item.data,response))}
+        else {item.continuation.resume(throwing:URLError(.badServerResponse))}
+    }
+}
 public actor CoreAPIClient {
     public let port:Int
     private let secret:String
     private let session:URLSession
     private var closed=false
     private var activeRequests=0
+    private let collector=BoundedResponseCollector(limit:2*1024*1024)
     public init(context:CoreControlContext,protocolClasses:[AnyClass]?=nil) {
         port=context.port;secret=context.secret
         let configuration=URLSessionConfiguration.ephemeral;configuration.timeoutIntervalForRequest=10;configuration.timeoutIntervalForResource=10;configuration.urlCache=nil;configuration.httpCookieStorage=nil;configuration.protocolClasses=protocolClasses
         configuration.connectionProxyDictionary=[kCFNetworkProxiesHTTPEnable as String:0,kCFNetworkProxiesHTTPSEnable as String:0,kCFNetworkProxiesSOCKSEnable as String:0]
-        session=URLSession(configuration:configuration)
+        session=URLSession(configuration:configuration,delegate:collector,delegateQueue:nil)
     }
     private func request(_ path:String,method:String="GET",body:[String:String]?=nil,query:[URLQueryItem]=[]) throws -> URLRequest {
         var components=URLComponents();components.scheme="http";components.host="127.0.0.1";components.port=port;components.path=path;if !query.isEmpty{components.queryItems=query}
@@ -45,12 +77,13 @@ public actor CoreAPIClient {
         activeRequests+=1
         defer {activeRequests-=1;if closed && activeRequests==0 {session.invalidateAndCancel()}}
         do {
-            let (bytes,response)=try await session.bytes(for:request)
+            let task=session.dataTask(with:request),collector=self.collector
+            let (data,response)=try await withTaskCancellationHandler(operation:{try await withCheckedThrowingContinuation{collector.start(task,$0)}},onCancel:{task.cancel()})
             guard let http=response as? HTTPURLResponse else {throw CoreAPIError("控制接口")}
             guard (200...299).contains(http.statusCode) else {throw CoreAPIError(http.statusCode==401 || http.statusCode==403 ? "鉴权":http.statusCode==408 || http.statusCode==504 ? "超时":request.url?.path.hasSuffix("/delay")==true && http.statusCode>=500 ? "节点通道":"控制接口")}
-            guard response.expectedContentLength<=2*1024*1024 else {throw ProxyError("核心响应过大")}
-            var data=Data();for try await byte in bytes {guard data.count<2*1024*1024 else {throw ProxyError("核心响应超过限制")};data.append(byte)};return data
-        } catch is CancellationError {throw CancellationError()} catch let error as CoreAPIError {throw error} catch let error as URLError {throw CoreAPIError(ConnectivityResult.category(error),transportCode:error.code.rawValue)} catch {throw CoreAPIError("控制接口")}
+            return data
+        // 调用方取消或控制通道关闭导致的 URLError.cancelled 属于正常收尾，按取消处理而不是报告“核心检测失败”。
+        } catch is CancellationError {throw CancellationError()} catch let error as URLError where error.code == .cancelled && (Task.isCancelled || closed) {throw CancellationError()} catch let error as CoreAPIError {throw error} catch let error as URLError {throw CoreAPIError(ConnectivityResult.category(error),transportCode:error.code.rawValue)} catch {throw CoreAPIError("控制接口")}
     }
     private func decode<T:Decodable>(_ type:T.Type,path:String,timeout:TimeInterval?=nil) async throws -> T {var query=try request(path);if let timeout {query.timeoutInterval=timeout};let data=try await send(query);do {return try JSONDecoder().decode(type,from:data)} catch {throw CoreAPIError("控制接口响应格式")}}
     private struct ProxyResponse:Decodable {var proxies:[String:ProxyInfo]}

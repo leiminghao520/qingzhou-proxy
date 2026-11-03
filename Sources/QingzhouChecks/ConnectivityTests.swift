@@ -93,5 +93,7 @@ func runConnectivityChecks() async {
     expectNil(CompatibilityDiagnostic.message(safe.replacingOccurrences(of:"identify",with:"https://private")))
     expectNil(CompatibilityDiagnostic.message(safe.replacingOccurrences(of:"timeout",with:"password")))
     expectNil(CompatibilityDiagnostic.message(safe.replacingOccurrences(of:"10000",with:"-1")))
+    // 兼容层新增“上游无响应”类别，必须能展示而不是被白名单丢弃。
+    expectTrue(CompatibilityDiagnostic.message("{\"entry\":\"socks\",\"stage\":\"relay\",\"category\":\"noResponse\",\"elapsedMs\":1005,\"count\":6,\"sentBytes\":3180,\"receivedBytes\":72}")?.contains("category=noResponse")==true)
     print("PASS Connectivity.independentResultsAndPrivateEvents")
 }

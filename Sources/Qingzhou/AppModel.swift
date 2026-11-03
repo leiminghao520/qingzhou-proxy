@@ -47,6 +47,11 @@ import QingzhouKit
     @Published var networkReleased=false
     var lastAutomaticRefresh=Date.distantPast
     var automaticRefreshRequested=true
+    // 连通性日志去重：结果与上次相同且未满 5 分钟时只计数，不重复刷屏。
+    var healthRefreshReason="周期检查"
+    var connectivityLogSignature:String?
+    var connectivityLogAt=Date.distantPast
+    var connectivityLogSuppressed=0
     var wakeRecovery=WakeRecoveryCoordinator()
     var wakeIntent:(id:UUID,session:UUID,profile:UUID?,epoch:UUID)?
     var routineRecovery=false
@@ -236,7 +241,7 @@ import QingzhouKit
         if stopRequested {busy=true;Task{defer{stopRequested=false;busy=false};do{try await disconnectInternal();try await capture.releaseDisconnectProtection()}catch{report(error)}};return}
         guard connection == .connected,!recovering else{return}
         if !coreFailed && !networkChanged {
-            if healthRefreshPending {healthRefreshPending=false;scheduleHealthRefresh()}
+            if healthRefreshPending {healthRefreshPending=false;scheduleHealthRefresh(reason:"操作结束后补做")}
             return
         }
         if coreFailed,helperFailureReason==nil {
@@ -361,11 +366,13 @@ import QingzhouKit
             try self.checkStartup(generation)
             if next.captureMode.usesTunnel {
                 timing.begin("postCaptureProbe");startupStage="验证实际网络"
+                // 辅助服务核验路由与 DNS 不依赖探测结果，与接管后探测并发执行；任一步失败时另一项随作用域自动取消。
+                async let helperStatus=capture.wakeStatus()
                 let captured=try await startupProbes(port:nil,client:client,mode:next.mode,generation:generation)
                 try self.checkStartup(generation)
                 connectivityResults=captured;reachability=ConnectivityResult.combinedSummary(captured)
                 for result in captured {log("接管后 · "+result.summary)}
-                let status=try await capture.wakeStatus()
+                let status=try await helperStatus
                 try self.checkStartup(generation)
                 guard status.running else {throw ProxyError("TUN 保护流程已停止核心："+status.message)}
                 guard status.routesVerified==true,status.dnsVerified==true,status.protectionVerified==true,(next.captureMode != .compatible || status.proxyVerified==true) else {
@@ -673,7 +680,7 @@ import QingzhouKit
         } else {
             monitor.health="唤醒后等待网络稳定"
             log("系统与屏幕已唤醒，等待 15 秒运行时间后重新检查节点")
-            if wakeIntent != nil {beginWakeRecovery()} else {scheduleHealthRefresh()}
+            if wakeIntent != nil {beginWakeRecovery()} else {scheduleHealthRefresh(reason:"唤醒")}
         }
     }
     func healthResultIsCurrent(_ generation:UUID)->Bool {
@@ -684,7 +691,7 @@ import QingzhouKit
         return healthFailures.update(statuses)
     }
     func cancelHealthRefresh() {healthRefreshKey=nil;healthScheduler.cancel();healthChecking=false;connectivityEpoch=UUID()}
-    func scheduleHealthRefresh(delay:UInt64=1_000_000_000) {
+    func scheduleHealthRefresh(delay:UInt64=1_000_000_000,reason:String="周期检查") {
         guard connection == .connected,!wakeRecovery.active else{return}
         guard !healthPower.suspended else{healthRefreshPending=true;return}
         guard !locked,let client=api else{healthRefreshPending=true;return}
@@ -692,7 +699,7 @@ import QingzhouKit
         if healthRefreshKey==key {return}
         healthRefreshKey=key
         let delay=max(delay,UInt64(healthPower.remaining(uptime:healthPowerUptime())*1_000_000_000))
-        healthRefreshPending=false;let token=epoch
+        healthRefreshPending=false;healthRefreshReason=reason;let token=epoch
         healthScheduler.schedule(delay:delay) { [weak self] in
             guard let self else{return}
             defer {if self.healthRefreshKey==key {self.healthRefreshKey=nil}}
@@ -797,7 +804,13 @@ import QingzhouKit
                 }
             }catch{log("策略组选择仍待确认："+Redactor.redact(error.localizedDescription))}
         }
-        for result in results {log(result.summary+(result.milliseconds.map{" 耗时=\($0)ms"} ?? ""))}
+        let signature=epoch.uuidString+results.map{$0.title+$0.status.rawValue+$0.category}.joined(separator:"|")
+        if signature==connectivityLogSignature,dependencies.now().timeIntervalSince(connectivityLogAt)<300 {connectivityLogSuppressed+=1}
+        else {
+            log("连通性检查 触发=\(healthRefreshReason)"+(connectivityLogSuppressed>0 ? " 此前 \(connectivityLogSuppressed) 次结果相同已省略":""))
+            for result in results {log(result.summary+(result.milliseconds.map{" 耗时=\($0)ms"} ?? ""))}
+            connectivityLogSignature=signature;connectivityLogAt=dependencies.now();connectivityLogSuppressed=0
+        }
     }
     func quit() async -> Bool {
         userWantsConnection=false;cancelConnectionWait()

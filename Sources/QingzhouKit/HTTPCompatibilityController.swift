@@ -32,14 +32,15 @@ import Darwin
     public func stop() async {
         guard let child=process else{return};process=nil
         if child.isRunning {child.terminate();for _ in 0..<20 where child.isRunning {try? await Task.sleep(nanoseconds:50_000_000)};if child.isRunning{_ = Darwin.kill(child.processIdentifier,SIGKILL)}}
-        child.waitUntilExit()
+        // 异步等待退出，不在主线程上调用 waitUntilExit 阻塞并重入 runloop。
+        for _ in 0..<40 where child.isRunning {try? await Task.sleep(nanoseconds:25_000_000)}
     }
 }
 
 public enum CompatibilityDiagnostic {
     private struct Event:Decodable {let stage:String;let category:String;let elapsedMs:Int64;let count:UInt64;let entry:String?;let sentBytes:Int64?;let receivedBytes:Int64?}
     public static func message(_ line:String)->String? {
-        guard let event=try? JSONDecoder().decode(Event.self,from:Data(line.utf8)),["identify","socks","control","resolve","http","connect","relay","startup"].contains(event.stage),["limit","timeout","cancelled","upstream","auth","dns","control","compatibility","tls","ok","ipv6Unavailable"].contains(event.category),event.elapsedMs>=0,event.elapsedMs<=86_400_000 else{return nil}
+        guard let event=try? JSONDecoder().decode(Event.self,from:Data(line.utf8)),["identify","socks","control","resolve","http","connect","relay","startup"].contains(event.stage),["limit","timeout","cancelled","upstream","auth","dns","control","compatibility","tls","ok","ipv6Unavailable","noResponse"].contains(event.category),event.elapsedMs>=0,event.elapsedMs<=86_400_000 else{return nil}
         if let entry=event.entry,!["http","connect","socks","upgrade"].contains(entry){return nil}
         guard (event.sentBytes ?? 0)>=0,(event.receivedBytes ?? 0)>=0 else{return nil}
         return "兼容层 entry=\(event.entry ?? "unknown") sent=\(event.sentBytes ?? 0) received=\(event.receivedBytes ?? 0) stage=\(event.stage) category=\(event.category) elapsedMs=\(event.elapsedMs) count=\(event.count)"
