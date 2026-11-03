@@ -32,7 +32,8 @@ extension Service {
             records.append(HelperProxyRecord(service:id as String,original:try PropertyListSerialization.data(fromPropertyList:original,format:.binary,options:0),applied:try PropertyListSerialization.data(fromPropertyList:applied,format:.binary,options:0),enabled:proto.map{SCNetworkProtocolGetEnabled($0)} ?? false,hadProtocol:proto != nil))
         }
         guard !records.isEmpty else{throw ProxyError("没有可用代理服务")}
-        journal!.proxies=records;try save()
+        guard journal != nil else{throw ProxyError("恢复记录缺失，拒绝修改系统代理")}
+        journal?.proxies=records;try save()
         for record in records {
             guard let service=SCNetworkServiceCopy(preferences,record.service as CFString) else{throw ProxyError("代理服务已变化")}
             if !record.hadProtocol {guard SCNetworkServiceAddProtocolType(service,kSCNetworkProtocolTypeProxies) else{throw ProxyError("代理协议创建失败")}}

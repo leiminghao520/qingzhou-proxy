@@ -20,6 +20,7 @@ final class Service {
     var networkStore:SCDynamicStore?
     var routeEvents:DispatchSourceRead?
     var pendingNetworkChange:Date?
+    var networkCheckScheduled=false
     var lastFailure:String?
     var process:Process?
     var activatePrepared:(() throws -> Void)?
@@ -42,6 +43,8 @@ final class Service {
         guard SecCodeCopyGuestWithAttributes(nil,attrs,SecCSFlags(),&guest)==errSecSuccess,let guest,SecCodeCheckValidity(guest,SecCSFlags(),nil)==errSecSuccess else{throw ProxyError("客户端代码签名无效")}
         var staticCode:SecStaticCode?;guard SecCodeCopyStaticCode(guest,SecCSFlags(),&staticCode)==errSecSuccess,let staticCode else{throw ProxyError("客户端代码身份无法读取")};var information:CFDictionary?;guard SecCodeCopySigningInformation(staticCode,SecCSFlags(rawValue:kSecCSSigningInformation),&information)==errSecSuccess,let info=information as? [String:Any],let cdhash=info[kSecCodeInfoUnique as String] as? Data,cdhash.map({String(format:"%02x",$0)}).joined()==manifest.clientHash else{throw ProxyError("客户端代码身份已变化，请重新批准更新")}
     }
+    // 恢复记录中的 DNS 快照无法解析时抛出错误，避免 root 进程崩溃后被 launchd 反复拉起。
+    func dnsDictionary(_ data:Data) throws -> NSDictionary {guard let value=try PropertyListSerialization.propertyList(from:data,format:nil) as? NSDictionary else{throw ProxyError("恢复记录中的 DNS 快照损坏，请按手动恢复说明处理")};return value}
     func save() throws {guard let journal else{return};try SecureFile.write(JSONEncoder().encode(journal),to:root.appendingPathComponent("recovery.json"))}
     func routeInfo(_ destination:String,ipv6:Bool,scope:String?=nil) throws -> String {try NetworkInspection.command("/sbin/route",NetworkInspection.routeArguments(.get,destination:destination,ipv6:ipv6,scope:scope))}
     func field(_ label:String,_ text:String)->String?{text.components(separatedBy:.newlines).first{$0.trimmingCharacters(in:.whitespaces).hasPrefix(label+":")}.map{$0.components(separatedBy:":").dropFirst().joined(separator:":").trimmingCharacters(in:.whitespaces)}}
@@ -52,10 +55,10 @@ final class Service {
 return};var conflict=false
         do{conflict = !(try restoreProxy(record.proxies ?? []))}catch{conflict=true}
         let current=SCDynamicStoreCopyValue(dynamic,record.dnsKey as CFString)
-        let expected=try PropertyListSerialization.propertyList(from:record.expectedDNS,format:nil) as! NSDictionary
+        let expected=try dnsDictionary(record.expectedDNS)
         if let current=current as? NSDictionary,current==expected {if let original=record.previousDNS {let value=try PropertyListSerialization.propertyList(from:original,format:nil);if !SCDynamicStoreSetValue(dynamic,record.dnsKey as CFString,value as CFPropertyList){conflict=true}}else if !SCDynamicStoreRemoveValue(dynamic,record.dnsKey as CFString){conflict=true}}
         else if current==nil,record.previousDNS != nil{conflict=true}
-        else if let current=current as? NSDictionary {let old=try record.previousDNS.map{try PropertyListSerialization.propertyList(from:$0,format:nil) as! NSDictionary};if current != old{conflict=true}}
+        else if let current=current as? NSDictionary {let old=try record.previousDNS.map{try dnsDictionary($0)};if current != old{conflict=true}}
         for route in record.routes.reversed() {
             guard let info=try? routeInfo(route.destination,ipv6:route.ipv6,scope:route.scope) else{conflict=true;continue}
             if !NetworkInspection.routeScopeMatches(route.scope,flags:field("flags",info),interface:field("interface",info)) {continue}
@@ -69,7 +72,10 @@ return};var conflict=false
         if conflict {try save();throw ProxyError("检测到外部 DNS/路由修改冲突，已停止核心；保留恢复记录，请查看手动恢复说明")}
         try FileManager.default.removeItem(at:root.appendingPathComponent("recovery.json"));journal=nil
     }
-    func recoverStartup() throws {let file=root.appendingPathComponent("recovery.json");if FileManager.default.fileExists(atPath:file.path){try Self.protected(file);journal=try JSONDecoder().decode(Journal.self,from:Data(contentsOf:file));if let pid=journal?.pid {var buffer=[CChar](repeating:0,count:4096);if proc_pidpath(pid,&buffer,UInt32(buffer.count))>0,String(cString:buffer)==root.appendingPathComponent("sing-box").path{kill(pid,SIGTERM);usleep(200000)}};try stop()}}
+    func recoverStartup() throws {let file=root.appendingPathComponent("recovery.json");if FileManager.default.fileExists(atPath:file.path){try Self.protected(file)
+        // 记录无法解码时改名隔离；安装/卸载脚本仍会因隔离文件拒绝继续，由用户核对后手动删除。
+        do{let decoded=try JSONDecoder().decode(Journal.self,from:Data(contentsOf:file));_=try dnsDictionary(decoded.expectedDNS);journal=decoded}catch{let quarantine=root.appendingPathComponent("recovery.corrupt-\(Int(Date().timeIntervalSince1970)).json");try FileManager.default.moveItem(at:file,to:quarantine);let message="恢复记录损坏，已隔离为 "+quarantine.lastPathComponent+"，请按手动恢复说明核对路由和 DNS";lastFailure=message;throw ProxyError(message)}
+        if let pid=journal?.pid {var buffer=[CChar](repeating:0,count:4096);if proc_pidpath(pid,&buffer,UInt32(buffer.count))>0,String(cString:buffer)==root.appendingPathComponent("sing-box").path{kill(pid,SIGTERM);usleep(200000)}};try stop()}}
     func addRoute(_ destination:String,_ gateway:String,_ interface:String,ipv6:Bool,scope:String?=nil) throws {
         if let info=try? routeInfo(destination,ipv6:ipv6,scope:scope),let current=prefix(info),NetworkInspection.samePrefix(current,destination),NetworkInspection.routeScopeMatches(scope,flags:field("flags",info),interface:field("interface",info)){
             guard interface==field("interface",info) else{throw ProxyError("路由前缀 \(destination) 已被 \(field("interface",info) ?? "未知接口") 占用，未替换现有路由")};return
@@ -77,9 +83,10 @@ return};var conflict=false
         let args=gateway.hasPrefix("link#") ? NetworkInspection.routeArguments(.add,destination:destination,ipv6:ipv6,scope:scope)+["-interface",interface]:NetworkInspection.routeArguments(.add,destination:destination,gateway:gateway,ipv6:ipv6,scope:scope)
         let route=OwnedRoute(destination:destination,gateway:gateway,interface:interface,ipv6:ipv6,scope:scope)
         // 先记录意图再写路由；崩溃恢复仍通过当前网关和接口确认所有权。
-        journal!.routes.append(route);try save()
-        do{_=try NetworkInspection.command("/sbin/route",args)}catch{journal!.routes.removeLast();try save();throw error}
-        if let current=try? routeInfo(destination,ipv6:ipv6,scope:scope),let actual=field("gateway",current) {journal!.routes[journal!.routes.count-1].gateway=actual};try save()
+        guard journal != nil else{throw ProxyError("恢复记录缺失，拒绝写入路由")}
+        journal?.routes.append(route);try save()
+        do{_=try NetworkInspection.command("/sbin/route",args)}catch{journal?.routes.removeLast();try save();throw error}
+        if let current=try? routeInfo(destination,ipv6:ipv6,scope:scope),let actual=field("gateway",current),let last=journal?.routes.indices.last {journal?.routes[last].gateway=actual};try save()
     }
     func start(_ request:TunRequest,fd:Int32) throws {
         guard process==nil,journal==nil,let state=request.state,let values=request.credentials,let control=request.control,state.captureMode.usesTunnel,values.count<=6000 else{throw ProxyError("重复启动或 TUN 模型无效，请先恢复")}
@@ -136,10 +143,10 @@ return};var conflict=false
         do {
             phase="coreStartup"
             let interfacesBefore=try NetworkInspection.command("/sbin/ifconfig",["-l"]).split(separator:" ").map{$0.trimmingCharacters(in:.whitespacesAndNewlines)}
-            let core=Process();core.executableURL=root.appendingPathComponent("sing-box");core.arguments=["run","-c",file.path];core.standardOutput=FileHandle.nullDevice;core.standardError=FileHandle.nullDevice;core.terminationHandler={ [weak self,weak core] _ in self?.queue.async{guard let self,let core,self.process === core else{return};try? self.stop()}};process=core;owner=fd;try core.run();journal!.pid=core.processIdentifier;try save()
+            let core=Process();core.executableURL=root.appendingPathComponent("sing-box");core.arguments=["run","-c",file.path];core.standardOutput=FileHandle.nullDevice;core.standardError=FileHandle.nullDevice;core.terminationHandler={ [weak self,weak core] _ in self?.queue.async{guard let self,let core,self.process === core else{return};try? self.stop()}};process=core;owner=fd;try core.run();journal?.pid=core.processIdentifier;try save()
             var tunnel:String?
             for _ in 0..<100 {guard core.isRunning else{throw ProxyError("TUN 核心启动失败")};let interfaces=try NetworkInspection.command("/sbin/ifconfig",["-l"]).split(separator:" ").map{$0.trimmingCharacters(in:.whitespacesAndNewlines)};let added=interfaces.filter{!interfacesBefore.contains($0) && $0.hasPrefix("utun")};if added.count==1 {let output=try NetworkInspection.command("/sbin/ifconfig",[added[0]]);if output.contains(addresses.gateway4){tunnel=added[0];break}};usleep(50000)}
-            guard let tunnel else{throw ProxyError("TUN 接口归属校验失败")};journal!.interface=tunnel;try save()
+            guard let tunnel else{throw ProxyError("TUN 接口归属校验失败")};journal?.interface=tunnel;try save()
             guard CoreController.listening(state.listenPort),request.httpCompatibilityPort.map({CoreController.listening($0)}) ?? true else{throw ProxyError("TUN 核心监听尚未就绪")}
             activatePrepared={ [unowned self] in
             try NetworkInspection.checkConflicts(ownedTunnel:tunnel)
@@ -178,7 +185,7 @@ return};var conflict=false
         do {switch request.operation {case "status":
             if request.verifyNetwork==true,let record=journal,process?.isRunning==true {
                 let tunnels=record.routes.filter{$0.interface==record.interface};let verified=tunnels.count==4 && tunnels.allSatisfy{route in guard let info=try? routeInfo(route.destination,ipv6:route.ipv6,scope:route.scope),let current=prefix(info) else{return false};return NetworkInspection.samePrefix(current,route.destination) && field("interface",info)==route.interface && field("gateway",info)==route.gateway}
-                let current=SCDynamicStoreCopyValue(dynamic,record.dnsKey as CFString) as? NSDictionary;let expected=try PropertyListSerialization.propertyList(from:record.expectedDNS,format:nil) as! NSDictionary
+                let current=SCDynamicStoreCopyValue(dynamic,record.dnsKey as CFString) as? NSDictionary;let expected=try dnsDictionary(record.expectedDNS)
                 return TunReply(ok:true,message:lastFailure ?? HelperPaths.version,running:true,routesVerified:verified,dnsVerified:current==expected,proxyVerified:verifyProxy(),protectionVerified:verifyProtection(),protectionSummary:capturePlan?.summary,phase:phase)
             }
             return TunReply(ok:true,message:(lastFailure ?? HelperPaths.version)+(journal != nil && process==nil ? " · 存在待恢复记录":""),running:process?.isRunning==true,protectionSummary:capturePlan?.summary,phase:phase)
@@ -195,10 +202,13 @@ func run() throws {
     let service=try Service()
     if CommandLine.arguments.dropFirst()==["--recover"]{try service.recoverStartup();print("原网络恢复完成");return}
     guard CommandLine.arguments.count==1 else{throw ProxyError("辅助服务参数无效")}
-    try service.recoverStartup();umask(0o077)
+    // 启动恢复失败时继续提供状态和恢复接口；保留的恢复记录会阻止新的接管。
+    do{try service.recoverStartup()}catch{service.lastFailure=service.lastFailure ?? "启动恢复未完成："+Redactor.redact(error.localizedDescription)};umask(0o077)
     let path=HelperPaths.socket;try? FileManager.default.removeItem(atPath:path);let server=socket(AF_UNIX,SOCK_STREAM,0);guard server>=0 else{throw ProxyError("辅助服务套接字失败")};var address=try UnixChannel.address(path);let bound=withUnsafePointer(to:&address){$0.withMemoryRebound(to:sockaddr.self,capacity:1){bind(server,$0,socklen_t(MemoryLayout<sockaddr_un>.size))==0}};guard bound,listen(server,8)==0 else{throw ProxyError("辅助服务监听失败")};chown(path,uid_t(service.manifest.uid),0);chmod(path,0o600)
     signal(SIGTERM,SIG_IGN);signal(SIGINT,SIG_IGN);let termination=DispatchSource.makeSignalSource(signal:SIGTERM,queue:service.queue);termination.setEventHandler{try? service.stop();exit(0)};termination.resume()
-    DispatchQueue.global().async {while true {let fd=accept(server,nil,nil);if fd<0{continue};var option:Int32=1;_=setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&option,socklen_t(MemoryLayout<Int32>.size));DispatchQueue.global().async{defer{service.queue.sync{if service.owner==fd{try? service.stop()}};close(fd)};do{try service.authorize(fd);while true{let data=try UnixChannel.receive(fd:fd);let request=try JSONDecoder().decode(TunRequest.self,from:data);let response=service.queue.sync{service.handle(request,fd:fd)};try UnixChannel.send(JSONEncoder().encode(response),fd:fd)}}catch{}}}}
+    // 只有一个客户端应用；限制并发连接，accept 失败（如 EMFILE）时退避，避免空转占满 CPU。
+    let slots=DispatchSemaphore(value:4)
+    DispatchQueue.global().async {while true {let fd=accept(server,nil,nil);if fd<0{usleep(100_000);continue};guard slots.wait(timeout:.now()) == .success else{close(fd);continue};var option:Int32=1;_=setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&option,socklen_t(MemoryLayout<Int32>.size));DispatchQueue.global().async{defer{service.queue.sync{if service.owner==fd{try? service.stop()}};close(fd);slots.signal()};do{try service.authorize(fd);while true{let data=try UnixChannel.receive(fd:fd);let request=try JSONDecoder().decode(TunRequest.self,from:data);let response=service.queue.sync{service.handle(request,fd:fd)};try UnixChannel.send(JSONEncoder().encode(response),fd:fd)}}catch{}}}}
     dispatchMain()
 }
 do{try run()}catch{fputs("辅助服务操作失败："+Redactor.redact(error.localizedDescription)+"\n",stderr);exit(1)}
