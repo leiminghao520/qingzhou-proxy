@@ -337,3 +337,47 @@ func TestQueuedConnectionsCloseOnShutdown(t *testing.T) {
 		t.Fatal("关闭后注册的连接未释放")
 	}
 }
+
+func TestFixedEntryRelayPreservesAllProtocols(t *testing.T) {
+	for _, payload := range [][]byte{
+		[]byte("GET http://local.example/a HTTP/1.1\r\nHost: local.example\r\n\r\n"),
+		[]byte("CONNECT local.example:443 HTTP/1.1\r\nHost: local.example:443\r\n\r\n"),
+		{5, 1, 0, 5, 1, 0, 3, 1, 'a', 0, 80},
+	} {
+		upstream := listenTest(t)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			c, err := upstream.Accept()
+			if err != nil {
+				return
+			}
+			defer c.Close()
+			io.Copy(c, c)
+		}()
+		raw := listenTest(t)
+		mux := newMixedListener(raw, upstream.Addr().(*net.TCPAddr).Port, true)
+		c := dialTest(t, raw.Addr().String())
+		c.SetDeadline(time.Now().Add(2 * time.Second))
+		if _, err := c.Write(payload); err != nil {
+			t.Fatal(err)
+		}
+		received := make([]byte, len(payload))
+		if _, err := io.ReadFull(c, received); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(payload, received) {
+			t.Fatal("固定入口改变了协议内容")
+		}
+		// 关闭入口必须结束转发中的双向连接，旧核心不能留下连接工作协程。
+		mux.Close()
+		mux.wait()
+		c.Close()
+		upstream.Close()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("固定入口退出未清理上游连接")
+		}
+	}
+}

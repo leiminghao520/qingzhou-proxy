@@ -20,7 +20,7 @@ struct OverviewView: View {
                 }
                 FirstConnectionGuide(model:model,onImport:{model.office.importRequested=true})
                 XihangConnectionHeader(model:model,onImport:{model.office.importRequested=true},onLines:onLines)
-                XihangTrafficPanel(display:model.trafficDisplay,connected:model.connection == .connected,available:model.monitor.traffic == .available && !model.monitorPaused,total:model.downloadTotal + model.uploadTotal,connections:model.connections.count)
+                XihangTrafficPanel(display:model.trafficDisplay,connected:model.connection == .connected,available:model.monitor.traffic == .available && !model.monitorPaused,paused:model.monitorPaused,total:model.downloadTotal + model.uploadTotal,connections:model.connections.count)
                 ViewThatFits(in:.horizontal) {
                     HStack(alignment:.top,spacing:16) { XihangSubscriptionSummary(model:model,onOpen:onSubscriptions).frame(minWidth:260); quickActions.frame(minWidth:300) }
                     VStack(spacing:16) { XihangSubscriptionSummary(model:model,onOpen:onSubscriptions); quickActions }

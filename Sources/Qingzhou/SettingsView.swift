@@ -23,6 +23,7 @@ private struct SettingsRevision:Equatable {
     let dns:DNSPreference
     let family:AddressFamilyPolicy?
     let http:Bool
+    let disconnectProtection:Bool
     let hasCompatibility:Bool
     let port:Int
     let exclusions:[String]
@@ -41,7 +42,7 @@ private struct SettingsRevision:Equatable {
         profileID=model.currentProfileID;locked=model.locked;connected=model.connection == .connected
         loadingFailed=model.loadingFailed;recovering=model.recovering;helperStatus=model.helperStatus
         protectionSummary=model.protectionSummary;captureMode=state.captureMode;dns=state.dnsPreference
-        family=state.addressFamilyPolicy;http=state.httpCompatibilityEnabled;hasCompatibility=state.shadowrocket != nil
+        disconnectProtection=state.protectsDisconnect;family=state.addressFamilyPolicy;http=state.httpCompatibilityEnabled;hasCompatibility=state.shadowrocket != nil
         port=state.listenPort;exclusions=state.tunExcludedCIDRs;protectedDomains=state.protectedDomains
         bypasses=state.effectiveBypasses;rules=state.rules;nodeLabels=Dictionary(state.nodes.map{($0.id,$0.name)},uniquingKeysWith:{$1})
         groupLabels=Dictionary(state.groups.map{($0.id,$0.name)},uniquingKeysWith:{$1})
@@ -104,7 +105,7 @@ private struct SettingsContent:View,Equatable {
                     Text("系统代理（默认）").tag(CaptureMode.systemProxy)
                     Text("TUN 虚拟网卡（管理员辅助服务）").tag(CaptureMode.tun)
                     Text("完整接管（TUN＋系统代理，需管理员权限）").tag(CaptureMode.compatible)
-                } label: {settingLabel("接管方式",help:"系统代理覆盖遵循系统代理设置的应用；各接管方式统一使用辅助服务，首次安装授权后日常连接复用。")}
+                } label: {settingLabel("接管方式",help:"连接页或菜单栏可一键切换完整接管，并自动保存和重连。这里可批量调整网络选项；首次安装辅助服务需系统授权，后续切换复用。")}
                 .disabled(model.locked)
 
                 Picker(selection:$draft.network.family) {
@@ -121,6 +122,12 @@ private struct SettingsContent:View,Equatable {
                 .disabled(model.locked)
 
                 Toggle("严格 DNS（解析失败时不回退系统 DNS）",isOn:$draft.network.strictDNS).disabled(model.locked)
+                Toggle(isOn:$draft.network.disconnectProtection) {
+                    settingLabel("断线保护（可选）",help:"默认关闭。开启后使用固定 IP 节点、完整接管、全部代理和严格 DNS；异常断线或重连时阻止公网直连，保留局域网和已核验的公司网络例外。首次启用会中断已有网络连接。手动断开、正常退出或应急恢复会解除保护。系统防火墙不兼容时拒绝开启，不覆盖企业 VPN 规则。")
+                }.disabled(model.locked)
+                if draft.network.disconnectProtection {
+                    Text("请先选择服务器地址为固定公网 IP 的单个节点；自动选择和域名节点不支持。应用后将切换完整接管、全部代理和严格 DNS，并关闭 HTTP 兼容模式。").font(.caption).foregroundStyle(.secondary)
+                }
 
                 HStack {
                     settingLabel("网络绕过：已启用 \(model.state.enabledBypasses.count) / \(model.state.effectiveBypasses.count) 项",help:"域名、IP 和网段统一在分流规则页维护，支持批量导入及指定网络出口。系统代理模式下，保护域名绕过汐航，交给系统网络及企业 VPN；所有运行模式均优先保护。核心 DIRECT 仍经过本地核心，与系统代理绕过不同。显式指定 HTTP/SOCKS 代理的命令不一定遵循此清单；TUN 仍使用原有内网保护逻辑。")
@@ -136,7 +143,7 @@ private struct SettingsContent:View,Equatable {
                     Task {
                         draft.sync(model.state)
                         guard !draft.networkConflict else {model.errorMessage="网络设置已被其他操作修改，请撤销草稿后重新编辑";return}
-                        if await model.applyCaptureSettings(mode:draft.network.capture,dns:draft.network.dns,family:draft.network.family,httpCompatibility:draft.network.http,strictDNS:draft.network.strictDNS) {draft.acceptNetwork(model.state)}
+                        if await model.applyCaptureSettings(mode:draft.network.capture,dns:draft.network.dns,family:draft.network.family,httpCompatibility:draft.network.http,strictDNS:draft.network.strictDNS,disconnectProtection:draft.network.disconnectProtection) {draft.acceptNetwork(model.state)}
                     }
                 }.disabled(model.locked)
                 if !model.protectionSummary.isEmpty {DisclosureGroup("生效的内网绕过项") {ForEach(model.protectionSummary,id:\.self){Text($0).font(.caption)}}}
@@ -157,7 +164,7 @@ private struct SettingsContent:View,Equatable {
             } header: {
                 HStack(spacing:4) {
                     Label("网络接管与管理员辅助服务",systemImage:"shield.lefthalf.filled")
-                    HelpTip(text:"接管、DNS、地址族和 HTTP 兼容只编辑草稿，点击应用才生效。"+(draft.network.capture == .compatible ? "规则模式：本机 → 企业 VPN → 显式规则 → 国内域名/IP 直连 → 未知公网代理。保存时默认未命中策略改为当前代理选择。固定国内规则："+DomesticRouting.version+"。完整接管不会自动启用，仍需管理员恢复和实网验收；节点、原用户规则顺序不变。":""))
+                    HelpTip(text:"接管、DNS、地址族和 HTTP 兼容只编辑草稿，点击应用才生效。"+(draft.network.capture == .compatible ? "规则模式：本机 → 企业 VPN → 显式规则 → 国内域名/IP 直连 → 未知公网代理。保存时默认未命中策略改为当前代理选择。固定国内规则："+DomesticRouting.version+"。连接页或菜单栏的完整接管开关可自动保存并重连。":""))
                 }
             }
 

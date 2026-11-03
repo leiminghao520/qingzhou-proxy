@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 // 外观偏好独立于代理配置，跟随系统使用空值取消应用自身的覆盖。
 enum AppearancePreference: String, CaseIterable, Identifiable {
@@ -49,20 +50,45 @@ struct AppearanceSetting: View {
 struct AppearanceMenu: View {
     @AppStorage("appearancePreference") private var appearance = AppearancePreference.system
     var body: some View {
-        Menu {
-            Picker("界面外观", selection: $appearance) {
-                Text("白天").tag(AppearancePreference.light)
-                Text("夜间").tag(AppearancePreference.dark)
-                Text("跟随系统").tag(AppearancePreference.system)
-            }
-        } label: {
-            Label(appearance.title, systemImage: appearance.symbol)
-                .font(.caption)
+        AppearancePopUp(selection: $appearance)
+            .frame(width: 132, height: 24)
+    }
+}
+
+// 原生下拉框只创建一次菜单；遥测重绘不替换菜单标题或改变按钮尺寸。
+struct AppearancePopUp: NSViewRepresentable {
+    @Binding var selection: AppearancePreference
+    private static let choices: [AppearancePreference] = [.light, .dark, .system]
+
+    func makeCoordinator() -> Coordinator { Coordinator(selection: $selection) }
+    func makeNSView(context: Context) -> NSPopUpButton {
+        let button = NSPopUpButton(frame: .zero, pullsDown: false)
+        button.isBordered = false
+        button.controlSize = .small
+        button.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        button.addItems(withTitles: Self.choices.map(\.title))
+        for (index, value) in Self.choices.enumerated() {
+            button.item(at: index)?.image = NSImage(systemSymbolName: value.symbol, accessibilityDescription: nil)
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .accessibilityLabel("界面外观")
-        .accessibilityValue(appearance.title)
-        .help("白天、夜间或跟随系统")
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.select(_:))
+        button.setAccessibilityLabel("界面外观")
+        button.setAccessibilityIdentifier("appearanceMenu")
+        button.toolTip = "白天、夜间或跟随系统"
+        button.selectItem(at: Self.choices.firstIndex(of: selection)!)
+        return button
+    }
+    func updateNSView(_ button: NSPopUpButton, context: Context) {
+        context.coordinator.selection = $selection
+        let index = Self.choices.firstIndex(of: selection)!
+        if button.indexOfSelectedItem != index { button.selectItem(at: index) }
+    }
+    final class Coordinator: NSObject {
+        var selection: Binding<AppearancePreference>
+        init(selection: Binding<AppearancePreference>) { self.selection = selection }
+        @objc func select(_ button: NSPopUpButton) {
+            guard AppearancePopUp.choices.indices.contains(button.indexOfSelectedItem) else { return }
+            selection.wrappedValue = AppearancePopUp.choices[button.indexOfSelectedItem]
+        }
     }
 }

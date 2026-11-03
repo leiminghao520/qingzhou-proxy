@@ -12,6 +12,7 @@ import QingzhouKit
     @Published var activeBypasses:[NetworkBypass]?
     @Published var bypassApplyFailure:String?
     @Published var pendingMode:ProxyMode?
+@Published var captureSwitchTarget:CaptureMode?
     let office=OfficeDashboardModel()
     var officeNetworkID=UUID()
     var officeHelperDNSSignature:Data?
@@ -23,6 +24,7 @@ import QingzhouKit
     var policyTask:Task<Void,Never>?
     var connectionListTask:Task<Void,Never>?
     @Published var selectionStatus:SelectionStatus?
+@Published var dismissedSelectionFeedbackID:UUID?
     @Published var measurementCancelling=false
     @Published var state=AppState()
     @Published private(set) var connectedSince: Date?
@@ -231,7 +233,7 @@ import QingzhouKit
         guard !busy,!measuring,!loadingFailed else{return}
         if (wakeRecovery.active || wakeIntent != nil) && !stopRequested && !pendingRecovery && !networkChanged {return}
         if pendingRecovery {pendingRecovery=false;Task{await self.performRecovery()};return}
-        if stopRequested {busy=true;Task{defer{stopRequested=false;busy=false};do{try await disconnectInternal()}catch{report(error)}};return}
+        if stopRequested {busy=true;Task{defer{stopRequested=false;busy=false};do{try await disconnectInternal();try await capture.releaseDisconnectProtection()}catch{report(error)}};return}
         guard connection == .connected,!recovering else{return}
         if !coreFailed && !networkChanged {
             if healthRefreshPending {healthRefreshPending=false;scheduleHealthRefresh()}
@@ -406,9 +408,10 @@ import QingzhouKit
         do {
             try await RuntimeTransaction.apply(tx,connected:reconfigure && connection == .connected,validate:{
                 try PolicyValidator.validate(tx.next)
+                if self.connection != .connected,tx.previous.protectsDisconnect,!tx.next.protectsDisconnect {try await self.capture.releaseDisconnectProtection()}
                 try store.prepareHistory(tx);self.activeHistoryTransactionID=tx.historyTransactionID
                 if reconfigure && self.connection == .connected && !tx.next.nodes.isEmpty {let context=try CoreControlContext.make();try await self.core.validate(config:ConfigBuilder.build(state:tx.next,credentials:self.credentials,control:context))}
-            },stop:{if self.capture.running || self.proxy.hasRecovery || self.connection == .connected {try await self.disconnectInternal()}},start:{try await self.startService($0,profileID:tx.nextCatalog?.currentProfileID ?? store.catalog.currentProfileID)},commit:{tx.connectionVerified=reconfigure && self.connection == .connected;try store.commit(tx)},abort:{store.abort(tx)},restartPrevious:{try await self.startService($0,profileID:store.catalog.currentProfileID)})
+            },stop:{if self.capture.running || self.proxy.hasRecovery || self.connection == .connected {try await self.disconnectInternal()};if tx.previous.protectsDisconnect && !tx.next.protectsDisconnect {try await self.capture.releaseDisconnectProtection()}},start:{try await self.startService($0,profileID:tx.nextCatalog?.currentProfileID ?? store.catalog.currentProfileID)},commit:{tx.connectionVerified=reconfigure && self.connection == .connected;try store.commit(tx)},abort:{store.abort(tx)},restartPrevious:{try await self.startService($0,profileID:store.catalog.currentProfileID)})
             state=store.state;errorMessage=nil;invalidateOfficeResults();if connection == .connected {publishOfficeConnectivity()};synchronizeShortcut();recordEvent(.configuration,.succeeded,.configurationApplied,profileID:affectedProfileID)
             if reconfigure && connection == .connected{log("配置已更新，连通性检查通过")};if connection != .connected{connectivityResults=[]}
         }catch{state=store.state;recordEvent(.configuration,.failed,.configurationFailed,profileID:affectedProfileID);report(error);throw error}
@@ -492,7 +495,7 @@ import QingzhouKit
         epoch=UUID();connectivityEpoch=UUID()
         log("应急恢复开始：核对本地代理及已安装辅助服务，与当前模式无关")
         do {
-            try await capture.emergencyRecover(preserveExternal:true);stopTelemetry();protectionSummary=[];recoveryPending=false;connection = .disconnected
+            try await capture.emergencyRecover(preserveExternal:true);try await capture.releaseDisconnectProtection();stopTelemetry();protectionSummary=[];recoveryPending=false;connection = .disconnected
             connectivityResults=[];helperStatus="汐航接管已清理，外部网络已保留并核对";reachability="尚未检测";errorMessage=nil;log(helperStatus);recordEvent(.recovery,.succeeded,.recoverySucceeded)
         }catch {stopTelemetry();recoveryPending=true;connection = .error;helperStatus="恢复未完成，请查看错误及恢复记录";recordEvent(.recovery,.failed,.recoveryConflict);report(error)}
     }
@@ -565,17 +568,37 @@ import QingzhouKit
     func copyTerminalProxy(){let p=state.listenPort;let value="export http_proxy=http://127.0.0.1:\(p) https_proxy=http://127.0.0.1:\(p) all_proxy=socks5h://127.0.0.1:\(p) HTTP_PROXY=http://127.0.0.1:\(p) HTTPS_PROXY=http://127.0.0.1:\(p) ALL_PROXY=socks5h://127.0.0.1:\(p)";NSPasteboard.general.clearContents();NSPasteboard.general.setString(value,forType:.string);log("已复制本地终端代理命令，不包含节点凭据")}
     private func synchronizeShortcut(){do{try shortcuts.configure(enabled:state.shortcutEnabled,key:state.shortcutKey,modifiers:state.shortcutModifiers)}catch{log("快捷键冲突，未注册全局快捷键")}}
     func setShortcut(enabled:Bool,key:UInt32,modifiers:UInt32){guard !locked else{return};let old=state;do{guard [UInt32(35),2,15].contains(key),[UInt32(2304),4352,6144,6400].contains(modifiers) else{throw ProxyError("不支持的快捷键组合")};try shortcuts.configure(enabled:enabled,key:key,modifiers:modifiers);var next=state;next.shortcutEnabled=enabled;next.shortcutKey=key;next.shortcutModifiers=modifiers;do{try persist(next)}catch{try? shortcuts.configure(enabled:old.shortcutEnabled,key:old.shortcutKey,modifiers:old.shortcutModifiers);throw error}}catch{report(error)}}
-    func applyCaptureSettings(mode:CaptureMode,dns:DNSPreference,family:AddressFamilyPolicy,httpCompatibility:Bool,strictDNS:Bool?=nil) async -> Bool {
+    func applyCaptureSettings(mode:CaptureMode,dns:DNSPreference,family:AddressFamilyPolicy,httpCompatibility:Bool,strictDNS:Bool?=nil,disconnectProtection:Bool?=nil) async -> Bool {
         guard !locked,let store else {return false}
         busy=true;defer{busy=false}
         do {
             var next=state;next.strictDNS=strictDNS ?? state.strictDNS;next.captureMode=mode;next.dnsPreference=dns;next.addressFamilyPolicy=family;next.httpCompatibilityEnabled=httpCompatibility
+            if let disconnectProtection {
+                next.disconnectProtection=disconnectProtection
+                if disconnectProtection {
+                    next.captureMode = .compatible;next.mode = .global;next.dnsPreference = .httpsProxy;next.strictDNS=true;next.httpCompatibilityEnabled=false
+                    try DisconnectProtectionPolicy.validate(next)
+                    try await capture.checkDisconnectProtection()
+                }
+            }
             // 网络绕过统一由分流页管理，此处仅提交接管和 DNS 设置。
             if mode == .compatible {next.ruleFinal = .selected;try DomesticRouting.validate()}
             try await apply(store.prepareChange(next));return true
         } catch {report(error);return false}
     }
-    func setCaptureMode(_ mode:CaptureMode) async {guard !locked,let store,state.captureMode != mode else{return};busy=true;defer{busy=false};do{var next=state;next.captureMode=mode;try await apply(store.prepareChange(next))}catch{report(error)}}
+    // 快捷切换复用网络设置事务，已连接时自动重连，失败时保留原配置。
+    func setCaptureMode(_ mode:CaptureMode) async {
+        guard !locked, state.captureMode != mode || (connection == .connected && effectiveState.captureMode != mode) else { return }
+        captureSwitchTarget = mode
+        defer { captureSwitchTarget = nil }
+        let previous = state.captureMode
+        let applied = await applyCaptureSettings(mode:mode,dns:state.dnsPreference,family:state.effectiveAddressFamilyPolicy,httpCompatibility:state.httpCompatibilityEnabled,strictDNS:state.strictDNS)
+        if !applied {
+            let detail = errorMessage ?? "请查看连接诊断"
+            let restored = connection == .connected ? "已恢复" : "已保留原配置："
+            report(ProxyError("切换至\(mode.label)未完成，\(restored)\(previous.label)：\(detail)"))
+        }
+    }
     func setAddressFamily(_ policy:AddressFamilyPolicy) async {guard !locked,let store else{return};busy=true;defer{busy=false};do{var next=state;next.addressFamilyPolicy=policy;try await apply(store.prepareChange(next))}catch{report(error)}}
     func setDNS(_ mode:DNSPreference) async {guard !locked,let store,state.dnsPreference != mode else{return};busy=true;defer{busy=false};do{var next=state;next.dnsPreference=mode;try await apply(store.prepareChange(next))}catch{report(error)}}
     func installHelper() async {
@@ -790,6 +813,7 @@ import QingzhouKit
         do {
             try await QuitRecoveryTransaction.run(recover:{
                 try await self.capture.emergencyRecover(preserveExternal:true)
+                try await self.capture.releaseDisconnectProtection()
             },verifyReleased:{
                 try await self.capture.verifyReleasedForQuit()
             },deferredRecovery:{error in

@@ -24,8 +24,8 @@ import QingzhouKit
 
 @main struct QingzhouApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
-    @StateObject private var model: AppModel
-    init() { _model = StateObject(wrappedValue: AppModel(dependencies: AppDependencies())) }
+    @StateObject private var lifetime = ApplicationLifetime()
+    private var model: AppModel { lifetime.model }
     @State private var showingAbout = false
     @AppStorage("interfaceMode") private var interfaceMode = InterfaceMode.simple
 
@@ -45,6 +45,36 @@ import QingzhouKit
         }
 
         MenuBarExtra {
+            StableMenuContent(presentation: lifetime.menu)
+        } label: {
+            StableMenuBarLabel(presentation: lifetime.menu)
+        }
+    }
+}
+
+// 场景只持有模型生命周期，不订阅连接计数等高频数据。
+@MainActor final class ApplicationLifetime: ObservableObject {
+    let model: AppModel
+    let menu: MenuPresentation
+    init() {
+        let model = AppModel(dependencies: AppDependencies())
+        self.model = model
+        self.menu = MenuPresentation(model: model)
+    }
+}
+
+struct StableMenuBarLabel: View {
+    @ObservedObject var presentation: MenuPresentation
+    var body: some View {
+        OfficeMenuBarLabel(connected: presentation.model.connectionAvailable, status: presentation.model.connectionSummary)
+    }
+}
+
+struct StableMenuContent: View {
+    @ObservedObject var presentation: MenuPresentation
+    @AppStorage("interfaceMode") private var interfaceMode = InterfaceMode.simple
+    private var model: AppModel { presentation.model }
+    var body: some View {
             Text("\(model.connectionSummary) · \(model.state.mode.label)")
             Text(model.actualName + " · " + model.effectiveState.captureMode.label)
             if model.activeRecovery != nil {
@@ -53,7 +83,11 @@ import QingzhouKit
                 Button("采用当前方案"){model.adoptRecovery()}.disabled(model.locked)
             }
             if let title=model.issueTitle {Text(title)}
-            OfficeMenuHealth(office:model.office,hasCorporate:!model.state.protectedDomains.isEmpty || !model.state.enabledBypasses.isEmpty)
+            Text(presentation.healthLabel)
+            Toggle("完整接管", isOn: Binding(
+                get: { (model.captureSwitchTarget ?? model.effectiveState.captureMode) == .compatible },
+                set: { enabled in Task { await model.setCaptureMode(enabled ? .compatible : .systemProxy) } }
+            )).disabled(model.locked || model.recoveryPending)
             if !(model.state.savedDiagnosticTargets ?? []).isEmpty {
                 Menu("常用目标路径检查") {
                     ForEach(Array((model.state.savedDiagnosticTargets ?? []).prefix(5))) {target in
@@ -97,9 +131,6 @@ import QingzhouKit
                 NSApplication.shared.windows.first { $0.canBecomeMain }?.makeKeyAndOrderFront(nil)
             }
             Button("退出汐航") { NSApplication.shared.terminate(nil) }
-        } label: {
-            OfficeMenuBarLabel(connected:model.connectionAvailable,status:model.connectionSummary)
-        }
     }
     @ViewBuilder private var advancedMenuActions: some View {
         Menu("配置") {

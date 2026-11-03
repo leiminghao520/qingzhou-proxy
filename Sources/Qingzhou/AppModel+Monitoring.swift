@@ -105,7 +105,8 @@ extension AppModel {
     }
     func updateHelperNetworkStatus(_ status:TunReply) {
         if status.message == "网络变化，正在重新检查",helperStatus != status.message {invalidateOfficeResults(network:true)}
-        networkWaiting=status.phase == "networkWaiting"
+        let waiting = status.phase == "networkWaiting"
+        if networkWaiting != waiting { networkWaiting = waiting }
         publishOfficeHelper(status)
         if helperStatus != status.message {helperStatus=status.message}
         let summary=status.protectionSummary ?? []

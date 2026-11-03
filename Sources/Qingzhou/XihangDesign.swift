@@ -114,6 +114,19 @@ struct XihangConnectionHeader: View {
                     Text(since,style:.timer).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 } else { XihangStatusPill(title:model.effectiveState.captureMode.label,color:statusColor) }
             }
+            HStack(spacing:12) {
+                Text(model.captureSwitchTarget == nil ? model.effectiveState.captureMode.label : "正在切换接管方式…")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer(minLength:8)
+                Toggle("完整接管", isOn: Binding(
+                    get: { (model.captureSwitchTarget ?? model.effectiveState.captureMode) == .compatible },
+                    set: { enabled in Task { await model.setCaptureMode(enabled ? .compatible : .systemProxy) } }
+                ))
+                .toggleStyle(.switch).controlSize(.small).fixedSize()
+                .disabled(model.locked || model.recoveryPending)
+                .accessibilityIdentifier("fullCaptureToggle")
+                .help("开启 TUN 与系统代理；切换后自动保存并重连，关闭后使用系统代理。")
+            }
         }
         .padding(22).frame(maxWidth:.infinity,minHeight:192,alignment:.topLeading)
         .background {
@@ -150,6 +163,7 @@ struct XihangTrafficPanel: View {
     @ObservedObject var display: OfficeTrafficDisplay
     let connected: Bool
     let available: Bool
+    let paused: Bool
     let total: Int64
     let connections: Int
     var expanded = true
@@ -160,10 +174,10 @@ struct XihangTrafficPanel: View {
                 VStack(alignment:.leading,spacing:16) { rates; auxiliary }
             }
             if expanded && connected && available { Divider().opacity(0.5); RateChart(samples:display.sample.history,embedded:true).equatable() }
-            else if expanded {
+            else if expanded || (connected && paused) {
                 HStack(spacing:10) {
                     XihangMark(monochrome:true).frame(width:24,height:26).foregroundStyle(.secondary)
-                    Text(connected ? "实时速率暂时无法获取，请查看诊断" : "连接后，这里会显示实时流量轨迹").font(.caption).foregroundStyle(.secondary)
+                    Text(!connected ? "连接后，这里会显示实时流量轨迹" : paused ? "流量统计已暂停，请前往“连接”页面恢复刷新" : "实时速率暂时无法获取，请查看诊断").font(.caption).foregroundStyle(.secondary)
                 }.padding(.top,4)
             }
         }.padding(20).liquidContentSurface()

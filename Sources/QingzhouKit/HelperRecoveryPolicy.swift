@@ -9,6 +9,6 @@ public enum HelperRecoveryPolicy {
         var isDirectory:ObjCBool=false
         guard FileManager.default.fileExists(atPath:root.path,isDirectory:&isDirectory) else{return (false,true)}
         guard isDirectory.boolValue,let items=try? FileManager.default.contentsOfDirectory(atPath:root.path) else{return (false,false)}
-        return (items.contains("recovery.json"),true)
+        return (items.contains("recovery.json") || items.contains("disconnect-protection.json"),true)
     }
 }

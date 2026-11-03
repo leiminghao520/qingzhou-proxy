@@ -50,6 +50,7 @@ func (c *bufferedConnection) CloseWrite() error {
 }
 
 type mixedListener struct {
+	relayOnly bool
 	net.Listener
 	corePort         int
 	ready            chan net.Conn
@@ -63,8 +64,9 @@ type mixedListener struct {
 	firstByteTimeout time.Duration
 }
 
-func newMixedListener(raw net.Listener, corePort int) *mixedListener {
+func newMixedListener(raw net.Listener, corePort int, relayOnly ...bool) *mixedListener {
 	l := &mixedListener{Listener: raw, corePort: corePort, ready: make(chan net.Conn, 256), slots: make(chan struct{}, 256), done: make(chan struct{}), connections: make(map[*trackedConnection]struct{}), firstByteTimeout: 10 * time.Second}
+	l.relayOnly = len(relayOnly) > 0 && relayOnly[0]
 	l.workers.Add(1)
 	go l.receive()
 	return l
@@ -122,7 +124,8 @@ func (l *mixedListener) identify(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
-	if first[0] == 5 {
+	// 固定入口透传模式不解析或改写 HTTP、CONNECT 和 SOCKS 内容。
+	if l.relayOnly || first[0] == 5 {
 		free()
 		defer conn.Close()
 		raw, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", l.corePort), 5*time.Second)

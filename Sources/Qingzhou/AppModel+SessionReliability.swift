@@ -12,7 +12,7 @@ extension AppModel {
     }
     func cancelConnectionWait() {networkWaiting=false}
     func verifyConnectionReleased() async throws {
-        if let verify=dependencies.recoveryReleasedOverride {try await verify()}else{try await capture.verifyReleasedForQuit()}
+        if let verify=dependencies.recoveryReleasedOverride {try await verify()}else{try await capture.verifyReleasedForQuit(allowDisconnectProtection:true)}
     }
     func networkEnvironmentChanged() {
         invalidateOfficeResults(network:true);requestOfficeRefresh()

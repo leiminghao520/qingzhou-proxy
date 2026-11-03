@@ -22,19 +22,20 @@ extension ConfigBuilder {
     public static func build(state:AppState,credentials:CredentialStore,control:CoreControlContext,httpCompatibilityPort:Int?=nil) throws -> Data {
         try JSONSerialization.data(withJSONObject:object(state:state,credentials:credentials,control:control,httpCompatibilityPort:httpCompatibilityPort),options:[.prettyPrinted,.sortedKeys])
     }
-    public static func object(state:AppState,credentials:CredentialStore,control:CoreControlContext,httpCompatibilityPort:Int?=nil) throws -> [String:Any] {
+    public static func object(state input:AppState,credentials:CredentialStore,control:CoreControlContext,httpCompatibilityPort:Int?=nil) throws -> [String:Any] {
+        let state=try DisconnectProtectionPolicy.runtime(input)
         guard (1024...65535).contains(state.listenPort),(1024...65535).contains(control.port),state.listenPort != control.port,control.secret.count>=32 else {throw ProxyError("代理或控制端口、密钥无效")}
         try PolicyValidator.validate(state)
         var outbounds:[[String:Any]]=[]
         for node in state.nodes {var outbound=try outbound(node,credentials:credentials);outbound["tag"]=PolicyReference.node(node.id).tag;outbounds.append(outbound)}
         outbounds.append(["type":"direct","tag":"direct"])
-        if !state.nodes.isEmpty {outbounds.append(["type":"urltest","tag":"auto","outbounds":state.nodes.map{PolicyReference.node($0.id).tag},"url":testURL,"interval":"5m","tolerance":50,"interrupt_exist_connections":false])}
+        if !state.protectsDisconnect && !state.nodes.isEmpty {outbounds.append(["type":"urltest","tag":"auto","outbounds":state.nodes.map{PolicyReference.node($0.id).tag},"url":testURL,"interval":"5m","tolerance":50,"interrupt_exist_connections":false])}
         for group in state.groups {
             var item:[String:Any]=["type":group.kind != .urltest ? "selector" : "urltest","tag":PolicyReference.group(group.id).tag,"outbounds":group.members.map(\.tag),"interrupt_exist_connections":false]
             if group.kind != .urltest {item["default"]=(group.selected ?? group.members[0]).tag} else {item["url"]=testURL;item["interval"]="5m";item["tolerance"]=50}
             outbounds.append(item)
         }
-        let options=(!state.nodes.isEmpty ? ["auto"] : [])+state.nodes.map{PolicyReference.node($0.id).tag}+state.groups.map{PolicyReference.group($0.id).tag}+["direct"]
+        let options=state.protectsDisconnect ? state.nodes.map{PolicyReference.node($0.id).tag}:(!state.nodes.isEmpty ? ["auto"] : [])+state.nodes.map{PolicyReference.node($0.id).tag}+state.groups.map{PolicyReference.group($0.id).tag}+["direct"]
         outbounds.append(["type":"selector","tag":"proxy","outbounds":options,"default":state.activePolicy?.tag ?? (state.mode == .direct ? "direct" : options.first!),"interrupt_exist_connections":false])
         var rules:[[String:Any]]=[["clash_mode":"global","action":"resolve","strategy":state.effectiveAddressFamilyPolicy.strategy],["clash_mode":"direct","action":"route","outbound":"direct"],["clash_mode":"global","action":"route","outbound":"proxy"],["ip_is_private":true,"action":"route","outbound":"direct"],["domain":["localhost"],"action":"route","outbound":"direct"]]
         func render(_ rule:RoutingRule,override:PolicyReference?=nil) throws -> [String:Any] {

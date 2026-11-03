@@ -98,6 +98,8 @@ struct ContentView: View {
                         .padding(.vertical, 12)
                     }
                 }
+                .frame(minHeight: 0, maxHeight: .infinity)
+                .layoutPriority(-1)
 
                 Divider().opacity(0.6)
 
@@ -216,15 +218,20 @@ struct ContentView: View {
                         ConnectionProgressView(stage:stage,startedAt:model.startupStartedAt)
                             .padding(.horizontal,24).padding(.top,16)
                     }
-                    if interfaceMode == .professional {
-                        SelectionFeedbackView(model: model).padding(.horizontal, 24).padding(.top, 8)
-                    }
                     content
                         .padding(24)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background { LiquidCanvas() }
+            .overlay(alignment: .bottom) {
+                if interfaceMode == .professional, model.visibleSelectionStatus != nil {
+                    SelectionFeedbackView(model: model)
+                        .padding(12)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                        .padding(16)
+                }
+            }
         }
         .preferredColorScheme(appearance.colorScheme)
         .scrollIndicators(.hidden)

@@ -87,6 +87,32 @@ struct NodesView: View {
                 }
             }
 
+            // 自动选择属于线路策略，独立于搜索和协议筛选，始终保留入口。
+            HStack(spacing: 12) {
+                Image(systemName: "bolt.badge.automatic.fill")
+                    .foregroundStyle(Theme.accentBlue)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("自动选择").font(.callout.bold())
+                    Text(model.state.activePolicy == .automatic
+                         ? (model.connection == .connected ? "已启用 · 实际出口：" + model.actualName : "已启用 · 连接后自动选择线路")
+                         : "自动检测并选择可用线路")
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                Button {
+                    Task { await model.setAutomaticSelection(model.state.activePolicy != .automatic) }
+                } label: {
+                    Label(model.state.activePolicy == .automatic ? "关闭自动选择" : "启用自动选择",
+                          systemImage: model.state.activePolicy == .automatic ? "checkmark.circle.fill" : "bolt.fill")
+                }
+                .buttonStyle(.bordered)
+                .tint(Theme.accentBlue)
+                .disabled(model.locked || model.state.nodes.isEmpty)
+                .accessibilityIdentifier("nodesAutomaticSelection")
+            }
+            .padding(12)
+            .background(Theme.cardBackground, in: RoundedRectangle(cornerRadius: 12))
+
             // 搜索和协议筛选
             HStack(spacing: 14) {
                 // 搜索输入
@@ -289,7 +315,9 @@ struct NodesView: View {
             HStack {
                 Button { Task { await model.select(node.id) } } label: {
                     Label(selected ? "已选择":"选择线路",systemImage:selected ? "checkmark.circle.fill":"circle")
-                }.buttonStyle(.borderless).font(.caption).disabled(model.locked)
+                }.buttonStyle(.bordered).controlSize(.small).font(.caption).disabled(model.locked)
+                    .accessibilityLabel("手动选择：" + node.name)
+                    .accessibilityIdentifier("selectNode-" + node.id.uuidString)
                 Spacer()
                 VStack(alignment:.trailing,spacing:4) {
                     LatencyBadge(delayText:latency(node,model))
@@ -311,6 +339,8 @@ struct NodesView: View {
         .liquidContentSurface()
         .overlay(RoundedRectangle(cornerRadius:Theme.cardCornerRadius).strokeBorder(selected ? Theme.accentBlue.opacity(0.6):.clear,lineWidth:1.5).allowsHitTesting(false))
         .modifier(XihangHover())
+        .contentShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
+        .onTapGesture { Task { await model.select(node.id) } }
     }
 
     // 列表行

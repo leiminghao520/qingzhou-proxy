@@ -83,7 +83,7 @@ struct SimpleConnectionView: View {
             }
             FirstConnectionGuide(model:model,onImport:onImport)
             XihangConnectionHeader(model:model,onImport:onImport,onLines:onLines)
-            XihangTrafficPanel(display:model.trafficDisplay,connected:model.connection == .connected,available:model.monitor.traffic == .available && !model.monitorPaused,total:model.downloadTotal + model.uploadTotal,connections:model.connections.count,expanded:false)
+            XihangTrafficPanel(display:model.trafficDisplay,connected:model.connection == .connected,available:model.monitor.traffic == .available && !model.monitorPaused,paused:model.monitorPaused,total:model.downloadTotal + model.uploadTotal,connections:model.connections.count,expanded:false)
             if model.state.subscriptions.contains(where:\.pendingReview) {
                 HStack {
                     Label("订阅更新需要确认",systemImage:"exclamationmark.bubble").font(.caption).foregroundStyle(Theme.amberAccent)

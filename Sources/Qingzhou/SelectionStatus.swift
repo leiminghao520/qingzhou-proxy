@@ -5,6 +5,7 @@ import QingzhouKit
 // 切换结果与核心连接状态分开，避免把运行中的核心误报为网络可用。
 struct SelectionStatus: Equatable {
     enum Phase { case switching, checking, unconfirmed, succeeded, failed }
+    let id = UUID()
     let target: PolicyReference
     let name: String
     let epoch: UUID
@@ -23,8 +24,31 @@ extension AppModel {
         return status
     }
 
+    var visibleSelectionStatus: SelectionStatus? {
+        guard let status = currentSelectionStatus, status.id != dismissedSelectionFeedbackID else { return nil }
+        return status
+    }
+
+    // 收起展示不清除未确认的网络状态；旧提示也不能隐藏后续切换结果。
+    func dismissSelectionFeedback(_ id: UUID) {
+        guard currentSelectionStatus?.id == id else { return }
+        dismissedSelectionFeedbackID = id
+    }
+
     var selectionNetworkUncertain: Bool {
         connection == .connected && currentSelectionStatus?.networkUncertain == true
+    }
+
+    // 关闭自动优选时固定当前实际节点，尚未连接则沿用上次手动节点。
+    func setAutomaticSelection(_ enabled: Bool) async {
+        if enabled { await selectPolicy(.automatic); return }
+        guard state.activePolicy == .automatic else { return }
+        let actual = CoreAPIClient.actualTag(proxyInfo)
+        let node = state.nodes.first { PolicyReference.node($0.id).tag == actual }
+            ?? state.nodes.first { $0.id == state.selectedID }
+            ?? (connection == .connected ? nil : state.nodes.first)
+        guard let node else { report(ProxyError("尚未确认当前节点，请点击一个节点切换到手动选择")); return }
+        await selectPolicy(.node(node.id))
     }
 
     func selectPolicy(_ ref: PolicyReference) async {
@@ -34,6 +58,9 @@ extension AppModel {
     func changeSelection(_ ref: PolicyReference, in group: PolicyGroup?) async {
         guard !locked, PolicyValidator.exists(ref, in: state), ref != .selected, ref != .reject,
               let store else { return }
+        if state.protectsDisconnect {
+            report(ProxyError("断线保护已固定当前节点；更换线路前请先关闭断线保护"));return
+        }
         let currentGroup = group.flatMap { item in state.groups.first { $0.id == item.id } }
         if group != nil {
             guard let currentGroup, currentGroup.kind == .select, currentGroup.members.contains(ref) else { return }
@@ -156,7 +183,7 @@ extension AppModel {
 struct SelectionFeedbackView: View {
     @ObservedObject var model: AppModel
     var body: some View {
-        if let status = model.currentSelectionStatus {
+        if let status = model.visibleSelectionStatus {
             HStack(alignment: .top, spacing: 8) {
                 if status.active { ProgressView().controlSize(.small) }
                 else { Image(systemName: status.phase == .failed || status.phase == .unconfirmed ? "exclamationmark.circle" : "checkmark.circle") }
@@ -166,6 +193,15 @@ struct SelectionFeedbackView: View {
                     Button("重试") { Task { await model.retrySelection() } }.disabled(model.locked)
                     Button("诊断") { model.office.diagnosticRequested = true }
                 }
+                if !status.active {
+                    Button { model.dismissSelectionFeedback(status.id) } label: { Image(systemName: "xmark") }
+                        .buttonStyle(.plain).accessibilityLabel("关闭线路提示")
+                }
+            }
+            .task(id: status.id.uuidString + String(describing: status.phase)) {
+                guard status.phase == .succeeded else { return }
+                do { try await Task.sleep(nanoseconds: 4_000_000_000) } catch { return }
+                model.dismissSelectionFeedback(status.id)
             }
             .foregroundStyle(status.phase == .failed || status.phase == .unconfirmed ? Theme.amberAccent : Theme.accentBlue)
             .accessibilityIdentifier("dailySelectionStatus")

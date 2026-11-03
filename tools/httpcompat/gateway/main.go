@@ -33,6 +33,7 @@ type rewrite struct {
 	Status      int    `json:"status"`
 }
 type configuration struct {
+	RelayOnly           bool                `json:"relayOnly"`
 	AddressFamilyPolicy string              `json:"addressFamilyPolicy"`
 	DNSPreference       string              `json:"dnsPreference"`
 	Policies            []string            `json:"policies"`
@@ -457,7 +458,7 @@ func run(input io.Reader) error {
 	if e != nil {
 		return e
 	}
-	mixed := newMixedListener(listener, config.CorePort)
+	mixed := newMixedListener(listener, config.CorePort, config.RelayOnly)
 	defer func() { _ = mixed.Close(); mixed.wait() }()
 	g.connections = mixed
 	defer func() {

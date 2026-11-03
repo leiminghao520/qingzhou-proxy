@@ -76,6 +76,143 @@ final class ClosingProtocol:URLProtocol {
         model.networkReconnecting=false;model.proxyInfo=[:];model.connections=[];model.observedConnections=[:]
         model.trafficByNode=[:];model.trafficByTarget=[:]
     }
+    @MainActor static func selectionFeedbackChecks(_ model: AppModel) async throws {
+        let success = SelectionStatus(target:.automatic,name:"隔离自动线路",epoch:model.epoch,phase:.succeeded,message:"隔离切换成功")
+        model.selectionStatus = success
+        try check(model.visibleSelectionStatus != nil, "切换成功最初显示提示")
+        let window = NSWindow(contentRect:NSRect(x:0,y:0,width:560,height:100),styleMask:[.titled],backing:.buffered,defer:false)
+        window.isReleasedWhenClosed=false
+        window.contentView=NSHostingView(rootView:SelectionFeedbackView(model:model))
+        window.orderFront(nil)
+        try await Task.sleep(nanoseconds:4_400_000_000)
+        try check(model.visibleSelectionStatus == nil && model.currentSelectionStatus?.id == success.id, "成功提示四秒后收起且保留切换记录")
+        var uncertain = SelectionStatus(target:.automatic,name:"隔离线路",epoch:model.epoch,phase:.unconfirmed,message:"隔离未确认")
+        uncertain.networkUncertain=true
+        model.selectionStatus=uncertain
+        model.dismissSelectionFeedback(success.id)
+        try check(model.visibleSelectionStatus?.id == uncertain.id, "旧提示定时任务不能收起新切换结果")
+        model.dismissSelectionFeedback(uncertain.id)
+        try check(model.visibleSelectionStatus == nil && model.currentSelectionStatus?.networkUncertain == true, "手动收起未确认提示不伪造网络正常状态")
+        window.close()
+        model.selectionStatus=nil;model.dismissedSelectionFeedbackID=nil
+    }
+    @MainActor static func automaticSelectionChecks(_ model: AppModel) async throws {
+        let previous = model.state
+        let a = Node(name:"隔离节点甲",kind:.vless,server:"fixture.invalid",port:443)
+        let b = Node(name:"隔离节点乙",kind:.vless,server:"fixture.invalid",port:443)
+        try model.credentials.set("isolated-test-secret", for: a.credentialRef)
+        try model.credentials.set("isolated-test-secret", for: b.credentialRef)
+        var next = previous
+        next.nodes = [a,b];next.groups=[];next.rules=[];next.remoteRules=[];next.selectedPolicy = .automatic;next.selectedID=a.id
+        try model.persist(next)
+        await model.setAutomaticSelection(false)
+        try check(model.state.activePolicy == .node(a.id), "未连接时关闭自动选择沿用上次手动节点")
+        await model.setAutomaticSelection(true)
+        try check(model.state.activePolicy == .automatic, "手动选择后可以重新启用自动优选")
+        await model.select(b.id)
+        try check(model.state.activePolicy == .node(b.id) && model.state.activePolicy != .automatic, "手动选择其他节点自动退出自动优选")
+        await model.setAutomaticSelection(true)
+        let info = ["proxy": ["type":"Selector","name":"proxy","now":PolicyReference.node(a.id).tag]]
+        model.proxyInfo = try JSONDecoder().decode([String:ProxyInfo].self,from:JSONSerialization.data(withJSONObject:info))
+        await model.setAutomaticSelection(false)
+        try check(model.state.activePolicy == .node(a.id), "关闭自动优选优先固定实际出口而非上次手动节点")
+        model.proxyInfo=[:]
+        try model.persist(previous)
+        model.selectionStatus=nil
+    }
+    @MainActor static func captureToggleChecks(_ model: AppModel) async throws {
+        let dns = model.state.dnsPreference
+        let family = model.state.effectiveAddressFamilyPolicy
+        let http = model.state.httpCompatibilityEnabled
+        await model.setCaptureMode(.compatible)
+        try check(model.state.captureMode == .compatible && model.captureSwitchTarget == nil && !model.busy, "快捷开启完整接管保存配置并清理切换状态")
+        try check(model.state.dnsPreference == dns && model.state.effectiveAddressFamilyPolicy == family && model.state.httpCompatibilityEnabled == http, "快捷接管切换保留 DNS、地址族和 HTTP 设置")
+        await model.setCaptureMode(.compatible)
+        try check(model.state.captureMode == .compatible && model.captureSwitchTarget == nil, "重复选择当前接管方式不进入切换")
+        await model.setCaptureMode(.systemProxy)
+        try check(model.state.captureMode == .systemProxy, "快捷关闭完整接管恢复系统代理配置")
+        model.busy = true
+        await model.setCaptureMode(.compatible)
+        try check(model.state.captureMode == .systemProxy && model.captureSwitchTarget == nil, "其他操作锁定时拒绝接管切换")
+        model.busy = false
+        // 用隔离监听器模拟旧核心尚占用入口，不连接真实辅助服务。
+        let listener = socket(AF_INET, SOCK_STREAM, 0)
+        defer { close(listener) }
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let bound = withUnsafePointer(to: &address) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(listener, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } }
+        guard bound == 0 else { throw ProxyError("隔离监听器绑定失败") }
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        _ = withUnsafeMutablePointer(to: &address) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(listener, $0, &length) } }
+        _ = listen(listener, 1)
+        let occupied = Int(UInt16(bigEndian: address.sin_port))
+        var reserved = model.state
+        reserved.listenPort = occupied
+        try model.persist(reserved)
+        await model.setCaptureMode(.compatible)
+        try check(model.state.captureMode == .compatible && model.state.listenPort == occupied, "跨接管身份切换保留工具绑定的固定入口")
+        try check(!CoreController.portAvailable(model.state.listenPort), "入口被占用时不能偷偷变更对外端口")
+        await model.setCaptureMode(.systemProxy)
+        model.state.rules.append(RoutingRule(kind: .cidr, value: "invalid-cidr", action: .direct))
+        await model.setCaptureMode(.compatible)
+        try check(model.state.captureMode == .systemProxy && model.captureSwitchTarget == nil && !model.busy, "切换验证失败保留原模式并释放操作锁")
+        try check(model.errorMessage?.contains("切换至") == true && model.errorMessage?.contains("已保留原配置") == true, "切换失败明确显示目标和保留的原配置")
+        model.errorMessage = nil
+    }
+    @MainActor static func menuStabilityChecks(_ model: AppModel) async throws {
+        let menu = MenuPresentation(model: model)
+        var publications = 0
+        let token = menu.objectWillChange.sink { publications += 1 }
+        for index in 1...100 {
+            model.uploadTotal = Int64(index)
+            model.downloadTotal = Int64(index * 2)
+            menu.refresh()
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        try check(publications == 0, "累计流量连续一百次变化不刷新菜单")
+        model.issueTitle = "隔离菜单提示"
+        try await Task.sleep(nanoseconds: 50_000_000)
+        try check(publications == 1 && menu.revision.contains("隔离菜单提示"), "菜单相关状态变化自动发布且合并重复通知")
+        model.issueTitle = nil
+        model.measuring = true
+        try await Task.sleep(nanoseconds: 50_000_000)
+        try check(publications == 2, "测速操作状态改变仍更新菜单权限")
+        model.measuring = false
+        token.cancel()
+
+        var selected = AppearancePreference.system
+        let binding = Binding(get: { selected }, set: { selected = $0 })
+        let coordinator = AppearancePopUp.Coordinator(selection: binding)
+        let button = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 132, height: 24), pullsDown: false)
+        button.addItems(withTitles: ["白天", "夜间", "跟随系统"])
+        for (index, value) in [AppearancePreference.light, .dark, .system].enumerated() {
+            button.selectItem(at: index)
+            coordinator.select(button)
+            try check(selected == value, "原生外观下拉框选择正确持久值 \(value.rawValue)")
+        }
+        let host = NSHostingView(rootView: AppearancePopUp(selection: .constant(.system)).frame(width: 132, height: 24))
+        host.frame = NSRect(x: 0, y: 0, width: 132, height: 24)
+        host.layoutSubtreeIfNeeded()
+        func find(_ view: NSView) -> NSPopUpButton? {
+            if let popup = view as? NSPopUpButton { return popup }
+            return view.subviews.compactMap { find($0) }.first
+        }
+        guard let popup = find(host), let originalMenu = popup.menu else { throw ProxyError("未创建原生外观控件") }
+        let frame = popup.frame
+        for _ in 0..<50 {
+            host.rootView = AppearancePopUp(selection: .constant(.system)).frame(width: 132, height: 24)
+            try await Task.sleep(nanoseconds: 10_000_000)
+            host.layoutSubtreeIfNeeded()
+        }
+        try check(find(host) === popup && popup.menu === originalMenu, "父视图五十次重绘保留原生按钮及菜单身份")
+        try check(popup.frame == frame && popup.title == "跟随系统", "父视图重绘不改变外观框尺寸和当前标题")
+        host.rootView = AppearancePopUp(selection: .constant(.dark)).frame(width: 132, height: 24)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        host.layoutSubtreeIfNeeded()
+        try check(popup.title == "夜间" && popup.menu === originalMenu, "外部外观偏好变化更新选择并复用菜单")
+    }
     @MainActor static func run() async throws {
         let output=URL(fileURLWithPath:CommandLine.arguments[CommandLine.arguments.firstIndex(of:"--output")!+1])
         try FileManager.default.createDirectory(at:output,withIntermediateDirectories:true)
@@ -246,7 +383,11 @@ final class ClosingProtocol:URLProtocol {
         RunLoop.main.add(discardTimer,forMode:.modalPanel)
         try check(defaultConfirmation.confirm("隔离丢弃确认检查"),"默认确认框明确丢弃才继续")
         let model=AppModel();try check(!model.loadingFailed,"隔离应用模型初始化")
+        try await menuStabilityChecks(model)
         try telemetryChecks(model)
+        try await selectionFeedbackChecks(model)
+        try await automaticSelectionChecks(model)
+        try await captureToggleChecks(model)
         await model.createProfile(name:"隔离第二配置",copy:false)
         let secondProfile=model.profiles.last!.id
         let profile=model.currentProfileID

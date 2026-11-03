@@ -22,6 +22,8 @@ public struct TunReply: Codable, Sendable {
     public var failurePhase:String?
     public var recoveryPhase:String?
     public var failureKind:ConnectionFailureKind?
+    public var supportsDisconnectProtection:Bool?
+    public var disconnectProtectionArmed:Bool?
     public var supportsManagedSystemProxy:Bool?
     public var wakeRecoveryReason:WakeRecoveryReason?
     public var supportsTrustedCorporateDNS:Bool?

@@ -7,6 +7,7 @@ extension AppModel {
     var connectionTitle:String {
         if recovering || connection == .disconnecting {return "正在恢复原网络设置"}
         if recoveryPending {return "网络恢复未完成，需要处理"}
+        if capture.disconnectProtectionArmed && connection != .connected {return "断线保护已保留 · 等待重连或手动解除"}
         if networkWaiting {return networkReleased ? "等待网络恢复 · 汐航已停止接管":"等待网络恢复 · 将自动重连"}
         if wakeRecovery.active || networkReconnecting {return "正在自动恢复连接"}
         if selectionNetworkUncertain {return "网络状态待确认"}
@@ -36,6 +37,7 @@ extension AppModel {
         return parts.joined(separator:"|")+"|"+BuildVersion.current+"|"+String(helperDate)
     }
     func fallbackPlan(for kind:ConnectionFailureKind,state:AppState)->RecoveryPlan? {
+        guard !state.protectsDisconnect else{return nil}
         var alternate=state
         switch kind {
         case .dns:

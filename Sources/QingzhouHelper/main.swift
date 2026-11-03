@@ -23,6 +23,7 @@ final class Service {
     var domainRouteSummary:[String]=[]
     var firewallCommand:([String]) throws -> String = {try NetworkInspection.command("/sbin/pfctl",$0)}
     var bypassServicesRead:()->[BypassNetworkService] = BypassNetworkService.read
+    lazy var disconnectFirewall=DisconnectProtectionFirewall(directory:root,command:{[unowned self] in try self.firewall($0)})
     var pinnedMonitor:DispatchSourceTimer?
     var pinnedPaths:[ProtectedRoute]=[]
     var helperIsRunning:Bool {process?.isRunning==true || (journal?.proxyOnly==true && owner != nil) || (journal?.pinnedOnly==true && activeRequest != nil)}
@@ -109,6 +110,7 @@ final class Service {
     func prefix(_ info:String)->String? {NetworkInspection.routePrefix(destination:field("destination",info),mask:field("mask",info),host:info.contains("HOST"))}
     func stop(preserveExternal:Bool=false) throws {
         if journal?.proxyOnly==true {try stopManagedSystemProxy(preserveExternal:preserveExternal);return}
+        try disconnectFirewall.suspend()
         let previousPhase=phase
         phase="recovery"
         defer{phase=previousPhase}
@@ -205,6 +207,8 @@ return};var issues:[String]=[]
         configureRouteCancellation(fd)
         phase="preflight"
         try NetworkInspection.checkConflicts(routes:try routeSample().table);try PolicyValidator.validate(state)
+        if state.protectsDisconnect {try disconnectFirewall.preflight()}
+        else if disconnectFirewall.armed {throw ProxyError("断线保护仍生效，请先关闭选项或执行应急恢复") }
         let memory=MemoryCredentials();for (key,value) in values{guard key.count<=200,value.utf8.count<=16384 else{throw ProxyError("凭据模型超过限制")};try memory.set(value,for:key)}
         guard let global=SCDynamicStoreCopyValue(dynamic,"State:/Network/Global/IPv4" as CFString) as? [String:Any],let service=global["PrimaryService"] as? String,let primary=global["PrimaryInterface"] as? String,primary.range(of:"^[a-z][a-z0-9]{0,15}$",options:.regularExpression) != nil else{throw NetworkEnvironmentNotReady("原网络服务无法可靠识别")}
         let dnsKey=NetworkInspection.tunDNSKey(UUID())
@@ -300,6 +304,10 @@ return};var issues:[String]=[]
         journal=Journal(transactionID:routeTransaction,captureRoutes:captureRoutes.prefixes,preservedRoutes:bypassPlan.preservedRoutes,dnsKey:dnsKey,previousDNS:try readDNSService(dnsKey).map(DNSServiceTransaction.encode),expectedDNS:try PropertyListSerialization.data(fromPropertyList:expected,format:.binary,options:0),address4:address4,address6:address6);try save()
         do {
             try installBypassFirewall(state)
+            if state.protectsDisconnect {
+                let allowed=try DisconnectProtectionPolicy.allowedDestinations(state:state,plan:plan)
+                try disconnectFirewall.arm(allowed:allowed)
+            }
             phase="coreStartup"
             let readiness=try NativeInterfaceReadiness()
             let interfacesBefore=try NativeInterfaces.addresses()
@@ -310,6 +318,7 @@ return};var issues:[String]=[]
             phase="interfaceReady"
             let tunnel=try measured("interfaceReady") {try readiness.wait(previous:interfacesBefore,address:addresses.gateway4,timeout:5,alive:{core.isRunning},cancelled:{(try? self.checkRouteOwner()) == nil})}
             journal!.interface=tunnel;try save()
+            if state.protectsDisconnect {try disconnectFirewall.attach(tunnel:tunnel)}
             guard CoreController.listening(state.listenPort),request.httpCompatibilityPort.map({CoreController.listening($0)}) ?? true else{throw ProxyError("TUN 核心监听尚未就绪")}
             phase="routeEncodingValidation"
             // 接口存在后预检全部待新增项，不能先写数百条再遇到一个本地编码错误。
@@ -404,6 +413,7 @@ return};var issues:[String]=[]
         do {
             var reply=try handleOperation(request,fd:fd)
             reply.tunnelInterface=journal?.interface
+            reply.supportsDisconnectProtection=true;reply.disconnectProtectionArmed=disconnectFirewall.armed
             reply.supportsManagedSystemProxy=true;reply.supportsTrustedCorporateDNS=true;reply.supportsWakeRecovery=true;reply.supportsExternalRecovery=true;reply.recoveryPending=journal != nil
             if request.operation=="status",request.verifyNetwork==true {reply.safeToQuit=verifyReleasedForQuit()}
             timing.finish()
@@ -415,13 +425,23 @@ return};var issues:[String]=[]
             var reply=TunReply(ok:false,message:"接管阶段 "+(failurePhase ?? phase)+"："+Redactor.redact(error.localizedDescription),coreDiagnostics:["prepare","activate"].contains(request.operation) ? coreDiagnostics.recent:nil,running:helperIsRunning,phase:phase,networkNotReady:error is NetworkEnvironmentNotReady,stageTimings:timing.samples+(routeMetrics?.samples ?? []))
             reply.failurePhase=failurePhase ?? phase;reply.failureKind=phase=="recovery" ? .recovery:(failureKind ?? ConnectionFailureKind.classify(error));reply.recoveryPhase=phase
             reply.tunnelInterface=journal?.interface
+            reply.supportsDisconnectProtection=true;reply.disconnectProtectionArmed=disconnectFirewall.armed
             reply.supportsManagedSystemProxy=true;reply.supportsTrustedCorporateDNS=true;reply.supportsWakeRecovery=true;reply.supportsExternalRecovery=true;reply.recoveryPending=journal != nil
             return reply
         }
     }
     private func handleOperation(_ request:TunRequest,fd:Int32) throws -> TunReply {
         guard request.preserveExternal != true || request.operation=="recover" else{throw ProxyError("保留外部网络仅用于用户恢复操作")}
-        switch request.operation {case "status":
+        switch request.operation {
+        case "checkDisconnectProtection":
+            try disconnectFirewall.preflight()
+            return TunReply(ok:true,message:"断线保护防火墙兼容性检查通过")
+        case "releaseDisconnectProtection":
+            guard journal==nil,process==nil else{throw ProxyError("请先停止当前连接，再解除断线保护")}
+            try disconnectFirewall.release()
+            return TunReply(ok:true,message:"断线保护已解除")
+        case "status":
+            if disconnectFirewall.armed {try disconnectFirewall.verify()}
             if journal?.proxyOnly==true {
                 return TunReply(ok:true,message:"系统代理授权服务已就绪",running:helperIsRunning,proxyVerified:verifyProxy(),phase:phase)
             }
@@ -452,10 +472,10 @@ return};var issues:[String]=[]
 func run() throws {
     let preserving=CommandLine.arguments.dropFirst()==["--recover-preserving-external"]
     let service=try Service(recoveryOnly:preserving)
-    if preserving {try service.recoverStartup(preserveExternal:true);print("外部网络保留完成；汐航仍拥有的残留已清理");return}
-    if CommandLine.arguments.dropFirst()==["--recover"]{try service.recoverStartup();print("原网络恢复完成");return}
+    if preserving {try service.recoverStartup(preserveExternal:true);try service.disconnectFirewall.release();print("外部网络保留完成；汐航仍拥有的残留已清理");return}
+    if CommandLine.arguments.dropFirst()==["--recover"]{try service.recoverStartup();try service.disconnectFirewall.release();print("原网络恢复完成");return}
     guard CommandLine.arguments.count==1 else{throw ProxyError("辅助服务参数无效")}
-    try service.recoverStartup();umask(0o077)
+    try service.disconnectFirewall.restoreAfterRestart();try service.recoverStartup();umask(0o077)
     let path=HelperPaths.socket;try? FileManager.default.removeItem(atPath:path);let server=socket(AF_UNIX,SOCK_STREAM,0);guard server>=0 else{throw ProxyError("辅助服务套接字失败")};var address=try UnixChannel.address(path);let bound=withUnsafePointer(to:&address){$0.withMemoryRebound(to:sockaddr.self,capacity:1){bind(server,$0,socklen_t(MemoryLayout<sockaddr_un>.size))==0}};guard bound,listen(server,8)==0 else{throw ProxyError("辅助服务监听失败")};chown(path,uid_t(service.manifest.uid),0);chmod(path,0o600)
     signal(SIGTERM,SIG_IGN);signal(SIGINT,SIG_IGN);let termination=DispatchSource.makeSignalSource(signal:SIGTERM,queue:service.queue);termination.setEventHandler{try? service.stop();exit(0)};termination.resume()
     DispatchQueue.global().async {while true {let fd=accept(server,nil,nil);if fd<0{continue};var option:Int32=1;_=setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&option,socklen_t(MemoryLayout<Int32>.size));DispatchQueue.global().async{defer{service.queue.sync{if service.owner==fd{try? service.stop()}};close(fd)};do{do{try service.authorize(fd)}catch{try? UnixChannel.send(JSONEncoder().encode(TunReply(ok:false,message:error.localizedDescription)),fd:fd,deadline:ProcessInfo.processInfo.systemUptime+1);return};while true{let data=try UnixChannel.receive(fd:fd);let request=try JSONDecoder().decode(TunRequest.self,from:data);let response=service.queue.sync{service.handle(request,fd:fd)};try UnixChannel.send(JSONEncoder().encode(response),fd:fd)}}catch{}}}}

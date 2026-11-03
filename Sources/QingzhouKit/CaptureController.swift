@@ -3,45 +3,73 @@ import Foundation
 @MainActor public final class CaptureController {
     public private(set) var activeMode:CaptureMode?
     public private(set) var helperRunning=false
+    public private(set) var disconnectProtectionArmed=false
     public let helper=PrivilegedServiceClient()
     private let core:CoreController
     private var ownedTunDNS:String?
     private var httpCompatibility:HTTPCompatibilityController?
+    private var plainRelay=false
     private let proxy:SystemProxyController
     private let helperRequestOverride:((TunRequest) async throws -> TunReply)?
     public init(core:CoreController,proxy:SystemProxyController,helperRequest:((TunRequest) async throws -> TunReply)?=nil){self.core=core;self.proxy=proxy;self.helperRequestOverride=helperRequest}
     private func requestHelper(_ request:TunRequest) async throws -> TunReply {
-        if let helperRequestOverride {return try await helperRequestOverride(request)}
-        return try await helper.request(request)
+        let reply:TunReply
+        if let helperRequestOverride {reply=try await helperRequestOverride(request)}else{reply=try await helper.request(request)}
+        if let armed=reply.disconnectProtectionArmed {disconnectProtectionArmed=armed}
+        return reply
     }
     public static func validateCorporateDNSCapability(state:AppState,status:TunReply) throws {
         if !(state.trustedCorporateDNS ?? []).isEmpty && status.supportsTrustedCorporateDNS != true {
             throw ProxyError("公司网络 DNS 需要更新辅助服务，当前版本不能安全应用此配置")
         }
     }
+    public func checkDisconnectProtection() async throws {
+        let status=try await requestHelper(TunRequest(operation:"status"))
+        guard status.supportsDisconnectProtection==true else {throw ProxyError("断线保护需要安装 / 更新辅助服务")}
+        _=try await requestHelper(TunRequest(operation:"checkDisconnectProtection"))
+    }
+    public func releaseDisconnectProtection() async throws {
+        guard disconnectProtectionArmed else{return}
+        let status=try await requestHelper(TunRequest(operation:"status"))
+        guard status.supportsDisconnectProtection==true,status.disconnectProtectionArmed==true else{return}
+        _=try await requestHelper(TunRequest(operation:"releaseDisconnectProtection"))
+    }
     public var running:Bool{(activeMode == .systemProxy ? core.isRunning:(helperRunning || core.isRunning)) && (httpCompatibility == nil || httpCompatibility!.isRunning)}
     public func start(_ state:AppState,credentials:CredentialStore,control:CoreControlContext) async throws {
         guard activeMode==nil else{throw ProxyError("必须先恢复上一种接管方式")}
+        if state.protectsDisconnect {try await checkDisconnectProtection()}
         if state.captureMode.usesTunnel {
             guard !proxy.hasRecovery else{throw ProxyError("请先恢复系统代理后启用 TUN")}
             var values:[String:String]=[:];for ref in CredentialReferences.all(state) where !state.subscriptions.contains(where:{$0.sourceRef==ref}) && !state.remoteRules.contains(where:{$0.sourceRef==ref}){values[ref]=try credentials.get(ref)}
             var runtime=state
             var compatibilityPort:Int?
-            if state.usesHTTPCompatibility {
+            // 对外入口始终由当前用户持有；管理员核心仅使用内部端口，切换时不跨身份复用。
+            do {
                 var used:Set<Int>=[state.listenPort,control.port]
                 func port() throws -> Int {for _ in 0..<20 {let value=try CoreControlContext.make().port;if used.insert(value).inserted{return value}};throw ProxyError("不能分配兼容端口")}
-                runtime.listenPort=try port();compatibilityPort=try port()
+                runtime.listenPort=try port()
+                if state.usesHTTPCompatibility { compatibilityPort=try port() }
             }
             try await CaptureActivationTransaction.run(prepare:{
                 let status=try await self.requestHelper(TunRequest(operation:"status"))
                 guard status.protocolVersion==5 else{throw ProxyError("辅助服务协议过旧，请更新后再开启组合接管")}
                 try Self.validateCorporateDNSCapability(state:state,status:status)
-                let reply=try await self.requestHelper(TunRequest(operation:"prepare",state:runtime,credentials:values,control:control,httpCompatibilityPort:compatibilityPort,systemProxyPort:state.captureMode == .compatible ? state.listenPort:nil))
+                let reply=try await self.requestHelper(TunRequest(operation:"prepare",state:DisconnectProtectionPolicy.runtime(runtime),credentials:values,control:control,httpCompatibilityPort:compatibilityPort,systemProxyPort:state.captureMode == .compatible ? state.listenPort:nil))
                 self.ownedTunDNS=reply.dnsServer;self.helperRunning=reply.running;self.activeMode = state.captureMode
             },compatibility:{
                 if let compatibilityPort,let shadow=state.shadowrocket {
                     let compatibility=HTTPCompatibilityController();compatibility.log=self.core.log;compatibility.onUnexpectedExit=self.core.onUnexpectedExit;self.httpCompatibility=compatibility
                     try await compatibility.start(configuration:shadow.gatewayData(listenPort:state.listenPort,corePort:runtime.listenPort,httpPort:compatibilityPort,control:control,state:state),port:state.listenPort)
+                } else {
+                    self.plainRelay=true
+                    let relay=HTTPCompatibilityController();relay.log=self.core.log;relay.onUnexpectedExit=self.core.onUnexpectedExit;self.httpCompatibility=relay
+                    let unused=try CoreControlContext.make().port
+                    let configuration=try JSONSerialization.data(withJSONObject:[
+                        "version":1,"relayOnly":true,"listenPort":state.listenPort,"corePort":runtime.listenPort,
+                        "httpPort":unused,"controlPort":control.port,"secret":control.secret,
+                        "policies":["PROXY"],"rules":[["kind":"FINAL","value":"","policy":"PROXY"]]
+                    ])
+                    try await relay.start(configuration:configuration,port:state.listenPort)
                 }
             },activate:{
                 // 这里只准备组件；应用显式代理检测通过后才提交系统接管。
@@ -72,7 +100,7 @@ import Foundation
         _=try await requestHelper(TunRequest(operation:"activate"))
     }
     public func activateSystemProxy(port:Int,protectedDomains:[String]=[],exceptions:[String]=[]) async throws {
-        guard activeMode == .systemProxy || (activeMode == .tun && httpCompatibility != nil) else{return}
+        guard activeMode == .systemProxy || (activeMode == .tun && httpCompatibility != nil && !plainRelay) else{return}
         let status=try await requestHelper(TunRequest(operation:"status"))
         guard status.supportsManagedSystemProxy==true else{throw ProxyError("首次使用请安装或更新辅助服务，后续系统代理复用该授权")}
         var request=TunRequest(operation:"systemProxy",systemProxyPort:port)
@@ -113,7 +141,7 @@ import Foundation
         let evidence=HelperRecoveryPolicy.inspect()
         try await restoreAll(includeHelper:HelperRecoveryPolicy.requiresRecovery(activeTunnel:activeMode?.usesTunnel == true,running:helperRunning,journalPresent:evidence.journalPresent,inspectionAvailable:evidence.available),preserveExternal:preserveExternal)
     }
-    public func verifyReleasedForQuit() async throws {
+    public func verifyReleasedForQuit(allowDisconnectProtection:Bool=false) async throws {
         guard !core.isRunning,httpCompatibility?.isRunning != true else{throw ProxyError("汐航本地核心仍在运行，尚不能退出")}
         try proxy.verifyReleased()
         let evidence=HelperRecoveryPolicy.inspect()
@@ -122,6 +150,7 @@ import Foundation
             helperRunning=status.running
             guard !status.running,status.safeToQuit==true else{throw ProxyError("尚不能确认汐航的路由、DNS 和代理已释放；恢复记录已保留")}
         }
+        guard allowDisconnectProtection || !disconnectProtectionArmed else{throw ProxyError("断线保护仍在阻止公网直连，请先手动断开或应急恢复后退出")}
         ownedTunDNS=nil;activeMode=nil
         await helper.closeChannel()
     }
@@ -138,7 +167,7 @@ import Foundation
                     helperRestored=true
                 }
             },local:{
-                await self.httpCompatibility?.stop();self.httpCompatibility=nil;await self.core.stop()
+                await self.httpCompatibility?.stop();self.httpCompatibility=nil;self.plainRelay=false;await self.core.stop()
             },verify:{
                 if includeHelper {
                     let status=try await self.requestHelper(TunRequest(operation:"status"))
