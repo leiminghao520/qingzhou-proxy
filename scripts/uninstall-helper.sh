@@ -4,6 +4,8 @@ set -euo pipefail
 if [ "$(id -u)" != 0 ]; then echo '请用 sudo 卸载辅助服务。'; exit 1; fi
 root=/Library/PrivilegedHelperTools/cn.qingzhou.proxy
 plist=/Library/LaunchDaemons/cn.qingzhou.proxy.helper.plist
+# 损坏的恢复记录已被辅助服务隔离，必须先人工核对网络设置并移走隔离文件。
+if /bin/ls "$root"/recovery.corrupt-*.json >/dev/null 2>&1; then echo '存在已隔离的损坏恢复记录，请先手动核对路由、DNS 与系统代理后再继续。'; exit 1; fi
 if [ -f "$root/recovery.json" ]; then echo '恢复记录尚未处理，保留恢复服务并拒绝卸载。'; exit 1; fi
 if [ -f "$plist" ]; then /bin/launchctl bootout system "$plist"; fi
 if [ -f "$root/recovery.json" ]; then

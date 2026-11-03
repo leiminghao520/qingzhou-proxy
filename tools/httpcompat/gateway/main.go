@@ -495,7 +495,10 @@ func run(input io.Reader) error {
 	return e
 }
 func Main() {
-	if run(os.Stdin) != nil {
+	err := run(os.Stdin)
+	// 退出前输出最后一个窗口的传输汇总。
+	flushTransferDiagnostics()
+	if err != nil {
 		diagnostic("startup", "compatibility", time.Now(), 1)
 		os.Exit(1)
 	}

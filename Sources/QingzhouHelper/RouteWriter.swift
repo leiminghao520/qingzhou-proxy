@@ -44,13 +44,14 @@ extension Service {
         let args=NetworkInspection.routeArguments(.add,destination:destination,gateway:gateway,ipv6:ipv6,scope:scope,interface:interface)
         let route=OwnedRoute(destination:destination,gateway:gateway,interface:interface,ipv6:ipv6,scope:scope)
         // 先记录意图再写路由；崩溃恢复仍通过当前网关和接口确认所有权。
-        journal!.routes.append(route);try save()
+        guard journal != nil else{throw ProxyError("恢复记录缺失，拒绝写入路由")}
+        journal?.routes.append(route);try save()
         // 命令超时也可能已经写入路由，保留意图以便按所有权恢复。
         try checkRouteOwner()
         let output=try writeRoute(args,deadline:deadline)
         guard !CaptureOwnership.routeWriteFailed(output) else {
             // 命令明确拒绝写入时不认领原有路由；超时等未知结果仍保留意图。
-            journal!.routes.removeLast();try save()
+            _=journal?.routes.popLast();try save()
             throw ProxyError("路由命令拒绝写入："+destination+"；"+String(output.prefix(512)))
         }
         let current=try routeInfo(destination,ipv6:ipv6,scope:scope,deadline:deadline)
@@ -58,7 +59,7 @@ extension Service {
             throw ProxyError("路由写入核验失败："+destination+"；期望="+interface+"/"+gateway+"/scope="+(scope ?? "global")+"；实际作用域="+(NetworkInspection.routeField("flags",current) ?? "未知")+"；实际前缀="+(prefix(current) ?? "未知")+"，接口="+(field("interface",current) ?? "未知")+"，网关="+(field("gateway",current) ?? "未知"))
         }
         // 仅保存经过完整身份核验的网关，失败时保留原始意图供所有权恢复。
-        journal!.routes[journal!.routes.count-1].gateway=gateway
+        if let last=journal?.routes.indices.last {journal?.routes[last].gateway=gateway}
         try save()
     }
 }

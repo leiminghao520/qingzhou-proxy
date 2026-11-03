@@ -23,5 +23,5 @@ func Start(raw string)(*Service,error){
  go func(){err:=s.server.Serve(mixed);if err!=nil&&err!=http.ErrServerClosed&&err!=net.ErrClosed{s.failure=errors.New("兼容入口异常退出")};close(s.done)}()
  return s,nil
 }
-func(s *Service)Close()error{s.once.Do(func(){s.server.Close();s.mixed.Close();s.mixed.wait();s.gateway.control.CloseIdleConnections();for _,t:=range s.gateway.transports{t.CloseIdleConnections()}});return nil}
+func(s *Service)Close()error{s.once.Do(func(){s.server.Close();s.mixed.Close();s.mixed.wait();s.gateway.control.CloseIdleConnections();for _,t:=range s.gateway.transports{t.CloseIdleConnections()};flushTransferDiagnostics()});return nil}
 func(s *Service)Failed()bool{select{case <-s.done:return s.failure!=nil;default:return false}}

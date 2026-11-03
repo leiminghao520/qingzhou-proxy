@@ -21,8 +21,8 @@ func runOfficeFeatureChecks() async throws {
     catalog=try ProfileStore.create(in:catalog,name:"副本",copyID:catalog.currentProfileID)
     expectEqual(catalog.profiles.last?.configuration.savedDiagnosticTargets,[target])
     let snapshot=try BackupService.snapshot(catalog,credentials:MemoryCredentials())
-    let backup=try BackupService.encrypt(snapshot,password:"隔离检查口令")
-    expectEqual(try BackupService.decrypt(backup,password:"隔离检查口令").catalog.active.savedDiagnosticTargets,[target])
+    let backup=try BackupService.encrypt(snapshot,password:"隔离检查口令-长度足够")
+    expectEqual(try BackupService.decrypt(backup,password:"隔离检查口令-长度足够").catalog.active.savedDiagnosticTargets,[target])
     let directory=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer {try? FileManager.default.removeItem(at:directory)}
     let credentials=MemoryCredentials(),store=try NodeStore(file:directory.appendingPathComponent("state.json"),credentials:credentials)

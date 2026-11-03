@@ -194,7 +194,14 @@ return};var issues:[String]=[]
         }
         try FileManager.default.removeItem(at:root.appendingPathComponent("recovery.json"));journal=nil
     }
-    func recoverStartup(preserveExternal:Bool=false) throws {let file=root.appendingPathComponent("recovery.json");if FileManager.default.fileExists(atPath:file.path){try Self.protected(file);journal=try JSONDecoder().decode(Journal.self,from:Data(contentsOf:file));routeTransaction=journal?.transactionID ?? UUID();if let pid=journal?.pid {var buffer=[CChar](repeating:0,count:4096);if proc_pidpath(pid,&buffer,UInt32(buffer.count))>0,String(cString:buffer)==root.appendingPathComponent("sing-box").path{kill(pid,SIGTERM);usleep(200000)}};try stop(preserveExternal:preserveExternal)}}
+    func recoverStartup(preserveExternal:Bool=false) throws {let file=root.appendingPathComponent("recovery.json");if FileManager.default.fileExists(atPath:file.path){try Self.protected(file)
+        // 恢复记录无法解析时改名隔离并报错，避免 launchd 保活下每次启动都因同一份记录崩溃循环。
+        do {journal=try JSONDecoder().decode(Journal.self,from:Data(contentsOf:file))} catch {
+            let quarantine=root.appendingPathComponent("recovery.corrupt-\(Int(Date().timeIntervalSince1970)).json")
+            try? FileManager.default.moveItem(at:file,to:quarantine)
+            throw ProxyError("恢复记录损坏，已隔离为 "+quarantine.lastPathComponent+"，请手动核对路由、DNS 与系统代理")
+        }
+        routeTransaction=journal?.transactionID ?? UUID();if let pid=journal?.pid {var buffer=[CChar](repeating:0,count:4096);if proc_pidpath(pid,&buffer,UInt32(buffer.count))>0,String(cString:buffer)==root.appendingPathComponent("sing-box").path{kill(pid,SIGTERM);usleep(200000)}};try stop(preserveExternal:preserveExternal)}}
     func start(_ request:TunRequest,fd:Int32) throws {
         guard networkResumeSession == nil || performingNetworkResume else{throw ProxyError("正在恢复当前连接，请先断开或恢复网络")}
         guard process==nil,journal==nil,let state=request.state,let values=request.credentials,let control=request.control,state.captureMode.usesTunnel,values.count<=6000 else{throw ProxyError("重复启动或 TUN 模型无效，请先恢复")}
@@ -314,10 +321,10 @@ return};var issues:[String]=[]
             let output=Pipe(),diagnostics=coreDiagnostics
             coreOutput=output;coreDiagnostics=diagnostics
             output.fileHandleForReading.readabilityHandler={handle in let data=handle.availableData;diagnostics.receive(data,end:data.isEmpty);if data.isEmpty {handle.readabilityHandler=nil}}
-            let core=Process();core.executableURL=root.appendingPathComponent("sing-box");core.arguments=["run","-c",file.path];core.standardOutput=output;core.standardError=output;core.terminationHandler={ [weak self,weak core] _ in self?.queue.async{guard let self,let core,self.process === core else{return};try? self.stop()}};process=core;owner=fd;try measured("coreProcessStart") {try core.run()};try? output.fileHandleForWriting.close();journal!.pid=core.processIdentifier;try save()
+            let core=Process();core.executableURL=root.appendingPathComponent("sing-box");core.arguments=["run","-c",file.path];core.standardOutput=output;core.standardError=output;core.terminationHandler={ [weak self,weak core] _ in self?.queue.async{guard let self,let core,self.process === core else{return};try? self.stop()}};process=core;owner=fd;try measured("coreProcessStart") {try core.run()};try? output.fileHandleForWriting.close();guard journal != nil else{throw ProxyError("恢复记录缺失，拒绝继续接管")};journal?.pid=core.processIdentifier;try save()
             phase="interfaceReady"
             let tunnel=try measured("interfaceReady") {try readiness.wait(previous:interfacesBefore,address:addresses.gateway4,timeout:5,alive:{core.isRunning},cancelled:{(try? self.checkRouteOwner()) == nil})}
-            journal!.interface=tunnel;try save()
+            guard journal != nil else{throw ProxyError("恢复记录缺失，拒绝继续接管")};journal?.interface=tunnel;try save()
             if state.protectsDisconnect {try disconnectFirewall.attach(tunnel:tunnel)}
             guard CoreController.listening(state.listenPort),request.httpCompatibilityPort.map({CoreController.listening($0)}) ?? true else{throw ProxyError("TUN 核心监听尚未就绪")}
             phase="routeEncodingValidation"
@@ -355,7 +362,8 @@ return};var issues:[String]=[]
             try bypassPlan.validatePreservedRoutes(try routeSample().ownershipRoutes)
             try bypassPlan.validate(lookup:{try self.routeInfo($0,ipv6:$1)})
             phase="dnsActivation"
-            try DNSServiceTransaction.apply([journal!.allDNSServices[0]],persist:save,read:readDNSService,write:writeDNSService)
+            guard let primaryDNS=journal?.allDNSServices.first else{throw ProxyError("恢复记录缺少 DNS 快照，拒绝继续接管")}
+            try DNSServiceTransaction.apply([primaryDNS],persist:save,read:readDNSService,write:writeDNSService)
             try publishCorporateDNS(plan)
             let dnsDeadline=Date().addingTimeInterval(3)
             var preferredDNS=false,lastDNS="",dnsCheckError=""
@@ -475,10 +483,15 @@ func run() throws {
     if preserving {try service.recoverStartup(preserveExternal:true);try service.disconnectFirewall.release();print("外部网络保留完成；汐航仍拥有的残留已清理");return}
     if CommandLine.arguments.dropFirst()==["--recover"]{try service.recoverStartup();try service.disconnectFirewall.release();print("原网络恢复完成");return}
     guard CommandLine.arguments.count==1 else{throw ProxyError("辅助服务参数无效")}
-    try service.disconnectFirewall.restoreAfterRestart();try service.recoverStartup();umask(0o077)
+    try service.disconnectFirewall.restoreAfterRestart()
+    // 常驻模式下启动恢复失败只记录并继续服务，让应用能读取原因，而不是退出后被 launchd 反复拉起。
+    do {try service.recoverStartup()} catch {service.lastFailure="启动恢复未完成："+error.localizedDescription}
+    umask(0o077)
     let path=HelperPaths.socket;try? FileManager.default.removeItem(atPath:path);let server=socket(AF_UNIX,SOCK_STREAM,0);guard server>=0 else{throw ProxyError("辅助服务套接字失败")};var address=try UnixChannel.address(path);let bound=withUnsafePointer(to:&address){$0.withMemoryRebound(to:sockaddr.self,capacity:1){bind(server,$0,socklen_t(MemoryLayout<sockaddr_un>.size))==0}};guard bound,listen(server,8)==0 else{throw ProxyError("辅助服务监听失败")};chown(path,uid_t(service.manifest.uid),0);chmod(path,0o600)
     signal(SIGTERM,SIG_IGN);signal(SIGINT,SIG_IGN);let termination=DispatchSource.makeSignalSource(signal:SIGTERM,queue:service.queue);termination.setEventHandler{try? service.stop();exit(0)};termination.resume()
-    DispatchQueue.global().async {while true {let fd=accept(server,nil,nil);if fd<0{continue};var option:Int32=1;_=setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&option,socklen_t(MemoryLayout<Int32>.size));DispatchQueue.global().async{defer{service.queue.sync{if service.owner==fd{try? service.stop()}};close(fd)};do{do{try service.authorize(fd)}catch{try? UnixChannel.send(JSONEncoder().encode(TunReply(ok:false,message:error.localizedDescription)),fd:fd,deadline:ProcessInfo.processInfo.systemUptime+1);return};while true{let data=try UnixChannel.receive(fd:fd);let request=try JSONDecoder().decode(TunRequest.self,from:data);let response=service.queue.sync{service.handle(request,fd:fd)};try UnixChannel.send(JSONEncoder().encode(response),fd:fd)}}catch{}}}}
+    // 客户端只有应用自身，限制并发连接；accept 失败（如文件描述符耗尽）时退避，避免空转占满 CPU。
+    let slots=DispatchSemaphore(value:4)
+    DispatchQueue.global().async {while true {let fd=accept(server,nil,nil);if fd<0{usleep(100_000);continue};slots.wait();var option:Int32=1;_=setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&option,socklen_t(MemoryLayout<Int32>.size));DispatchQueue.global().async{defer{service.queue.sync{if service.owner==fd{try? service.stop()}};close(fd);slots.signal()};do{do{try service.authorize(fd)}catch{try? UnixChannel.send(JSONEncoder().encode(TunReply(ok:false,message:error.localizedDescription)),fd:fd,deadline:ProcessInfo.processInfo.systemUptime+1);return};while true{let data=try UnixChannel.receive(fd:fd);let request=try JSONDecoder().decode(TunRequest.self,from:data);let response=service.queue.sync{service.handle(request,fd:fd)};try UnixChannel.send(JSONEncoder().encode(response),fd:fd)}}catch{}}}}
     dispatchMain()
 }
 #if !QZ_HELPER_FIXTURE
