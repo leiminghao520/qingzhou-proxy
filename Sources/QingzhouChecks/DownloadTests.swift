@@ -31,4 +31,5 @@ func runAsyncChecks() async {
     expectEqual(framer.receive(Data(repeating:120,count:9000)).count,0);expectEqual(framer.receive(Data("\n".utf8)).count,0)
     expectEqual(framer.receive(Data("tail".utf8),end:true),["tail"])
     print("PASS LogFramerTests.chunkedSecretsAndBound")
+    await runHardeningChecks()
 }
