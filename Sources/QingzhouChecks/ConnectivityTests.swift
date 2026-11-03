@@ -13,9 +13,11 @@ final class ConnectivityFixtureProtocol:URLProtocol {
             let tag="node-00000000-0000-0000-0000-000000000001"
             body=port==18405 ? "{}":"{\"proxies\":{\"proxy\":{\"type\":\"Selector\",\"name\":\"proxy\",\"now\":\"group-a\"},\"group-a\":{\"type\":\"Selector\",\"name\":\"group-a\",\"now\":\"\(tag)\"},\"\(tag)\":{\"type\":\"Hysteria2\",\"name\":\"\(tag)\"}}}"
         }else if url.path.hasSuffix("/delay") {
+            if port==18408 {client?.urlProtocol(self,didFailWithError:URLError(.timedOut));return}
             expectTrue(url.path.contains("00000000-0000-0000-0000-000000000001"),"必须使用核心实际选中的节点")
-            expectTrue(URLComponents(url:url,resolvingAgainstBaseURL:false)?.queryItems?.contains{$0.name=="url" && $0.value==ConfigBuilder.testURL}==true)
-            code=port==18401 ? 503:port==18403 ? 401:200;body="{\"delay\":42}"
+            let target=URLComponents(url:url,resolvingAgainstBaseURL:false)?.queryItems?.first{$0.name=="url"}?.value
+            expectTrue([ConfigBuilder.testURL,ConfigBuilder.secondaryTestURL].contains(target ?? ""))
+            code=(port==18401 || (port==18406 && target==ConfigBuilder.testURL)) ? 503:port==18403 ? 401:200;body="{\"delay\":42}"
         }
         client?.urlProtocol(self,didReceive:HTTPURLResponse(url:url,statusCode:code,httpVersion:"HTTP/1.1",headerFields:nil)!,cacheStoragePolicy:.notAllowed)
         client?.urlProtocol(self,didLoad:Data(body.utf8));client?.urlProtocolDidFinishLoading(self)
@@ -33,16 +35,53 @@ func runConnectivityChecks() async {
     let failed=CoreAPIClient(context:CoreControlContext(port:18401,secret:"synthetic"),protocolClasses:[ConnectivityFixtureProtocol.self])
     let results=await ConnectivityProbe.all(port:27890,client:failed,mode:.rule,protocolClasses:[ConnectivityFixtureProtocol.self])
     expectEqual(results.count,3);expectEqual(results[0].status,.passed);expectEqual(results[1].status,.failed);expectEqual(results[1].category,"节点通道");expectEqual(results[2].status,.passed)
+    expectEqual(ConnectivityResult.combinedSummary(results),results[1].summary)
+    expectEqual(ConnectivityResult.combinedSummary([]),"连通性尚未完成检测")
+    expectEqual(ConnectivityResult.combinedSummary(ConnectivityResult.pending),"连通性尚未完成检测")
+    expectEqual(ConnectivityResult.combinedSummary([ConnectivityResult("入口",.passed,""),ConnectivityResult("节点",.notApplicable,"")]),"适用路径的 HTTPS 连通性正常")
+    expectEqual(ConnectivityResult.combinedSummary([ConnectivityResult("入口",.notApplicable,"")]),"连通性尚未完成检测")
     expectFalse(results[1].summary.contains("正常"));expectFalse(results[1].summary.contains("通过"));await failed.shutdown()
-    for port in [18402,18403,18404,18405] {
+    for port in [18402,18403,18404,18405,18406] {
         let client=CoreAPIClient(context:CoreControlContext(port:port,secret:"synthetic"),protocolClasses:[ConnectivityFixtureProtocol.self])
         let result=await ConnectivityProbe.node(client:client,mode:.rule)
-        expectEqual(result.status,port==18402 ? .passed:.failed)
-        if port==18402{expectEqual(result.milliseconds,42)}
+        expectEqual(result.status,[18402,18406].contains(port) ? .passed:.failed)
+        if [18402,18406].contains(port){expectEqual(result.milliseconds,42)}
         if port==18403{expectEqual(result.category,"鉴权")}
         if port==18404{expectEqual(result.category,"超时")}
         if port==18405{expectEqual(result.category,"控制接口响应格式")}
         let direct=await ConnectivityProbe.node(client:client,mode:.direct);expectEqual(direct.status,.notApplicable)
+        await client.shutdown()
+    }
+    let pass=ConnectivityResult("规则路径",.passed,""),node=ConnectivityResult("节点",.passed,""),na=ConnectivityResult("入口",.notApplicable,"")
+    expectFalse(StartupConnectivityPolicy.allows([],mode:.rule))
+    expectTrue(StartupConnectivityPolicy.allows([pass,node,pass],mode:.rule))
+    expectTrue(StartupConnectivityPolicy.allows([pass,node,na],mode:.direct))
+    for category in ["DNS","超时","TLS","HTTP 响应","连接"] {
+        let failure=ConnectivityResult("测试网站",.failed,category)
+        expectTrue(StartupConnectivityPolicy.allows([failure,node,pass],mode:.rule),"单个测试网站失败允许降级连接")
+        expectTrue(StartupConnectivityPolicy.allows([failure,node,na],mode:.global),"TUN 单个测试网站失败允许保留已验证节点")
+        expectTrue(StartupConnectivityPolicy.allows([pass,node,failure],mode:.rule))
+        expectTrue(StartupConnectivityPolicy.allows([failure,node,failure],mode:.rule),"网站检测不能阻止已核验的接管")
+        expectTrue(StartupConnectivityPolicy.allows([failure,node,na],mode:.direct),"直连模式也不依赖测试网站决定能否连接")
+        expectEqual(StartupConnectivityPolicy.recovery([failure,node]),.healthy,"网站异常不触发已可用节点的重建")
+        expectFalse(ConnectivityHealth.evaluate([failure,node,na]) == .healthy,"降级不能伪报链路正常")
+    }
+    for category in ["鉴权","取消"] {
+        let failure=ConnectivityResult("入口",.failed,category)
+        expectFalse(StartupConnectivityPolicy.allows([pass,node,failure],mode:.rule))
+        expectFalse(StartupConnectivityPolicy.recovery([failure,node]) == .healthy)
+    }
+    expectTrue(StartupConnectivityPolicy.allows([pass,ConnectivityResult("节点",.failed,"超时"),pass],mode:.rule))
+    let timeout=ConnectivityResult("节点",.failed,"超时"),entryFailure=ConnectivityResult("入口",.failed,"代理入口")
+    expectTrue(StartupConnectivityPolicy.allows([pass,timeout,entryFailure],mode:.rule),"复现日志中的节点超时与入口错误组合，保留连接")
+    expectTrue(StartupConnectivityPolicy.allows([timeout,timeout,entryFailure],mode:.global),"全部外部探测失败仍由独立接管核验决定是否连接")
+    expectFalse(ConnectivityHealth.evaluate([pass,timeout,entryFailure]) == .healthy,"连接放行不得伪报通道正常")
+    expectFalse(StartupConnectivityPolicy.allows([ConnectivityResult("规则",.pending,""),node,na],mode:.rule))
+    expectFalse(StartupConnectivityPolicy.recovery([ConnectivityResult("规则",.pending,""),node]) == .healthy)
+    for port in [18401,18404,18408] {
+        let client=CoreAPIClient(context:CoreControlContext(port:port,secret:"synthetic"),protocolClasses:[ConnectivityFixtureProtocol.self])
+        let status=await client.probe(UUID(uuidString:"00000000-0000-0000-0000-000000000001")!)
+        switch status {case .unavailable:expectEqual(port,18401);case .unknown:expectTrue([18404,18408].contains(port));case .available:expectTrue(false)}
         await client.shutdown()
     }
     let tunEntry=await ConnectivityProbe.https(port:nil,entry:true);expectEqual(tunEntry.status,.notApplicable)
@@ -54,5 +93,7 @@ func runConnectivityChecks() async {
     expectNil(CompatibilityDiagnostic.message(safe.replacingOccurrences(of:"identify",with:"https://private")))
     expectNil(CompatibilityDiagnostic.message(safe.replacingOccurrences(of:"timeout",with:"password")))
     expectNil(CompatibilityDiagnostic.message(safe.replacingOccurrences(of:"10000",with:"-1")))
+    // 兼容层新增“上游无响应”类别，必须能展示而不是被白名单丢弃。
+    expectTrue(CompatibilityDiagnostic.message("{\"entry\":\"socks\",\"stage\":\"relay\",\"category\":\"noResponse\",\"elapsedMs\":1005,\"count\":6,\"sentBytes\":3180,\"receivedBytes\":72}")?.contains("category=noResponse")==true)
     print("PASS Connectivity.independentResultsAndPrivateEvents")
 }

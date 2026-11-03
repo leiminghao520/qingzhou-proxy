@@ -4,21 +4,138 @@ import Darwin
 import SystemConfiguration
 
 let args = CommandLine.arguments
+if args.count==2 && args[1]=="disconnect-protection-checks" {
+    do {let tests=DisconnectProtectionTests();try tests.testPolicy();try tests.testLifecycle();try tests.testFailureAndRestart()}
+    catch {CheckHarness.failure("断线保护检查异常："+error.localizedDescription,file:#filePath,line:#line)}
+    print("RESULT disconnect_protection_assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures) kernelWrites=0")
+    exit(CheckHarness.failures==0 ? 0:1)
+}
+if args.count==2 && args[1]=="throughput-checks" {
+    Task {await runThroughputChecks();exit(CheckHarness.failures==0 ? 0:1)}
+    dispatchMain()
+}
+
+if args.count==2 && args[1]=="office-checks" {
+    Task {
+        do {try await runOfficeFeatureChecks()}catch{CheckHarness.failure("办公功能检查异常："+error.localizedDescription,file:#filePath,line:#line)}
+        print("RESULT office_assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
+        exit(CheckHarness.failures==0 ? 0:1)
+    }
+    dispatchMain()
+}
+if args.count==2 && args[1]=="experience-checks" {
+    Task { @MainActor in
+        await runConnectivityChecks()
+        await runStabilityAsyncChecks()
+        print("RESULT experience_assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
+        exit(CheckHarness.failures==0 ? 0:1)
+    }
+    dispatchMain()
+}
+if args.count==2 && args[1]=="corporate-dns-checks" {
+    let t=CorporateDNSTests()
+    do {try t.testSelection();try t.testResponses();try t.testTransactions();try t.testOfficeWiFi()} catch {CheckHarness.failure(error.localizedDescription,file:#filePath,line:#line)}
+    print("RESULT corporate_dns_assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
+    exit(CheckHarness.failures==0 ? 0:1)
+}
+if args.count == 2 && args[1] == "vps-checks" {
+    Task {
+        do {try await runVPSChecks()} catch {CheckHarness.failure("VPS 联动检查异常："+error.localizedDescription,file:#filePath,line:#line)}
+        print("RESULT vps_assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
+        exit(CheckHarness.failures == 0 ? 0 : 1)
+    }
+    dispatchMain()
+}
+if args.count == 2 && args[1] == "quit-recovery-checks" {
+    Task {
+        do {try await runQuitRecoveryChecks()} catch {CheckHarness.failure("退出恢复检查异常："+error.localizedDescription,file:#filePath,line:#line)}
+        print("RESULT quit_recovery_assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
+        exit(CheckHarness.failures == 0 ? 0 : 1)
+    }
+    dispatchMain()
+}
+if args.count == 3 && args[1] == "startup-benchmark" {
+    Task {
+        do {try await runStartupBenchmark(output:URL(fileURLWithPath:args[2]));exit(0)}
+        catch {print("启动隔离基准失败："+error.localizedDescription);exit(1)}
+    }
+    dispatchMain()
+}
+if args.count == 2 && args[1] == "startup-checks" {
+    Task {
+        do {try await runStartupOptimizationChecks()} catch {CheckHarness.failure("启动优化检查异常："+error.localizedDescription,file:#filePath,line:#line)}
+        print("RESULT startup_assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
+        exit(CheckHarness.failures == 0 ? 0 : 1)
+    }
+    dispatchMain()
+}
+if args.count == 3 && args[1] == "traffic-transport-checks", let port = Int(args[2]), (1...65535).contains(port) {
+    Task { @MainActor in
+        await runTrafficTransportChecks(port: port)
+        exit(CheckHarness.failures == 0 ? 0 : 1)
+    }
+    dispatchMain()
+}
+if args.count == 2 && args[1] == "optimization-checks" {
+    Task { @MainActor in
+        await runRuntimeOptimizationChecks()
+        print("RESULT optimization_assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
+        exit(CheckHarness.failures == 0 ? 0 : 1)
+    }
+    dispatchMain()
+}
+if args.count>=2 && args[1]=="network-acceptance" {
+    Task{@MainActor in do {try await runNetworkAcceptance(args);exit(0)}catch{print("实网检查失败："+Redactor.redact(error.localizedDescription));exit(1)}}
+    dispatchMain()
+}
+
+if args.count==3 && args[1]=="original-route-check" {
+    do {
+        let cidrs=try JSONDecoder().decode([String].self,from:Data(args[2].utf8))
+        let table=try NetworkInspection.command("/usr/sbin/netstat",["-rn"]),prefixes=TunAddressPlan.routePrefixes(table)
+        for cidr in cidrs {
+            try ConfigBuilder.validate(RoutingRule(kind:.cidr,value:cidr,action:.direct))
+            if TunAddressPlan.containsRoute(cidr,prefixes:prefixes) {print("EXISTING "+cidr);continue}
+            let host=String(cidr.split(separator:"/")[0])
+            let info=try NetworkInspection.command("/sbin/route",NetworkInspection.routeArguments(.get,destination:host,ipv6:host.contains(":")))
+            guard let gateway=NetworkInspection.routeGateway(info),let interface=NetworkInspection.routeField("interface",info) else {throw ProxyError("原出口无法确认："+cidr)}
+            print("PLANNED "+cidr+" → "+interface+" / "+gateway)
+        }
+        print("ORIGINAL_ROUTE_CHECK_OK（只读，未写路由）");exit(0)
+    }catch{print("ORIGINAL_ROUTE_CHECK_FAILED "+error.localizedDescription);exit(1)}
+}
 if args.count==2 && args[1]=="capture-snapshot" {
-    do {let store=SCDynamicStoreCreate(nil,"轻舟只读快照" as CFString,nil,nil)!;let global=SCDynamicStoreCopyValue(store,"State:/Network/Global/IPv4" as CFString) as! [String:Any];let routes=try NetworkInspection.command("/usr/sbin/netstat",["-rn"]);let snapshot=try NetworkSnapshot.read(store:store,primary:global["PrimaryInterface"] as! String,routes:routes);let plan=try CapturePlan.make(snapshot:snapshot,extraCIDRs:[],extraDomains:[]);print("SNAPSHOT_OK routes=\(snapshot.routes.count) protected=\(plan.protectedRoutes.count)");for resolver in snapshot.resolvers {print("DNS interface=\(resolver.interface) servers=\(resolver.servers.count) default=\(resolver.defaultResolver) domains=\(resolver.protectedDomains.count)")};exit(0)}catch{print("SNAPSHOT_FAILED "+error.localizedDescription);exit(1)}
+    do {let store=SCDynamicStoreCreate(nil,"汐航只读快照" as CFString,nil,nil)!;let global=SCDynamicStoreCopyValue(store,"State:/Network/Global/IPv4" as CFString) as! [String:Any];let routes=try NetworkInspection.command("/usr/sbin/netstat",["-rn"]);let snapshot=try NetworkSnapshot.read(store:store,primary:global["PrimaryInterface"] as! String,routes:routes);let plan=try CapturePlan.make(snapshot:snapshot,extraCIDRs:[],extraDomains:[]);print("SNAPSHOT_OK routes=\(snapshot.routes.count) protected=\(plan.protectedRoutes.count)");for resolver in snapshot.resolvers {print("DNS interface=\(resolver.interface) servers=\(resolver.servers.count) default=\(resolver.defaultResolver) domains=\(resolver.protectedDomains.count)")};exit(0)}catch{print("SNAPSHOT_FAILED "+error.localizedDescription);exit(1)}
+}
+if args.count==4 && args[1]=="full-capture-fixture" {
+    do {
+        let folder=URL(fileURLWithPath:args[2]),ports=try JSONDecoder().decode([String:Int].self,from:Data(args[3].utf8))
+        let node=try NodeParser.parse("ss://aes-128-gcm:synthetic@127.0.0.1:\(ports["server"]!)")
+        let credentials=MemoryCredentials();try credentials.set(node.secret,for:node.node.credentialRef)
+        var state=AppState();state.nodes=[node.node];state.selectedPolicy = .node(node.node.id);state.captureMode = .compatible;state.listenPort=ports["core"]!;state.addressFamilyPolicy = .ipv4Only
+        state.rules=[RoutingRule(kind:.domain,value:"override.test",action:.direct),RoutingRule(kind:.domain,value:"qq.com",action:.proxy)]
+        let shadow=try JSONDecoder().decode(ShadowrocketConfiguration.self,from:Data(#"{"version":1,"name":"synthetic","sourceFile":"fixture","sourceMode":"Config","general":{},"hosts":{},"rules":[{"kind":"FINAL","value":"","policy":"PROXY","noResolve":false}],"rewrites":[],"assets":{},"assetHashes":{}}"#.utf8))
+        state.shadowrocket=shadow;state.httpCompatibilityEnabled=true
+        let control=CoreControlContext(port:ports["control"]!,secret:String(repeating:"a",count:64))
+        let data=try ConfigBuilder.build(state:state,credentials:credentials,control:control,httpCompatibilityPort:ports["http"]!)
+        try SecureFile.write(shadow.gatewayData(listenPort:ports["gateway"]!,corePort:ports["core"]!,httpPort:ports["http"]!,control:control,state:state),to:folder.appendingPathComponent("gateway.json"))
+        var object=try JSONSerialization.jsonObject(with:data) as! [String:Any]
+        var dns=object["dns"] as! [String:Any];dns["servers"]=["local","remote"].map{["type":"udp","tag":$0,"server":"127.0.0.1","server_port":ports[$0+"DNS"]!] as [String:Any]};object["dns"]=dns
+        try SecureFile.write(JSONSerialization.data(withJSONObject:object),to:folder.appendingPathComponent("core.json"));print("FULL_CAPTURE_FIXTURE_READY");exit(0)
+    }catch{print(error.localizedDescription);exit(1)}
 }
 if args.count==4 && ["combined-fixture","tun-config-fixture"].contains(args[1]) {
     do {
         let folder=URL(fileURLWithPath:args[2])
         let ports=try JSONDecoder().decode([String:Int].self,from:Data(args[3].utf8))
         let raw="""
-        {"version":1,"name":"synthetic","sourceFile":"fixture","sourceMode":"Config","general":{},"hosts":{},"rules":[{"kind":"USER-AGENT","value":"SyntheticDirect*","policy":"DIRECT","noResolve":false},{"kind":"FINAL","value":"","policy":"PROXY","noResolve":false}],"rewrites":[{"pattern":"^http://rewrite.test/","replacement":"https://target.test/","status":302}],"assets":{},"assetHashes":{}}
+        {"version":1,"name":"synthetic","sourceFile":"fixture","sourceMode":"Config","general":{},"hosts":{},"rules":[{"kind":"USER-AGENT","value":"SyntheticDirect*","policy":"DIRECT","noResolve":false},{"kind":"IP-CIDR","value":"192.0.2.0/24","policy":"DIRECT","noResolve":false},{"kind":"FINAL","value":"","policy":"PROXY","noResolve":false}],"rewrites":[{"pattern":"^http://rewrite.test/","replacement":"https://target.test/","status":302}],"assets":{},"assetHashes":{}}
         """
         let shadow=try JSONDecoder().decode(ShadowrocketConfiguration.self,from:Data(raw.utf8))
         let candidate=try NodeParser.parse("ss://aes-128-gcm:synthetic@127.0.0.1:\(ports["server"]!)")
         let credentials=MemoryCredentials();try credentials.set(candidate.secret,for:candidate.node.credentialRef)
         var state=AppState();state.nodes=[candidate.node];state.selectedPolicy = .node(candidate.node.id)
-        state=try shadow.applying(to:state);state.listenPort=ports["core"]!;state.captureMode = .tun;state.addressFamilyPolicy = .ipv4Only;state.dnsPreference = .system
+        state=try shadow.applying(to:state);state.httpCompatibilityEnabled=true;state.listenPort=ports["core"]!;state.captureMode = .tun;state.addressFamilyPolicy = .ipv4Only;state.dnsPreference = .system
         let control=CoreControlContext(port:ports["control"]!,secret:String(repeating:"a",count:64))
         let data=try TunConfigBuilder.build(state:state,credentials:credentials,control:control,address4:"100.64.1.1/30",address6:"fd71:717a:1::1/126",originalDNS:["127.0.0.1"],bypass:[],httpCompatibilityPort:ports["http"]!)
         var config=try JSONSerialization.jsonObject(with:data) as! [String:Any]
@@ -57,12 +174,12 @@ if args.count==4 && args[1]=="full-subscription-install" {
         guard let url=URL(string:source),url.scheme=="https",url.lastPathComponent=="qingzhou.json" else{throw ProxyError("完整订阅地址无效")}
         let text=try String(contentsOfFile:args[2],encoding:.utf8)
         let preview=try ProfileImporter.parse(text)
-        guard preview.fullConfiguration != nil else{throw ProxyError("需要轻舟完整订阅")}
+        guard preview.fullConfiguration != nil else{throw ProxyError("需要汐航完整订阅")}
         let directory=FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("Qingzhou")
         let fd=open(directory.appendingPathComponent("session.lock").path,O_RDWR)
         guard fd>=0 else{throw ProxyError("配置锁缺失")};defer{close(fd)}
-        guard flock(fd,LOCK_EX|LOCK_NB)==0 else{throw ProxyError("请先正常退出轻舟")}
-        let credentials=KeychainStore()
+        guard flock(fd,LOCK_EX|LOCK_NB)==0 else{throw ProxyError("请先正常退出汐航")}
+        let credentials=UnifiedCredentialStore.native
         let store=try NodeStore(file:directory.appendingPathComponent("state.json"),credentials:credentials)
         // 变更前保存含凭据的加密快照，备份口令仅进入钥匙串。
         let snapshot=try BackupService.snapshot(store.catalog,credentials:credentials)
@@ -116,7 +233,8 @@ if args.count >= 5 && args[1] == "config" {
         let credentials = MemoryCredentials();try credentials.set(c.secret,for:c.node.credentialRef)
         if let secret = c.obfsSecret {try credentials.set(secret,for:c.node.credentialRef + ".obfs")}
         var state = AppState();state.listenPort = Int(args[4]) ?? 0;state.rulesEnabled = false
-        if args.count > 5 && args[5] == "rules" { state.rulesEnabled = true;state.rules = [RoutingRule(kind:.domain,value:"reject.test",action:.reject),RoutingRule(kind:.domain,value:"direct.test",action:.direct),RoutingRule(kind:.domain,value:"proxy.test",action:.proxy)] }
+        if args.count > 5 && args[5] == "rules" { state.rulesEnabled = true;state.rules = [RoutingRule(kind:.domain,value:"reject.test",action:.reject),RoutingRule(kind:.domain,value:"direct.test",action:.direct),RoutingRule(kind:.domain,value:"proxy.test",action:.proxy),RoutingRule(kind:.suffix,value:"corp.test",action:.direct)] }
+        if args.contains("https-dns") {state.dnsPreference = .httpsProxy}
         try SecureFile.write(ConfigBuilder.build(node:c.node,state:state,credentials:credentials),to:URL(fileURLWithPath:args[3]))
         print("CONFIG_OK");exit(0)
     } catch {print(Redactor.redact(error.localizedDescription));exit(1)}
@@ -130,7 +248,8 @@ if args.count >= 5 && args[1] == "subscription-config" {
             let credentials = MemoryCredentials();try credentials.set(c.secret,for:c.node.credentialRef)
             if let obfs = c.obfsSecret {try credentials.set(obfs,for:c.node.credentialRef + ".obfs")}
             var state = AppState();state.listenPort = Int(args[4]) ?? 0;state.rulesEnabled = false
-            try SecureFile.write(ConfigBuilder.build(node:c.node,state:state,credentials:credentials),to:URL(fileURLWithPath:args[3]))
+            if args.contains("https-dns") {state.dnsPreference = .httpsProxy}
+        try SecureFile.write(ConfigBuilder.build(node:c.node,state:state,credentials:credentials),to:URL(fileURLWithPath:args[3]))
             print("SUBSCRIPTION_CONFIG_OK nodes=\(preview.candidates.count)");exit(0)
         } catch {print(Redactor.redact(error.localizedDescription));exit(1)}
     }
@@ -208,6 +327,30 @@ func run(_ name:String,_ instance:CheckCase,_ body:() throws -> Void) {
     do {try instance.tearDownWithError()} catch {CheckHarness.failure("测试清理失败",file:#filePath,line:#line)}
     scenarios += 1;print("\(CheckHarness.failures == before ? "PASS" : "FAIL") \(name)")
 }
+func runUnifiedCredentialChecks() {
+    let t=UnifiedCredentialTests()
+    run("Credentials.mergeAndSingleRead",t){try t.testMergeAndSingleRead()}
+    run("Credentials.missingAndTombstones",t){try t.testMissingAndTombstones()}
+    run("Credentials.failureAtomicity",t){try t.testFailureAtomicity()}
+    run("Credentials.corruptionAndDenied",t){try t.testCorruptionAndDeniedAreNotMissing()}
+    run("Credentials.cancellationStopsOperation",t){try t.testCancellationStopsOperation()}
+    run("Credentials.silentPolicyAndCache",t){try t.testSilentPolicyAndSessionCache()}
+}
+if args.count==2 && args[1]=="credential-checks" {
+    runUnifiedCredentialChecks()
+    let ux=KeychainUXTests()
+    run("Credentials.existingAuthorization",ux){try ux.testAuthorizationRetryAndCache()}
+    run("Credentials.existingErrors",ux){try ux.testDistinctErrorsAndAtomicCache()}
+    print("RESULT credential_scenarios=\(scenarios) assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
+    exit(CheckHarness.failures==0 ? 0:1)
+}
+runNetworkBypassChecks()
+if args.count==2 && args[1]=="bypass-checks" {
+    print("RESULT bypass_scenarios=\(scenarios) assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
+    exit(CheckHarness.failures==0 ? 0:1)
+}
+runUnifiedCredentialChecks()
+do {let t=RepairTests();run("Repair.compatibilityMigration",t){try t.testCompatibilityMigrationAndImport()};run("Repair.importTypes",t){try t.testImportTypesAndNoResolve()};run("Repair.orderedDNS",t){try t.testOrderedDNSAndMode()};run("Repair.unknownFallback",t){t.testUnknownFallbackAndHealth()};run("Repair.dnsCompression",t){t.testDNSPacketCompression()};run("Repair.searchDomainIsolation",t){try t.testSearchDomainIsolation()}}
 do { let instance = ConfigTests(); run("ConfigTests.testHysteriaPreservesUserpassAndObfs",instance) { try instance.testHysteriaPreservesUserpassAndObfs() } }
 do { let instance = ConfigTests(); run("ConfigTests.testProtocolConfigurations",instance) { try instance.testProtocolConfigurations() } }
 do { let instance = ConfigTests(); run("ConfigTests.testRulesAndModes",instance) { try instance.testRulesAndModes() } }
@@ -220,6 +363,10 @@ do { let instance = ParserTests(); run("ParserTests.testInvalidInputsAreRejected
 do { let instance = ParserTests(); run("ParserTests.testListIsAtomicAndBounded",instance) { try instance.testListIsAtomicAndBounded() } }
 do { let instance = ParserTests(); run("ParserTests.testPortRanges",instance) { try instance.testPortRanges() } }
 do { let instance = ParserTests(); run("ParserTests.testRedaction",instance) { try instance.testRedaction() } }
+do {let t=FullCaptureTests();run("FullCapture.domestic",t){try t.testDomesticPriorityAndDNS()};run("FullCapture.dynamicProtection",t){try t.testDynamicAddressProtectionAndFailure()};run("FullCapture.loopback",t){try t.testLoopbackAndCorporateFallback()};run("FullCapture.frozenPathsAndDiagnostics",t){try t.testFrozenBypassPlanAndDiagnostics()};run("FullCapture.ownershipView",t){try t.testOwnershipUsesCompleteRouteView()};run("FullCapture.multicastScope",t){try t.testMulticastPreservesSystemScope()}}
+do {let instance=RepairTests();run("RepairTests.corporateProxyBypass",instance){try instance.testCorporateProxyBypass()}}
+do {let instance=RepairTests();run("RepairTests.tongdunProtectionDraft",instance){try instance.testTongdunProtectionDraft()}}
+do {let instance=FullCaptureTests();run("FullCapture.effectiveDNSPriority",instance){try instance.testEffectiveDNSPriority()};run("FullCapture.reclaimedCorporateHostRoute",instance){try instance.testReclaimedCorporateHostRoute()}}
 do { let instance = RecoveryTests(); run("RecoveryTests.testOriginalPACAndProxyRestored",instance) { try instance.testOriginalPACAndProxyRestored() } }
 do { let instance = RecoveryTests(); run("RecoveryTests.testUnrelatedExternalChangesPreserved",instance) { try instance.testUnrelatedExternalChangesPreserved() } }
 do { let instance = RecoveryTests(); run("RecoveryTests.testOwnedFieldConflictDoesNotOverwrite",instance) { try instance.testOwnedFieldConflictDoesNotOverwrite() } }
@@ -249,17 +396,51 @@ do {let instance=DailyTests();run("DailyTests.testTunModelAndConflictDetection",
 do{let tests=FullSubscriptionTests();run("FullSubscriptionTests.localRulesAndRollback",tests){try tests.testFullSyncPreservesLocalRulesAndRollback()};run("FullSubscriptionTests.invalidDocuments",tests){try tests.testInvalidDocumentsPreserveOldData()}}
 do{let t=NetworkSafetyTests();run("NetworkSafety.proxyOwnership",t){t.testPersistentProxyOwnership()};run("NetworkSafety.conflicts",t){t.testConflictDetection()};run("NetworkSafety.deadProxyOwnership",t){t.testDeadProxyRestorationAndOwnership()};run("NetworkSafety.unknownHealth",t){t.testUnknownHealthDoesNotMeanNodeFailure()};run("NetworkSafety.privateLog",t){try t.testBoundedPrivateLogAndRedaction()}}
 do{let t=NetworkPolicyTests();run("NetworkPolicy.preparationRace",t){try t.testPreparationRaceAndDNSBudget()};run("NetworkPolicy.tunAddresses",t){try t.testTunAddressAllocation()};run("NetworkPolicy.corporateRoutes",t){t.testSpecificCorporateRoutesAndSystemTunnels()};run("NetworkPolicy.migration",t){try t.testMigrationAndImport()};run("NetworkPolicy.coreMatrix",t){try t.testCoreNetworkMatrix()}}
+do {let t=DynamicVPNTests();run("DynamicVPN.optionalDNSAndGeneration",t){try t.testOptionalDNSAndGeneration()};run("DynamicVPN.stableWindowAndPartitions",t){try t.testStableWindowAndPartitions()};run("DynamicVPN.multiInterfaceRoutes",t){try t.testMultiInterfaceRoutes()}}
+do {let t=CorporateDNSTests();run("CorporateDNS.selection",t){try t.testSelection()};run("CorporateDNS.responses",t){try t.testResponses()};run("CorporateDNS.transactions",t){try t.testTransactions()};run("CorporateDNS.officeWiFi",t){try t.testOfficeWiFi()}}
 do{let t=CapturePlanTests();run("CapturePlan.protection",t){try t.testProtectionAndResolverSelection()};run("CapturePlan.loopback",t){try t.testLoopbackRelay()};run("CapturePlan.dnsRetries",t){try t.testDNSRetriesAndNoPublicFallback()};run("CapturePlan.routesOwnership",t){try t.testRouteParsingAndOwnership()};run("CapturePlan.core",t){try t.testCoreConfigurationProtectionPrecedence()}}
 do{let t=KeychainUXTests();run("KeychainUX.authorization",t){try t.testAuthorizationRetryAndCache()};run("KeychainUX.errors",t){try t.testDistinctErrorsAndAtomicCache()}}
+do{let t=StabilityTests();run("Stability.connectionReliability",t){t.testConnectionReliability()};run("Stability.snapshotRetryAndLatency",t){t.testSnapshotRetryAndLatency()};run("Stability.dnsQueueBoundsBudgetAndStop",t){t.testDNSQueueBoundsBudgetAndStop()};run("Stability.subscriptionClassificationAndRetry",t){t.testSubscriptionClassificationAndRetry()}}
+do {let t=OptimizationFeatureTests()
+run("OptimizationFeatures.rotatingLog",t){try t.testRotatingLogAndBounds()}
+run("OptimizationFeatures.subscriptionAmbiguity",t){try t.testMatchingAmbiguityAndMetadata()}
+run("OptimizationFeatures.ruleText",t){try t.testRuleTextRoundtripAndRejections()}
+run("OptimizationFeatures.clipboardPrivacy",t){t.testClipboardPrivacyAndDeduplication()}
+run("OptimizationFeatures.history",t){try t.testHistoryCountersRetentionAndRestart()}
+run("OptimizationFeatures.realityRoundtrip",t){try t.testRealityShareRoundtrip()}
+}
+
+do {let t=DomesticRoutingIndexTests()
+run("DomesticRouting.indexedSemantics",t){try t.testIndexedDomainsPreserveMatchingSemantics()}
+run("DomesticRouting.conflictOrder",t){t.testConflictOrderAndDirectRulesArePreserved()}
+}
+
+do{let t=StoreTests();run("StoreTests.credentialReuse",t){try t.testUnchangedCredentialsReuseAndRollback()}}
+do{let t=KeychainUXTests();run("KeychainUX.isolation",t){try t.testInjectedStoresStayIsolated()};run("HelperInstaller.components",t){try t.testHelperComponentComparison()}}
+
 Task {
+    do {try await runVPSChecks()} catch {CheckHarness.failure("VPS 联动检查异常",file:#filePath,line:#line)}
+    do {try await runStartupOptimizationChecks()} catch {CheckHarness.failure("启动优化检查异常",file:#filePath,line:#line)}
+    do {try await runQuitRecoveryChecks()} catch {CheckHarness.failure("退出恢复检查异常",file:#filePath,line:#line)}
+    await runRuntimeOptimizationChecks()
+    await runStabilityAsyncChecks()
+    do {try await runBypassProtocolChecks()} catch {CheckHarness.failure("绕过辅助协议检查异常："+error.localizedDescription,file:#filePath,line:#line)}
     await runCaptureActivationChecks()
     await runRecoveryContinuationChecks()
+    await runHelperRecoveryPolicyChecks()
+    await runHelperReadinessChecks()
+    try await runDNSResolutionPolicyChecks()
     await runPortReuseChecks()
     await runConnectivityChecks()
+    await runRepairHealthChecks()
     await runNetworkProbeChecks()
+    await runThroughputChecks()
+    await runDownloadCancellationChecks()
+    do{try await runHistoryTransactionChecks()}catch{CheckHarness.failure("流量配置事务检查异常",file:#filePath,line:#line)}
+    await runPooledDownloadChecks()
     await runAsyncChecks()
     do{try await runTransactionChecks()}catch{CheckHarness.failure("事务场景异常",file:#filePath,line:#line)}
-    print("RESULT scenarios=\(scenarios + 19) assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
+    print("RESULT scenarios=\(scenarios + 50) assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures)")
     exit(CheckHarness.failures == 0 ? 0 : 1)
 }
 dispatchMain()

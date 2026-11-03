@@ -1,0 +1,8 @@
+<section class="panel chart-panel">
+<div class="panel-head"><div><h2 id="traffic-chart-heading">流量趋势</h2><p class="muted">上传与下载 · 按采样区间汇总</p></div><div class="segmented" role="group" aria-label="统计周期">{% for value,label in [('24h','24 小时'),('7d','7 天'),('30d','30 天')] %}<a class="{{ 'selected' if metrics.period==value else '' }}" href="{{ url_for('dashboard',period=value) }}" {% if metrics.period==value %}aria-current="true"{% endif %}>{{ label }}</a>{% endfor %}</div></div>
+<div class="chart-legend"><span><i class="download-dot"></i>下载</span><span><i class="upload-dot"></i>上传</span><span class="muted">空缺表示尚无有效数据</span></div>
+<p class="visually-hidden" id="chart-description">横轴表示北京时间，纵轴表示每个采样区间的流量大小。青绿色线为下载，蓝色线为上传；空缺采样不计入用量。可展开下方数据表查看具体数值。</p>
+<div class="chart-box"><canvas id="traffic-chart" aria-labelledby="traffic-chart-heading" aria-describedby="chart-description chart-quality" role="img" data-points="{{ metrics.points|tojson|forceescape }}"></canvas><p id="chart-empty" role="status" hidden>开始采集后，这里将显示流量趋势</p></div>
+<p class="muted" id="chart-quality">{{ '数据连续' if metrics.complete else '所选时段数据不完整；缺失区间未计入用量。' }}</p>
+<details class="chart-data"><summary>查看趋势数据表</summary><div class="table-wrap"><table><caption class="visually-hidden">每个采样区间的上传、下载和数据完整性</caption><thead><tr><th scope="col">北京时间</th><th scope="col">上传</th><th scope="col">下载</th><th scope="col">数据</th></tr></thead><tbody id="chart-rows">{% for point in metrics.points %}<tr><td>{{ point.label }}</td><td>{{ point.tx|bytes }}</td><td>{{ point.rx|bytes }}</td><td>{{ '完整' if point.complete else '不完整' }}</td></tr>{% endfor %}</tbody></table></div></details>
+</section>

@@ -64,13 +64,16 @@ public enum ConfigBuilder {
             rules.append(["domain":["localhost"],"action":"route","outbound":"direct"])
             for r in state.rules {
                 try validate(r)
+                if [.cidr,.geoip,.asn].contains(r.kind),r.noResolve != true {rules.append(["action":"resolve","strategy":state.effectiveAddressFamilyPolicy.strategy])}
                 if r.kind == .userAgent {continue}
                 let key = r.kind == .domain ? "domain" : r.kind == .suffix ? "domain_suffix" : r.kind == .keyword ? "domain_keyword" : "ip_cidr"
                 var value: [String:Any] = try coreCondition(r,state:state)
                 if r.action == .reject { value["action"] = "reject" } else { value["action"] = "route"; value["outbound"] = r.action.rawValue }
+                if value["outbound"] as? String=="proxy",![.cidr,.geoip,.asn].contains(r.kind) {var resolution=try coreCondition(r,state:state);resolution["action"]="resolve";resolution["strategy"]=state.effectiveAddressFamilyPolicy.strategy;rules.append(resolution)}
                 rules.append(value)
             }
         }
+        rules.append(["action":"resolve","strategy":state.effectiveAddressFamilyPolicy.strategy])
         var config: [String:Any] = ["log":["level":"info","timestamp":true],"inbounds":[["type":"mixed","tag":"mixed-in","listen":"127.0.0.1","listen_port":state.listenPort,"set_system_proxy":false]],"outbounds":[try outbound(node, credentials: credentials),["type":"direct","tag":"direct"]],"route":["rules":rules,"final":"proxy","default_domain_resolver":"local"],"dns":["servers":[["type":"local","tag":"local"]],"final":"local"]]
         NetworkPolicy.apply(&config,state:state)
         return try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted,.sortedKeys])

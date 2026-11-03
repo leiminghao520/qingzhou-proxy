@@ -1,0 +1,16 @@
+[Unit]
+Description=Collect Hysteria 2 per-user traffic statistics
+After=hy2-admin.service
+
+[Service]
+Type=oneshot
+User=hy2admin
+Group=hy2admin
+WorkingDirectory=/opt/hy2-admin
+EnvironmentFile=/etc/hy2-admin.env
+ExecStart=/opt/hy2-admin/.venv/bin/python /opt/hy2-admin/collect_stats.py
+UMask=0077
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/hy2-admin

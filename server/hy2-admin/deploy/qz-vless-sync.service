@@ -1,0 +1,9 @@
+[Unit]
+Description=Synchronize device credentials for VLESS
+After=network.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/hy2-admin.env
+ExecStart=/opt/hy2-admin/.venv/bin/python /opt/hy2-admin/vless_sync.py
+UMask=0077

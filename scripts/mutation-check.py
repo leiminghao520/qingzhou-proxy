@@ -4,12 +4,13 @@ root=pathlib.Path(__file__).resolve().parent.parent
 stage=root/'.build/mutation-stage';stage.mkdir(parents=True,exist_ok=True)
 shutil.copytree(root/'Sources',stage/'Sources',dirs_exist_ok=True)
 shutil.copytree(root/'scripts',stage/'scripts',dirs_exist_ok=True)
+shutil.copytree(root/'Resources',stage/'Resources',dirs_exist_ok=True)
 shutil.copy2(root/'Package.swift',stage/'Package.swift')
 if not (stage/'Vendor').exists():(stage/'Vendor').symlink_to(root/'Vendor',target_is_directory=True)
 mutations=[
  ('未知参数放行','NodeParser.swift','guard allowed.contains(item.name) else','guard true else'),
  ('限制端口上界为65534','NodeParser.swift','(1...65535).contains(port)','(1...65534).contains(port)'),
- ('禁用订阅响应大小限制','ImportService.swift','if self.data.count + data.count > limit','if false'),
+ ('禁用订阅响应大小限制','ExternalDownloadClient.swift','if item.data.count + data.count > item.limit','if false'),
  ('失效默认策略改为直连','PolicyValidator.swift','state.ruleFinal = .reject','state.ruleFinal = .direct'),
  ('自动策略容差改为500','MultiConfigBuilder.swift','"tolerance":50','"tolerance":500'),
  ('自动策略间隔改为10分钟','MultiConfigBuilder.swift','"interval":"5m"','"interval":"10m"')]

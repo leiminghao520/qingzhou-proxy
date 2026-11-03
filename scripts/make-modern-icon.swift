@@ -1,158 +1,49 @@
 import AppKit
 import Foundation
 
-var candidateId = "A"
-var outputDir = ".build/icon-png"
-
-if CommandLine.arguments.count > 2 {
-    candidateId = CommandLine.arguments[1]
-    outputDir = CommandLine.arguments[2]
-} else if CommandLine.arguments.count == 2 {
-    let arg = CommandLine.arguments[1]
-    if ["A", "B", "C", "D"].contains(arg.uppercased()) {
-        candidateId = arg.uppercased()
-    } else {
-        outputDir = arg
-    }
+// 与界面帆形保持同一轮廓；所有尺寸直接矢量绘制，避免缩小时模糊。
+let output = URL(fileURLWithPath: CommandLine.arguments.dropFirst().first ?? ".build/icon-png")
+try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+let sailSVG = "M 310 632 C 426 518 525 353 686 240 C 646 393 655 513 725 596 C 575 557 447 578 310 632 Z"
+let foldSVG = "M 310 632 C 435 561 554 490 686 240 C 569 457 470 572 310 632 Z"
+let tideSVG = "M 285 716 C 422 637 576 771 748 668"
+let svg = """
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#162C49"/><stop offset="1" stop-color="#0C162B"/></linearGradient><linearGradient id="sail" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#B2FFF0"/><stop offset=".5" stop-color="#29D7D5"/><stop offset="1" stop-color="#5865E8"/></linearGradient></defs>
+<rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+<rect x="65" y="65" width="894" height="894" rx="199" fill="none" stroke="#FFFFFF" stroke-opacity=".14" stroke-width="2"/>
+<path d="\(sailSVG)" fill="url(#sail)"/><path d="\(foldSVG)" fill="#DCFFF8" fill-opacity=".45"/>
+<path d="\(tideSVG)" fill="none" stroke="#53DFD8" stroke-width="32" stroke-linecap="round"/>
+</svg>
+"""
+try Data(svg.utf8).write(to: output.appendingPathComponent("Xihang.svg"))
+let menuSVG = """
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><path d="\(sailSVG)"/><path d="\(tideSVG)" fill="none" stroke="black" stroke-width="42" stroke-linecap="round"/></svg>
+"""
+try Data(menuSVG.utf8).write(to: output.appendingPathComponent("XihangMenuTemplate.svg"))
+func sail() -> CGPath {
+    let p = CGMutablePath(); p.move(to: CGPoint(x:310,y:632))
+    p.addCurve(to: CGPoint(x:686,y:240), control1: CGPoint(x:426,y:518), control2: CGPoint(x:525,y:353))
+    p.addCurve(to: CGPoint(x:725,y:596), control1: CGPoint(x:646,y:393), control2: CGPoint(x:655,y:513))
+    p.addCurve(to: CGPoint(x:310,y:632), control1: CGPoint(x:575,y:557), control2: CGPoint(x:447,y:578)); p.closeSubpath(); return p
 }
-
-struct Candidate {
-    let id: String
-    let fileName: String
-    let cropRect: NSRect
-    let bgFillColor: NSColor
+func color(_ r:CGFloat,_ g:CGFloat,_ b:CGFloat)->CGColor { CGColor(red:r/255,green:g/255,blue:b/255,alpha:1) }
+for size in [16,32,64,128,256,512,1024] {
+    let rep = NSBitmapImageRep(bitmapDataPlanes:nil,pixelsWide:size,pixelsHigh:size,bitsPerSample:8,samplesPerPixel:4,hasAlpha:true,isPlanar:false,colorSpaceName:.deviceRGB,bytesPerRow:0,bitsPerPixel:0)!
+    let context = NSGraphicsContext(bitmapImageRep:rep)!.cgContext
+    context.scaleBy(x:CGFloat(size)/1024,y:CGFloat(size)/1024)
+    context.translateBy(x:0,y:1024);context.scaleBy(x:1,y:-1)
+    let background=CGPath(roundedRect:CGRect(x:64,y:64,width:896,height:896),cornerWidth:200,cornerHeight:200,transform:nil)
+    context.saveGState(); context.addPath(background);context.clip()
+    context.drawLinearGradient(CGGradient(colorsSpace:CGColorSpaceCreateDeviceRGB(),colors:[color(22,44,73),color(12,22,43)] as CFArray,locations:[0,1])!,start:CGPoint(x:64,y:64),end:CGPoint(x:960,y:960),options:[])
+    context.restoreGState()
+    context.saveGState();context.addPath(sail());context.clip()
+    context.drawLinearGradient(CGGradient(colorsSpace:CGColorSpaceCreateDeviceRGB(),colors:[color(178,255,240),color(41,215,213),color(88,101,232)] as CFArray,locations:[0,0.5,1])!,start:CGPoint(x:310,y:240),end:CGPoint(x:725,y:632),options:[.drawsBeforeStartLocation,.drawsAfterEndLocation])
+    context.restoreGState()
+    let fold=CGMutablePath();fold.move(to:CGPoint(x:310,y:632));fold.addCurve(to:CGPoint(x:686,y:240),control1:CGPoint(x:435,y:561),control2:CGPoint(x:554,y:490));fold.addCurve(to:CGPoint(x:310,y:632),control1:CGPoint(x:569,y:457),control2:CGPoint(x:470,y:572));fold.closeSubpath()
+    context.addPath(fold);context.setFillColor(CGColor(red:0.86,green:1,blue:0.97,alpha:0.45));context.fillPath()
+    context.move(to:CGPoint(x:285,y:716));context.addCurve(to:CGPoint(x:748,y:668),control1:CGPoint(x:422,y:637),control2:CGPoint(x:576,y:771))
+    context.setStrokeColor(color(83,223,216));context.setLineWidth(32);context.setLineCap(.round);context.strokePath()
+    try rep.representation(using:.png,properties:[:])!.write(to:output.appendingPathComponent("size-\(size).png"))
 }
-
-let map: [String: Candidate] = [
-    "A": Candidate(
-        id: "A",
-        fileName: "qingzhou_proxy_icon_v2_1791884163506.jpg",
-        cropRect: NSRect(x: 104, y: 104, width: 816, height: 816),
-        bgFillColor: .white
-    ),
-    "B": Candidate(
-        id: "B",
-        fileName: "qingzhou_proxy_icon_minimal_1791884128366.jpg",
-        cropRect: NSRect(x: 130, y: 130, width: 765, height: 765),
-        bgFillColor: NSColor(calibratedRed: 0.0, green: 0.48, blue: 1.0, alpha: 1.0)
-    ),
-    "C": Candidate(
-        id: "C",
-        fileName: "qingzhou_proxy_icon_dynamic_1791884110895.jpg",
-        cropRect: NSRect(x: 30, y: 30, width: 964, height: 964),
-        bgFillColor: NSColor(calibratedRed: 0.0, green: 0.48, blue: 1.0, alpha: 1.0)
-    ),
-    "D": Candidate(
-        id: "D",
-        fileName: "qingzhou_proxy_icon_streamlined_1791883982336.jpg",
-        cropRect: NSRect(x: 220, y: 220, width: 584, height: 584),
-        bgFillColor: .white
-    )
-]
-
-let brainDir = "/Users/leiminghao/.gemini/antigravity/brain/1dc97bf8-6d07-4f34-9bc1-ca38dd8c33ab"
-let candidate = map[candidateId] ?? map["A"]!
-let srcPath = "\(brainDir)/\(candidate.fileName)"
-
-try FileManager.default.createDirectory(atPath: outputDir, withIntermediateDirectories: true)
-
-guard let rawData = try? Data(contentsOf: URL(fileURLWithPath: srcPath)),
-      let sourceRep = NSBitmapImageRep(data: rawData) else {
-    fatalError("Failed to load source icon image: \(srcPath)")
-}
-
-let sourceImage = NSImage(size: NSSize(width: sourceRep.pixelsWide, height: sourceRep.pixelsHigh))
-sourceImage.addRepresentation(sourceRep)
-
-let canvasSize: CGFloat = 1024
-let masterRep = NSBitmapImageRep(
-    bitmapDataPlanes: nil,
-    pixelsWide: Int(canvasSize),
-    pixelsHigh: Int(canvasSize),
-    bitsPerSample: 8,
-    samplesPerPixel: 4,
-    hasAlpha: true,
-    isPlanar: false,
-    colorSpaceName: .deviceRGB,
-    bytesPerRow: 0,
-    bitsPerPixel: 0
-)!
-
-NSGraphicsContext.saveGraphicsState()
-let ctx = NSGraphicsContext(bitmapImageRep: masterRep)!
-NSGraphicsContext.current = ctx
-
-let squircleRect = NSRect(x: 100, y: 100, width: 824, height: 824)
-let cornerRadius: CGFloat = 185
-let squirclePath = NSBezierPath(roundedRect: squircleRect, xRadius: cornerRadius, yRadius: cornerRadius)
-
-// 1. Drop Shadow
-let shadow = NSShadow()
-shadow.shadowColor = NSColor(calibratedWhite: 0.0, alpha: 0.30)
-shadow.shadowOffset = NSSize(width: 0, height: -16)
-shadow.shadowBlurRadius = 24
-shadow.set()
-
-candidate.bgFillColor.setFill()
-squirclePath.fill()
-
-NSGraphicsContext.restoreGraphicsState()
-NSGraphicsContext.saveGraphicsState()
-NSGraphicsContext.current = ctx
-
-// 2. Clip & Draw Content
-squirclePath.addClip()
-sourceImage.draw(
-    in: squircleRect,
-    from: candidate.cropRect,
-    operation: .sourceOver,
-    fraction: 1.0
-)
-
-// 3. Subtle Inner Rim Specular Highlight
-let innerRim = NSBezierPath(roundedRect: squircleRect.insetBy(dx: 1.0, dy: 1.0), xRadius: cornerRadius - 1.0, yRadius: cornerRadius - 1.0)
-innerRim.lineWidth = 1.5
-NSColor(calibratedWhite: 1.0, alpha: 0.25).setStroke()
-innerRim.stroke()
-
-NSGraphicsContext.restoreGraphicsState()
-
-// Save Master 1024 PNG
-let masterURL = URL(fileURLWithPath: outputDir).appendingPathComponent("size-1024.png")
-try masterRep.representation(using: .png, properties: [:])!.write(to: masterURL)
-
-// Generate all macOS iconset sizes: 16, 32, 64, 128, 256, 512
-let masterImage = NSImage(size: NSSize(width: canvasSize, height: canvasSize))
-masterImage.addRepresentation(masterRep)
-
-for size in [16, 32, 64, 128, 256, 512] {
-    let rep = NSBitmapImageRep(
-        bitmapDataPlanes: nil,
-        pixelsWide: size,
-        pixelsHigh: size,
-        bitsPerSample: 8,
-        samplesPerPixel: 4,
-        hasAlpha: true,
-        isPlanar: false,
-        colorSpaceName: .deviceRGB,
-        bytesPerRow: 0,
-        bitsPerPixel: 0
-    )!
-    
-    NSGraphicsContext.saveGraphicsState()
-    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-    
-    masterImage.draw(
-        in: NSRect(x: 0, y: 0, width: size, height: size),
-        from: NSRect(x: 0, y: 0, width: canvasSize, height: canvasSize),
-        operation: .copy,
-        fraction: 1.0
-    )
-    
-    NSGraphicsContext.restoreGraphicsState()
-    
-    let fileURL = URL(fileURLWithPath: outputDir).appendingPathComponent("size-\(size).png")
-    try rep.representation(using: .png, properties: [:])!.write(to: fileURL)
-}
-
-print("ICON_GENERATION_SUCCESS for Candidate \(candidate.id)")
+print("XIHANG_ICON_OK \(output.path)")

@@ -1,0 +1,10 @@
+{
+  "module": "github.com/sagernet/sing-box",
+  "version": "v1.14.3",
+  "commit": "7054cac5124465ffdb145870d7c01885566711b1",
+  "sum": "h1:cBg8TP5SPWoMAlWqTqbSNdHGKPUciZisjQbLtqFlMZA=",
+  "license": "GPL-3.0-or-later",
+  "go": "go1.26.5",
+  "gomobile": "v0.1.12",
+  "tags": "with_gvisor,with_quic,with_utls,with_clash_api"
+}

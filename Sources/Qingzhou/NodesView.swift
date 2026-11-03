@@ -1,0 +1,414 @@
+import SwiftUI
+import Pow
+import AppKit
+import UniformTypeIdentifiers
+import QingzhouKit
+
+struct NodesView: View {
+    @ObservedObject var model: AppModel
+    var onEdit: (Node) -> Void
+    var onAdd: () -> Void
+    var onImport: () -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var noteNode: Node?
+    @State private var note = ""
+    @State private var sharing: ShareRequest?
+    @State private var deleting = false
+
+    @StateObject private var page=NodeListViewModel()
+    private var filteredNodes:[Node] {page.nodes(state:model.state,invalidatedAt:model.latencyInvalidatedAt,now:max(model.latencyClock,Date()),profile:model.currentProfileID)}
+
+    var body: some View {
+        let filteredNodes=filteredNodes
+        VStack(alignment: .leading, spacing: 16) {
+            // 标题和主要操作
+            HStack(alignment: .center) {
+                HStack(spacing: 8) {
+                    Text("代理节点")
+                        .font(.title2.bold())
+                    Text("\(model.state.nodes.count) 个")
+                        .font(.caption.bold())
+                        .foregroundStyle(Theme.accentBlue)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2.5)
+                        .background(Theme.accentBlue.opacity(0.12))
+                        .clipShape(Capsule())
+                }
+
+                Spacer()
+
+                HStack(spacing: 10) {
+                    // 全部节点延迟检测
+                    Button {
+                        if model.measuring { model.cancelMeasurement() }
+                        else { model.measure() }
+                    } label: {
+                        Label(model.measuring ? "取消测速" : "一键测速", systemImage: "bolt.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.regular)
+                    .disabled(model.busy || model.state.nodes.isEmpty)
+
+                    // 新增和导入菜单
+                    Menu {
+                        Button { onAdd() } label: {
+                            Label("手动添加节点", systemImage: "plus")
+                        }
+                        Button { chooseFile() } label: {
+                            Label("从本地文件导入", systemImage: "doc")
+                        }
+                        Button { onImport() } label: {
+                            Label("从链接 / 订阅导入", systemImage: "link")
+                        }
+                    } label: {
+                        Label("添加节点", systemImage: "plus.circle")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
+
+                    // 排序选择
+                    Menu {
+                        ForEach(["HTTPS 延迟", "节点名称", "协议", "最近使用"],id:\.self) { value in
+                            Button {page.sort=value} label: {if value == page.sort {Label(value,systemImage:"checkmark")} else {Text(value)}}
+                        }
+                    } label: { Text("排序："+page.sort).font(.caption).foregroundStyle(Color.primary) }
+                    .menuStyle(.borderlessButton).frame(width:140).disabled(model.measuring)
+
+                    // 保留用户视图偏好，同时明确按钮的当前状态与操作结果。
+                    Toggle(isOn: Binding(get: { model.state.compactNodes }, set: { model.setCompact($0) })) {
+                        Label(model.state.compactNodes ? "列表" : "卡片",systemImage:model.state.compactNodes ? "list.bullet" : "square.grid.2x2")
+                    }
+                    .toggleStyle(.button)
+                    .accessibilityLabel("节点视图")
+                    .accessibilityValue(model.state.compactNodes ? "紧凑列表":"卡片")
+                    .help(model.state.compactNodes ? "切换到卡片视图":"切换到紧凑列表")
+                    .controlSize(.regular)
+                }
+            }
+
+            // 自动选择属于线路策略，独立于搜索和协议筛选，始终保留入口。
+            HStack(spacing: 12) {
+                Image(systemName: "bolt.badge.automatic.fill")
+                    .foregroundStyle(Theme.accentBlue)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("自动选择").font(.callout.bold())
+                    Text(model.state.activePolicy == .automatic
+                         ? (model.connection == .connected ? "已启用 · 实际出口：" + model.actualName : "已启用 · 连接后自动选择线路")
+                         : "自动检测并选择可用线路")
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                Button {
+                    Task { await model.setAutomaticSelection(model.state.activePolicy != .automatic) }
+                } label: {
+                    Label(model.state.activePolicy == .automatic ? "关闭自动选择" : "启用自动选择",
+                          systemImage: model.state.activePolicy == .automatic ? "checkmark.circle.fill" : "bolt.fill")
+                }
+                .buttonStyle(.bordered)
+                .tint(Theme.accentBlue)
+                .disabled(model.locked || model.state.nodes.isEmpty)
+                .accessibilityIdentifier("nodesAutomaticSelection")
+            }
+            .padding(12)
+            .background(Theme.cardBackground, in: RoundedRectangle(cornerRadius: 12))
+
+            // 搜索和协议筛选
+            HStack(spacing: 14) {
+                // 搜索输入
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField("搜索节点名称、服务器或备注...", text: $page.query)
+                        .textFieldStyle(.plain)
+                    if !page.query.isEmpty {
+                        Button { page.query = "" } label: {
+                            Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .frame(width: 260)
+                .background(Color.secondary.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                // 协议筛选标签保持单行
+                HStack(spacing: 8) {
+                    filterChip("全部", active: page.selectedKind == nil && !page.favoriteOnly) {
+                        page.selectedKind = nil; page.favoriteOnly = false
+                    }
+                    filterChip("★ 收藏", active: page.favoriteOnly) {
+                        page.favoriteOnly.toggle()
+                    }
+                    if model.state.nodes.contains(where: {$0.kind == .hysteria2}) || page.selectedKind == .hysteria2 { filterChip("HY2", active: page.selectedKind == .hysteria2) {
+                        toggleKind(.hysteria2)
+                    } }
+                    if model.state.nodes.contains(where: {$0.kind == .vless}) || page.selectedKind == .vless { filterChip("VLESS", active: page.selectedKind == .vless) {
+                        toggleKind(.vless)
+                    } }
+                    if model.state.nodes.contains(where: {$0.kind == .shadowsocks}) || page.selectedKind == .shadowsocks { filterChip("SS", active: page.selectedKind == .shadowsocks) {
+                        toggleKind(.shadowsocks)
+                    } }
+                    if model.state.nodes.contains(where: {$0.kind == .trojan}) || page.selectedKind == .trojan { filterChip("Trojan", active: page.selectedKind == .trojan) {
+                        toggleKind(.trojan)
+                    } }
+                }
+
+                Spacer()
+            }
+
+            // 已选节点的批量操作
+            if !page.selection.isEmpty {
+                HStack(spacing: 12) {
+                    Text("已选择 \(page.selection.count) 个节点")
+                        .font(.caption.bold())
+                    Button("设为收藏") { model.batchFavorite(page.selection, value: true) }
+                    Button("取消收藏") { model.batchFavorite(page.selection, value: false) }
+                    Button("批量测速") { model.measure(Array(page.selection)) }
+                    Button("删除所选", role: .destructive) { deleting = true }
+                    Spacer()
+                    Button("取消多选") { page.selection.removeAll() }
+                        .controlSize(.small)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(Theme.accentBlue.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .disabled(model.locked)
+            }
+
+            if model.measuring {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(model.measurementProgress)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            // 节点网格或列表
+            if filteredNodes.isEmpty {
+                ContentUnavailableView {
+                    Label(model.state.nodes.isEmpty ? "还没有任何节点":"没有找到符合条件的节点",systemImage:"network.slash")
+                } description: {
+                    Text(model.state.nodes.isEmpty ? "点击右上角添加节点或订阅。":"试试其他关键词、协议，或关闭收藏筛选。")
+                } actions: {
+                    if !model.state.nodes.isEmpty {Button("清除筛选") {page.clearFilters()}}
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if !model.state.compactNodes {
+                // 节点卡片网格
+                ScrollView(showsIndicators: false) {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 280), spacing: 16)], spacing: 16) {
+                        ForEach(filteredNodes) { node in
+                            nodeCard(node)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            } else {
+                // 紧凑列表
+                List(filteredNodes, selection: $page.selection) { node in
+                    nodeRow(node)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
+            }
+        }
+        .sheet(item: $sharing) { request in ShareView(model: model, node: request.node) }
+        .sheet(item: $noteNode) { node in
+            VStack(spacing: 18) {
+                Text("个人备注").font(.headline)
+                TextEditor(text: $note).frame(height: 120)
+                if let message=model.issueTitle {Text(message).font(.caption).foregroundStyle(.red)}
+                HStack {
+                    Button("取消") { noteNode = nil }
+                    Spacer()
+                    Button("保存备注") {
+                        if model.saveNote(node.id, note: note) { noteNode = nil }
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            .padding(24)
+            .frame(width: 440)
+        }
+        .confirmationDialog("确认删除所选节点？", isPresented: $deleting) {
+            Button("确认批量删除", role: .destructive) {
+                let ids = page.selection
+                page.selection = []
+                Task { await model.batchDelete(ids) }
+            }
+        } message: {
+            Text("所选节点将从当前配置中彻底移除。")
+        }
+    }
+
+    private func toggleKind(_ kind: ProxyKind) {
+        if page.selectedKind == kind { page.selectedKind = nil } else { page.selectedKind = kind }
+    }
+
+    private func filterChip(_ title: String, active: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 12, weight: active ? .semibold : .regular))
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(.horizontal, 11)
+                .padding(.vertical, 5.5)
+                .background(active ? Theme.accentBlue.opacity(0.18) : Color.secondary.opacity(0.08))
+                .foregroundStyle(active ? Theme.accentBlue : Color.primary)
+                .clipShape(Capsule())
+                .overlay(
+                    Capsule()
+                        .stroke(active ? Theme.accentBlue.opacity(0.3) : Color.clear, lineWidth: 1)
+                )
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .contentShape(Capsule())
+    }
+
+    private func chooseFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.title = "选择节点列表或 Clash/Mihomo YAML"
+        panel.begin { response in
+            if response == .OK, let url = panel.url {
+                Task { await model.importFile(url) }
+            }
+        }
+    }
+
+    // 名称与延迟优先；选择策略和实际出口使用独立标记。
+    private func nodeCard(_ node: Node) -> some View {
+        let selected = model.state.activePolicy == .node(node.id)
+        let favorite = model.state.favorites.contains(node.id)
+        let active = model.connection == .connected && CoreAPIClient.actualTag(model.proxyInfo) == PolicyReference.node(node.id).tag
+        return VStack(alignment:.leading,spacing:16) {
+            HStack(alignment:.top,spacing:10) {
+                VStack(alignment:.leading,spacing:7) {
+                    Text(node.name).font(.system(size:17,weight:.semibold)).lineLimit(2).frame(height:42,alignment:.topLeading).help(node.name)
+                    Text(NodeSubscriptionSupport.source(node,state:model.state)).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer(minLength:0)
+                Button {model.toggleFavorite(node.id)} label: {
+                    Image(systemName:favorite ? "star.fill":"star").foregroundStyle(favorite ? Theme.amberAccent : Color.secondary)
+                }.buttonStyle(.plain).disabled(model.locked)
+                    .accessibilityLabel((favorite ? "取消收藏：":"收藏：")+node.name)
+                    .changeEffect(.jump(height:3),value:favorite,isEnabled:!reduceMotion)
+            }
+            HStack {
+                ProtocolBadge(kind:node.kind)
+                if node.insecure {Image(systemName:"exclamationmark.shield.fill").foregroundStyle(Theme.amberAccent).help("此节点跳过 TLS 证书验证")}
+                Spacer()
+                if active {XihangStatusPill(title:"使用中",color:Theme.connectedGreen)}
+                else if selected {XihangStatusPill(title:"已选择")}
+            }
+            if let guidance=NodeSubscriptionSupport.guidance(node,state:model.state) {Text(guidance).font(.caption2).foregroundStyle(Theme.amberAccent).lineLimit(2)}
+            Text("\(node.server):\(node.port)").font(.caption2.monospaced()).foregroundStyle(.secondary).lineLimit(1).help("\(node.server):\(node.port)")
+            if let note=model.state.notes[node.id.uuidString],!note.isEmpty {Text(note).font(.caption2).foregroundStyle(Theme.accentBlue).lineLimit(1)}
+            Divider().opacity(0.5)
+            HStack {
+                Button { Task { await model.select(node.id) } } label: {
+                    Label(selected ? "已选择":"选择线路",systemImage:selected ? "checkmark.circle.fill":"circle")
+                }.buttonStyle(.bordered).controlSize(.small).font(.caption).disabled(model.locked)
+                    .accessibilityLabel("手动选择：" + node.name)
+                    .accessibilityIdentifier("selectNode-" + node.id.uuidString)
+                Spacer()
+                VStack(alignment:.trailing,spacing:4) {
+                    LatencyBadge(delayText:latency(node,model))
+                    if let result=model.state.latency[node.id.uuidString] {
+                        Text(result.testedAt.formatted(.dateTime.month().day().hour().minute())).font(.system(size:9)).foregroundStyle(.secondary)
+                    }
+                }
+                Button {model.measure([node.id])} label: {Image(systemName:"bolt")}.buttonStyle(.borderless).disabled(model.locked).help("检测此节点 HTTPS 延迟").accessibilityLabel("测速："+node.name)
+                Menu {
+                    Button("分享节点") {sharing=ShareRequest(node:node)}
+                    Button("修改备注") {note=model.state.notes[node.id.uuidString] ?? "";noteNode=node}
+                    if node.subscriptionID == nil {Button("编辑节点") {onEdit(node)}}
+                    Divider()
+                    Button("删除节点",role:.destructive) {Task {await model.deleteNode(node.id)}}
+                } label: {Image(systemName:"ellipsis")}.menuStyle(.borderlessButton).fixedSize().disabled(model.locked).accessibilityLabel("节点操作："+node.name)
+            }
+        }
+        .padding(20).frame(maxWidth:.infinity,alignment:.topLeading)
+        .liquidContentSurface()
+        .overlay(RoundedRectangle(cornerRadius:Theme.cardCornerRadius).strokeBorder(selected ? Theme.accentBlue.opacity(0.6):.clear,lineWidth:1.5).allowsHitTesting(false))
+        .modifier(XihangHover())
+        .contentShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
+        .onTapGesture { Task { await model.select(node.id) } }
+    }
+
+    // 列表行
+    private func nodeRow(_ node: Node) -> some View {
+        let isSelected = model.state.activePolicy == .node(node.id)
+        let isFav = model.state.favorites.contains(node.id)
+
+        return HStack(spacing: 12) {
+            Button {
+                Task { await model.select(node.id) }
+            } label: {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(isSelected ? Theme.accentBlue : .secondary)
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                model.toggleFavorite(node.id)
+            } label: {
+                Image(systemName: isFav ? "star.fill" : "star")
+                    .foregroundStyle(isFav ? Theme.amberAccent : .secondary)
+            }
+            .buttonStyle(.plain)
+
+            ProtocolBadge(kind: node.kind)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(node.name).font(.headline)
+                Text("\(node.server):\(node.port)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if node.insecure {
+                Image(systemName: "exclamationmark.shield.fill")
+                    .foregroundStyle(Theme.amberAccent)
+            }
+
+            Spacer()
+
+            LatencyBadge(delayText: latency(node, model))
+                .help(NodeSubscriptionSupport.source(node,state:model.state)+(NodeSubscriptionSupport.guidance(node,state:model.state).map{" · "+$0} ?? ""))
+
+            Button("测速") { model.measure([node.id]) }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+            Button("分享") { sharing = ShareRequest(node: node) }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+            if node.subscriptionID == nil {
+                Button("编辑") { onEdit(node) }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            }
+
+            Button(role: .destructive) {
+                Task { await model.deleteNode(node.id) }
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .padding(.vertical, 6)
+        .tag(node.id)
+    }
+}
+
+// MARK: - 连接视图

@@ -10,7 +10,13 @@ struct ProfilesView: View {
     @State private var name = ""
     @State private var office = ""
     @State private var copy = false
+    @State private var officeTemplate=OfficeSceneTemplate.bank
+    @State private var officeCIDRs=""
+    @State private var officeTargets=""
+    @State private var officeDNS=DNSPreference.system
     @State private var backup = false
+    @State private var historyProfile: UUID?
+    @State private var showingHistory = false
     @State private var renaming: ClientProfile?
     @State private var rename = ""
     
@@ -25,7 +31,9 @@ struct ProfilesView: View {
                 backup = true
             }
             
-            // Profiles List Cards
+            // 单份配置的历史入口
+            Button("查看全部历史（含已删除配置）") { historyProfile=nil;showingHistory=true }
+            // 配置列表
             ScrollView {
                 LazyVStack(spacing: 12) {
                     ForEach(model.profiles) { profile in
@@ -64,12 +72,13 @@ struct ProfilesView: View {
                             HStack(spacing: 8) {
                                 if !isCurrent {
                                     Button("应用并切换") {
-                                        Task { await model.changeProfile(profile.id) }
+                                        Task { await model.requestProfileChange(profile.id) }
                                     }
                                     .buttonStyle(.borderedProminent)
                                     .controlSize(.small)
                                 }
                                 
+                                Button("查看历史") {historyProfile=profile.id;showingHistory=true}
                                 Button("重命名") {
                                     rename = profile.name
                                     renaming = profile
@@ -98,6 +107,7 @@ struct ProfilesView: View {
                 }
             }
             .frame(minHeight: 180)
+            .sheet(isPresented:$showingHistory) {ProfileHistoryView(model:model,profileID:historyProfile)}
             
             // Create Profile Card
             VStack(alignment: .leading, spacing: 14) {
@@ -113,18 +123,29 @@ struct ProfilesView: View {
                 }
                 
                 if !copy {
-                    TextField("办公模板内网域名（用逗号分隔；留空则为通用模板）", text: $office)
-                        .textFieldStyle(.roundedBorder)
+                    Picker("场景模板",selection:$officeTemplate) {
+                        ForEach(OfficeSceneTemplate.allCases,id:\.self) {Text($0.label).tag($0)}
+                    }.pickerStyle(.segmented)
+                    if officeTemplate == .bank {
+                        TextField("内网域名（逗号分隔）",text:$office).textFieldStyle(.roundedBorder)
+                        TextField("绕行 CIDR（逗号分隔，可留空）",text:$officeCIDRs).textFieldStyle(.roundedBorder)
+                        TextField("常用目标域名或 IP（逗号分隔，可留空）",text:$officeTargets).textFieldStyle(.roundedBorder)
+                        Picker("DNS 偏好",selection:$officeDNS) {Text("原系统解析").tag(DNSPreference.system);Text("外网通过代理 HTTPS DNS").tag(DNSPreference.httpsProxy)}
+                        Text("常用目标默认跟随系统路由、HTTPS 443；创建后可在目标管理中设置端口与测试类型。").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Text("模板不含公司地址、节点或凭据，默认关闭自动连接。").font(.caption).foregroundStyle(.secondary)
                 }
                 
                 Button {
                     Task {
-                        await model.createProfile(
-                            name: name,
-                            copy: copy,
-                            officeDomains: office.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-                        )
-                        if model.errorMessage == nil { name = ""; office = "" }
+                        let succeeded:Bool
+                        if copy {succeeded=await model.createProfile(name:name,copy:true)}
+                        else {
+                            let split:(String)->[String] = {$0.split(whereSeparator:{$0=="," || $0=="\n"}).map{String($0).trimmingCharacters(in:.whitespaces)}}
+                            let targets=split(officeTargets).map{SavedDiagnosticTarget(name:$0,host:$0)}
+                            succeeded=await model.createOfficeProfile(name:name,template:officeTemplate,domains:split(office),cidrs:split(officeCIDRs),dns:officeDNS,targets:targets)
+                        }
+                        if succeeded {name="";office="";officeCIDRs="";officeTargets=""}
                     }
                 } label: {
                     Label("创建新配置", systemImage: "plus.circle.fill")
@@ -145,14 +166,14 @@ struct ProfilesView: View {
         .sheet(item: $renaming) { profile in
             VStack(spacing: 18) {
                 Text("修改配置名称").font(.headline)
+                if let message=model.issueTitle {Text(message).font(.caption).foregroundStyle(.red)}
                 TextField("名称", text: $rename).textFieldStyle(.roundedBorder)
                 HStack {
                     Button("取消") { renaming = nil }
                     Spacer()
                     Button("保存修改") {
                         Task {
-                            await model.renameProfile(profile.id, name: rename)
-                            if model.errorMessage == nil { renaming = nil }
+                            if await model.renameProfile(profile.id, name: rename) { renaming = nil }
                         }
                     }
                     .buttonStyle(.borderedProminent)
@@ -255,9 +276,9 @@ struct BackupView: View {
                         Button("确认恢复全部配置", role: .destructive) {
                             Task {
                                 working = true
-                                await model.restoreBackup(snapshot)
+                                let succeeded=await model.restoreBackup(snapshot)
                                 working = false
-                                if model.errorMessage == nil {
+                                if succeeded {
                                     password = ""; confirm = ""; self.snapshot = nil
                                     dismiss()
                                 }
@@ -291,7 +312,7 @@ struct BackupView: View {
     private func export() {
         guard let store = model.store else { return }
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = "轻舟配置.qzb"
+        panel.nameFieldStringValue = "汐航配置.qzb"
         panel.begin { response in
             guard response == .OK, let url = panel.url else { return }
             working = true
@@ -338,8 +359,8 @@ struct BackupView: View {
     }
 }
 
-// MARK: - Diagnostics View
-struct DiagnosticsView: View {
+// 综合诊断界面
+struct ComprehensiveDiagnosticsView: View {
     @ObservedObject var model: AppModel
     
     var body: some View {
@@ -358,25 +379,18 @@ struct DiagnosticsView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(model.locked || model.diagnosing)
                 
+                Button("停止诊断") {model.cancelDiagnostic()}.disabled(!model.diagnosing)
+                Button("导出 JSON") {exportDiagnostic(json:true)}.disabled(model.diagnosticSession==nil)
                 Button("恢复原网络设置") {
                     Task { await model.recover() }
                 }
                 .buttonStyle(.bordered)
-                .disabled(model.locked)
+                .disabled(model.loadingFailed || model.recovering)
                 
                 Spacer()
                 
                 Button {
-                    let panel = NSSavePanel()
-                    panel.nameFieldStringValue = "轻舟诊断报告.txt"
-                    panel.begin { response in
-                        if response == .OK, let url = panel.url {
-                            try? SecureFile.write(
-                                Data(model.diagnosticRows.map { Redactor.redact("\($0.stage) · \($0.status)：\($0.detail)") }.joined(separator: "\n").utf8),
-                                to: url
-                            )
-                        }
-                    }
+                    exportDiagnostic(json:false)
                 } label: {
                     Label("导出脱敏报告", systemImage: "square.and.arrow.up")
                 }
@@ -385,6 +399,17 @@ struct DiagnosticsView: View {
                 .disabled(model.diagnosticRows.isEmpty)
             }
             
+            if !model.protectionSummary.isEmpty || !model.connectivityResults.isEmpty {
+                DisclosureGroup("网络保护与连通性详情") {
+                    ScrollView {
+                        LazyVStack(alignment:.leading,spacing:6) {
+                            ForEach(Array(model.protectionSummary.enumerated()),id:\.offset) {_,text in Text(text).textSelection(.enabled)}
+                            ForEach(Array(model.connectivityResults.enumerated()),id:\.offset) {_,result in Text(result.summary).textSelection(.enabled)}
+                        }.font(.caption).frame(maxWidth:.infinity,alignment:.leading)
+                    }.frame(maxHeight:220)
+                }
+            }
+
             if model.diagnosticRows.isEmpty {
                 ContentUnavailableView(
                     "尚未执行诊断",
@@ -418,6 +443,7 @@ struct DiagnosticsView: View {
                                             .background(statusColor(row.status).opacity(0.12))
                                             .clipShape(Capsule())
                                     }
+                                    Text(row.checkedAt.formatted()+" · "+(row.milliseconds.map{String($0)+" ms"} ?? "耗时未取得")).font(.caption2).foregroundStyle(.secondary)
                                     Text(row.detail)
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
@@ -438,6 +464,10 @@ struct DiagnosticsView: View {
         }
     }
     
+    private func exportDiagnostic(json:Bool) {
+        guard let session=model.diagnosticSession else{return}
+        saveDiagnosticData(try? session.export(json:json),name:"汐航诊断报告."+(json ? "json":"txt"))
+    }
     private func statusColor(_ status: String) -> Color {
         switch status {
         case "通过": return Theme.connectedGreen
@@ -678,9 +708,56 @@ struct ShareView: View {
     }
 }
 
-// MARK: - Modern Rate Chart (Area + Line)
-struct RateChart: View {
+// MARK: - 稳定的实时速率图表
+struct RateChart: View, Equatable {
     let samples: [RateSample]
+    var embedded = false
+    @State private var selectedTime: Date?
+    @State private var upperBound: Double = 1024
+
+    static func == (lhs:Self,rhs:Self) -> Bool {
+        lhs.embedded == rhs.embedded && lhs.samples.count == rhs.samples.count &&
+        zip(lhs.samples,rhs.samples).allSatisfy { a,b in
+            a.id == b.id && a.time == b.time && a.upload == b.upload && a.download == b.download
+        }
+    }
+
+    // 每段保留上下行各自的峰值与谷值，以及窗口首尾；只压缩绘图，不改原始读数。
+    static func plottingSamples(_ samples:[RateSample],limit:Int=256) -> [RateSample] {
+        guard samples.count>limit,limit>=6 else {return samples}
+        let buckets=max(1,(limit-2)/4),interior=samples.count-2
+        var indices=[0]
+        for bucket in 0..<buckets {
+            let start=1+bucket*interior/buckets,end=1+(bucket+1)*interior/buckets
+            guard start<end else {continue}
+            var lowUp=start,highUp=start,lowDown=start,highDown=start
+            for i in start..<end {
+                if samples[i].upload<samples[lowUp].upload {lowUp=i}
+                if samples[i].upload>samples[highUp].upload {highUp=i}
+                if samples[i].download<samples[lowDown].download {lowDown=i}
+                if samples[i].download>samples[highDown].download {highDown=i}
+            }
+            indices.append(contentsOf:Set([lowUp,highUp,lowDown,highDown]).sorted())
+        }
+        indices.append(samples.count-1)
+        return indices.map{samples[$0]}
+    }
+
+    // 固定三十分钟窗口，每分钟移动一次，避免每个样本都缩放时间轴。
+    private var timeDomain: ClosedRange<Date> {
+        let latest = samples.last?.time ?? Date()
+        let end = Date(timeIntervalSince1970: (floor(latest.timeIntervalSince1970 / 60) + 1) * 60)
+        return end.addingTimeInterval(-1800)...end
+    }
+
+    // 同一会话只按倍数扩展纵轴，不随瞬时速率上下收缩。
+    private func updateScale() {
+        guard !samples.isEmpty else { upperBound = 1024; return }
+        let peak = Double(samples.map { max($0.upload, $0.download) }.max() ?? 0)
+        if peak > upperBound {
+            upperBound = pow(2, ceil(log2(max(1024, peak * 1.15))))
+        }
+    }
     
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -691,14 +768,15 @@ struct RateChart: View {
                 Spacer()
                 HStack(spacing: 12) {
                     HStack(spacing: 4) {
-                        Circle().fill(Theme.connectedGreen).frame(width: 7, height: 7)
+                        Circle().fill(Theme.trafficUpload).frame(width: 7, height: 7)
                         Text("上传").font(.caption2).foregroundStyle(.secondary)
                     }
                     HStack(spacing: 4) {
-                        Circle().fill(Theme.accentBlue).frame(width: 7, height: 7)
+                        Circle().fill(Theme.trafficDownload).frame(width: 7, height: 7)
                         Text("下载").font(.caption2).foregroundStyle(.secondary)
                     }
                 }
+                .fixedSize(horizontal:true,vertical:false)
             }
             
             if samples.isEmpty {
@@ -709,65 +787,81 @@ struct RateChart: View {
                         .foregroundStyle(.secondary)
                     Spacer()
                 }
-                .frame(height: 155)
+                .frame(height: embedded ? 75 : 100)
                 .frame(maxWidth: .infinity)
                 .background(Color.secondary.opacity(0.04))
                 .clipShape(RoundedRectangle(cornerRadius: 10))
             } else {
                 Chart {
-                    ForEach(samples) { sample in
+                    if let selectedTime,let sample=samples.min(by:{abs($0.time.timeIntervalSince(selectedTime)) < abs($1.time.timeIntervalSince(selectedTime))}) {
+                        RuleMark(x:.value("时间",sample.time)).foregroundStyle(Color.secondary.opacity(0.35))
+                            .annotation(position:.top,alignment:.leading) {
+                                Text("↓ \(formatRate(sample.download))  ↑ \(formatRate(sample.upload))").font(.caption2.monospacedDigit()).padding(6).background(Theme.cardBackground,in:RoundedRectangle(cornerRadius:6))
+                            }
+                    }
+                    ForEach(Self.plottingSamples(samples)) { sample in
                         AreaMark(
                             x: .value("时间", sample.time),
-                            y: .value("速率", sample.download)
+                            y: .value("速率", sample.download),
+                            series: .value("方向", "下载"),
+                            stacking: .unstacked
                         )
                         .foregroundStyle(
                             LinearGradient(
-                                colors: [Theme.accentBlue.opacity(0.28), Theme.accentBlue.opacity(0.02)],
+                                colors: [Theme.trafficDownload.opacity(0.28), Theme.trafficDownload.opacity(0.02)],
                                 startPoint: .top,
                                 endPoint: .bottom
                             )
                         )
-                        .interpolationMethod(.monotone)
+                        .interpolationMethod(.linear)
                         
                         LineMark(
                             x: .value("时间", sample.time),
-                            y: .value("速率", sample.download)
+                            y: .value("速率", sample.download),
+                            series: .value("方向", "下载")
                         )
-                        .foregroundStyle(Theme.accentBlue)
+                        .foregroundStyle(Theme.trafficDownload)
                         .lineStyle(StrokeStyle(lineWidth: 2))
-                        .interpolationMethod(.monotone)
+                        .interpolationMethod(.linear)
                         
                         AreaMark(
                             x: .value("时间", sample.time),
-                            y: .value("速率", sample.upload)
+                            y: .value("速率", sample.upload),
+                            series: .value("方向", "上传"),
+                            stacking: .unstacked
                         )
                         .foregroundStyle(
                             LinearGradient(
-                                colors: [Theme.connectedGreen.opacity(0.25), Theme.connectedGreen.opacity(0.02)],
+                                colors: [Theme.trafficUpload.opacity(0.25), Theme.trafficUpload.opacity(0.02)],
                                 startPoint: .top,
                                 endPoint: .bottom
                             )
                         )
-                        .interpolationMethod(.monotone)
+                        .interpolationMethod(.linear)
                         
                         LineMark(
                             x: .value("时间", sample.time),
-                            y: .value("速率", sample.upload)
+                            y: .value("速率", sample.upload),
+                            series: .value("方向", "上传")
                         )
-                        .foregroundStyle(Theme.connectedGreen)
+                        .foregroundStyle(Theme.trafficUpload)
                         .lineStyle(StrokeStyle(lineWidth: 1.8))
-                        .interpolationMethod(.monotone)
+                        .interpolationMethod(.linear)
                     }
                 }
+                .chartXSelection(value:$selectedTime)
+                .chartXScale(domain: timeDomain)
+                .chartYScale(domain: 0...upperBound)
                 .chartYAxis {
-                    AxisMarks(position: .leading) { value in
+                    AxisMarks(position: .leading, values: [0, upperBound / 3, upperBound * 2 / 3, upperBound]) { value in
                         AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [4, 4]))
                             .foregroundStyle(Color.secondary.opacity(0.2))
                         AxisValueLabel {
-                            if let n = value.as(Int64.self) {
-                                Text(formatRate(n))
+                            if let n = value.as(Double.self) {
+                                Text(formatRate(Int64(n)))
                                     .font(.system(size: 9, design: .monospaced))
                                     .foregroundStyle(.secondary)
+                                    .frame(width: 72, alignment: .trailing)
                             }
                         }
                     }
@@ -776,18 +870,21 @@ struct RateChart: View {
                     AxisMarks(values: .automatic(desiredCount: 6)) { _ in
                         AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [4, 4]))
                             .foregroundStyle(Color.secondary.opacity(0.15))
-                        AxisValueLabel(format: .dateTime.minute().second())
+                        AxisValueLabel(format: .dateTime.hour().minute())
                     }
                 }
                 .frame(height: 155)
             }
         }
-        .padding(14)
-        .background(Theme.cardBackground)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
+        .onAppear { updateScale() }
+        .onChange(of: samples.last?.id) { _, _ in updateScale() }
+        .transaction { $0.animation = nil }
+        .padding(embedded ? 0 : 14)
+        // 圆角只绘制卡片背景，不裁剪嵌入模式中贴近边缘的图例文字。
+        .background(embedded ? Color.clear : Theme.cardBackground, in: RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
         .overlay(
             RoundedRectangle(cornerRadius: Theme.cardCornerRadius)
-                .stroke(Theme.subtleBorder, lineWidth: 1)
+                .stroke(embedded ? Color.clear : Theme.subtleBorder, lineWidth: 1)
         )
     }
 }
@@ -821,8 +918,7 @@ struct RuleDraftView: View {
                     next.target = target
                     next.action = target == .direct ? .direct : target == .reject ? .reject : .proxy
                     Task {
-                        await model.addRule(next)
-                        if model.errorMessage == nil { dismiss() }
+                        if await model.addRule(next) { dismiss() }
                     }
                 }
                 .buttonStyle(.borderedProminent)

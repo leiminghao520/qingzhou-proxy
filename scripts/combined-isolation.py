@@ -65,10 +65,18 @@ try:
    result=request(f'http://origin.example:{origin.server_port}/stream','--max-time','0.7','--no-buffer');assert result.returncode==28 and b'data: synthetic' in result.stdout,(result.returncode,result.stdout);print('PASS combined.StreamingVisibleBeforeCancellation')
    result=request('http://[2001:db8::1]/');assert result.returncode!=0;print('PASS combined.IPv6LiteralRejected')
    assert queries and set(queries)=={1},queries;print('PASS combined.DNSUsesAOnly')
+   def query_core():
+    return subprocess.run(['curl','--silent','--fail','--max-time','3','--noproxy','*','--header','Authorization: Bearer '+('a'*64),f'http://127.0.0.1:{ports["control"]}/dns/query?name=cache.example&type=A'],capture_output=True)
+   from concurrent.futures import ThreadPoolExecutor
+   before=len(queries)
+   with ThreadPoolExecutor(max_workers=8) as executor: results=list(executor.map(lambda _:query_core(),range(8)))
+   assert all(result.returncode==0 and b'127.0.0.1' in result.stdout for result in results),results
+   assert len(queries)-before<=1,(before,len(queries))
+   print('PASS combined.ConcurrentDNSQueriesShareCoreCache')
    stop(processes[0])
    result=request(f'http://origin.example:{origin.server_port}/','--user-agent','SyntheticDirect/1');assert result.returncode==0 and result.stdout==b'COMBINED_FORWARD_OK',(result.returncode,result.stderr);print('PASS combined.UserAgentDirectAfterProxyFailure')
    result=request(f'http://origin.example:{origin.server_port}/');assert result.returncode!=0;print('PASS combined.ProxyFailureDoesNotFallbackDirect')
-   print('RESULT combined_isolated_scenarios=8 failures=0')
+   print('RESULT combined_isolated_scenarios=9 failures=0')
 finally:
  for process in reversed(processes):stop(process)
  for server in servers:server.shutdown();server.server_close()

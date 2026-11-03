@@ -1,0 +1,18 @@
+[Unit]
+Description=Qingzhou cloud billing read-only collection
+[Service]
+Type=oneshot
+User=hy2admin
+WorkingDirectory=/opt/hy2-admin
+EnvironmentFile=/etc/hy2-admin.env
+EnvironmentFile=-/etc/hy2-cloud.env
+ExecStart=/opt/qingzhou-client-venv/bin/python client_jobs.py
+NoNewPrivileges=true
+TimeoutStartSec=120
+MemoryMax=256M
+ProtectSystem=strict
+ReadWritePaths=/var/lib/hy2-admin
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

@@ -27,6 +27,22 @@ final class NetworkPolicyTests:CheckCase {
         expectFalse(NetworkInspection.routeScopeMatches("en0",flags:"<UP,GATEWAY,IFSCOPE>",interface:"utun6"))
         expectFalse(NetworkInspection.routeScopeMatches(nil,flags:nil,interface:"en0"))
 
+        let onlink="destination: 169.254.0.0\nmask: 255.255.0.0\ninterface: en0\nflags: <UP,DONE,CLONING,STATIC>"
+        expectEqual(NetworkInspection.routeGateway(onlink,index:{_ in 14}),"link#14")
+        expectNil(NetworkInspection.routeGateway(onlink,index:{_ in 0}))
+        expectNil(NetworkInspection.routeGateway(onlink.replacingOccurrences(of:"<UP,DONE,CLONING,STATIC>",with:"<UP,GATEWAY>"),index:{_ in 14}))
+        let viaGateway="gateway: 192.0.2.1\ninterface: en0\nflags: <UP,GATEWAY,DONE>"
+        expectEqual(NetworkInspection.routeGateway(viaGateway,index:{_ in 14}),"192.0.2.1")
+        expectEqual(NetworkInspection.routeGateway("interface: lo0\nflags: <UP,HOST,DONE,LOCAL>",index:{_ in 1}),"link#1")
+        expectEqual(NetworkInspection.routeGateway("interface: en0\nflags: <UP,DONE,MULTICAST,IFSCOPE>",index:{_ in 14}),"link#14")
+        expectNil(NetworkInspection.routeGateway("interface: en0\nflags: <REJECT>",index:{_ in 14}))
+        expectNil(NetworkInspection.routeGateway("flags: <UP,DONE>",index:{_ in 14}))
+        for operation in [NetworkInspection.RouteOperation.add,.delete] {
+            expectEqual(NetworkInspection.routeArguments(operation,destination:"169.254.0.0/16",gateway:"link#14",interface:"en0"),["-n",operation.rawValue,"-net","169.254.0.0/16","-interface","en0"])
+            expectEqual(NetworkInspection.routeArguments(operation,destination:"ff02::fb/128",gateway:"link#14",ipv6:true,scope:"en0",interface:"en0"),["-n",operation.rawValue,"-inet6","-ifscope","en0","-host","ff02::fb","-interface","en0"])
+        }
+        expectEqual(NetworkInspection.routePrefix(destination:"fe80::%en0",mask:"ffff:ffff:ffff:ffff::"),"fe80::/64")
+        expectEqual(NetworkInspection.routePrefix(destination:"ff02::fb%en0",mask:nil,host:true),"ff02::fb/128")
         expectEqual(NetworkInspection.routePrefix(destination:"default",mask:"128.0.0.0"),"0.0.0.0/1")
         expectEqual(NetworkInspection.routePrefix(destination:"default",mask:"8000::"),"::/1")
         expectEqual(NetworkInspection.routePrefix(destination:"default",mask:"0.0.0.0"),"0.0.0.0/0")
@@ -34,9 +50,9 @@ final class NetworkPolicyTests:CheckCase {
         expectNil(NetworkInspection.routePrefix(destination:"default",mask:"default"))
         expectNil(NetworkInspection.routePrefix(destination:"default",mask:"255.1.0.0"))
         expectNil(NetworkInspection.routePrefix(destination:"default",mask:"128.0.0.0",host:true))
-        expectEqual(NetworkInspection.routeArguments(.get,destination:"111.132.47.193",scope:"en0"),["-n","get","-ifscope","en0","111.132.47.193"])
+        expectEqual(NetworkInspection.routeArguments(.get,destination:"111.132.47.193",scope:"en0"),["-n","get","-ifscope","en0","-host","111.132.47.193"])
         expectEqual(NetworkInspection.routeArguments(.add,destination:"0.0.0.0/1",gateway:"192.0.2.1",scope:"en0"),["-n","add","-ifscope","en0","-net","0.0.0.0/1","192.0.2.1"])
-        expectEqual(NetworkInspection.routeArguments(.delete,destination:"::/1",gateway:"fe80::1%en0",ipv6:true,scope:"en0"),["-n","delete","-inet6","-ifscope","en0","-net","::/1","fe80::1%en0"])
+        expectEqual(NetworkInspection.routeArguments(.delete,destination:"::/1",gateway:"fe80::1%en0",ipv6:true,scope:"en0"),["-n","delete","-inet6","-ifscope","en0","-net","::","-prefixlen","1","fe80::1%en0"])
         expectEqual(NetworkInspection.routeArguments(.delete,destination:"0.0.0.0/1",gateway:"192.168.1.1"),["-n","delete","-net","0.0.0.0/1","192.168.1.1"])
 
         let abbreviated=TunAddressPlan.routePrefixes("100.64/10 10.251.1.1 UGSc utun6\n127 127.0.0.1 UCS lo0\n172.16/12 10.251.1.1 UGSc utun6\n198.18.0/16 10.251.1.1 UGSc utun6\n192.168.66 link#11 UCS en0\nfe80::%utun0/64 link#13 UcI utun0")
@@ -107,7 +123,7 @@ final class NetworkPolicyTests:CheckCase {
         expectTrue(legacyReply.protocolVersion==nil)
         let request=TunRequest(operation:"prepare",httpCompatibilityPort:27900)
         let decoded=try JSONDecoder().decode(TunRequest.self,from:JSONEncoder().encode(request))
-        expectEqual(decoded.protocolVersion,3);expectEqual(decoded.httpCompatibilityPort,27900)
+        expectEqual(decoded.protocolVersion,5);expectEqual(decoded.httpCompatibilityPort,27900)
         let resource=URL(fileURLWithPath:FileManager.default.currentDirectoryPath+"/Resources/shadowrocket-default.json")
         var imported=try JSONDecoder().decode(ShadowrocketConfiguration.self,from:Data(contentsOf:resource))
         imported.general["ipv6"]="false"
@@ -137,7 +153,7 @@ final class NetworkPolicyTests:CheckCase {
                     let effective=object["dns"] as! [String:Any]
                     expectEqual(effective["strategy"] as? String,policy.strategy)
                     let rules=(object["route"] as! [String:Any])["rules"] as! [[String:Any]]
-                    expectEqual(rules.filter{$0["action"] as? String == "resolve"}.count,2)
+                    let resolves=rules.filter{$0["action"] as? String == "resolve"};expectTrue(resolves.contains{$0["clash_mode"]==nil});expectTrue(resolves.allSatisfy{$0["strategy"] as? String==policy.strategy})
                     expectEqual(rules.contains{$0["ip_version"] as? Int == 6 && $0["action"] as? String == "reject"},policy == .ipv4Only)
                 }
                 state.captureMode = .systemProxy
@@ -146,7 +162,7 @@ final class NetworkPolicyTests:CheckCase {
         // 从工程资源读取兼容规则，只使用合成节点和内存凭据。
         let file=URL(fileURLWithPath:FileManager.default.currentDirectoryPath+"/Resources/shadowrocket-default.json")
         let shadow=try JSONDecoder().decode(ShadowrocketConfiguration.self,from:Data(contentsOf:file))
-        state=try shadow.applying(to:state);state.addressFamilyPolicy = .ipv4Only;state.captureMode = .tun
+        state=try shadow.applying(to:state);state.httpCompatibilityEnabled=true;state.addressFamilyPolicy = .ipv4Only;state.captureMode = .tun
         let data=try TunConfigBuilder.build(state:state,credentials:credentials,control:context,address4:"100.64.1.1/30",address6:"fd71:717a:1::1/126",originalDNS:["192.0.2.53"],bypass:[],httpCompatibilityPort:27900)
         try validateCore(data)
         let object=try JSONSerialization.jsonObject(with:data) as! [String:Any]
@@ -193,4 +209,59 @@ final class NetworkPolicyTests:CheckCase {
         expectEqual(steps,["proxy","helper","local","verify"])
     }
     print("PASS CaptureRecovery.independentCleanupAndVerification")
+}
+
+@MainActor func runHelperRecoveryPolicyChecks() {
+    for active in [false,true] {for running in [false,true] {for journal in [false,true] {for available in [false,true] {
+        let required=HelperRecoveryPolicy.requiresRecovery(activeTunnel:active,running:running,journalPresent:journal,inspectionAvailable:available)
+        if !active && !running && !journal && available {expectFalse(required,"旧 helper 无恢复记录不能阻塞系统代理")}else{expectTrue(required,"实际恢复证据不可忽略")}
+    }}}}
+    let script=HelperInstaller.authorizationScript(app:URL(fileURLWithPath:"/tmp/汐航 \"\\ app.app"));expectTrue(script.hasSuffix("with administrator privileges"));expectTrue(script.contains("install-helper.sh"));expectTrue(script.contains("\\\""));print("PASS HelperRecovery.evidenceRequiredInsteadOfSocketPresence")
+}
+
+@MainActor func runDNSResolutionPolicyChecks() throws {
+    let candidate=try NodeParser.parse("hy2://synthetic@127.0.0.1:19999"),credentials=MemoryCredentials();try credentials.set(candidate.secret,for:candidate.node.credentialRef)
+    var state=AppState();state.nodes=[candidate.node];state.selectedPolicy = .node(candidate.node.id);state.rules=[RoutingRule(kind:.suffix,value:"corp.example",action:.direct)]
+    for preference in [DNSPreference.system,.httpsProxy] {
+        state.dnsPreference=preference
+        let data=try ConfigBuilder.build(state:state,credentials:credentials,control:CoreControlContext(port:28999,secret:String(repeating:"a",count:64)))
+        let object=try JSONSerialization.jsonObject(with:data) as! [String:Any];let rules=(object["route"] as! [String:Any])["rules"] as! [[String:Any]]
+        let resolve=rules.filter{$0["action"] as? String=="resolve"}
+        expectNil(resolve.last?["server"])
+        let dns=object["dns"] as! [String:Any]
+        expectTrue((dns["rules"] as! [[String:Any]]).contains{($0["domain_suffix"] as? [String])==["corp.example"] && $0["server"] as? String=="local"})
+    }
+    print("PASS DNS.resolveStageRespectsProxyAndCorporatePolicies")
+}
+
+@MainActor func runHelperReadinessChecks() async {
+    var attempts=0
+    do {
+        let reply=try await HelperReadiness.wait(timeout:0.2,interval:0.001) {
+            attempts+=1
+            if attempts<3 {throw HelperConnectionError(code:ECONNREFUSED)}
+            return TunReply(ok:true,message:"ready")
+        }
+        expectEqual(attempts,3);expectEqual(reply.message,"ready")
+    }catch{CheckHarness.failure("辅助服务短暂启动错误未恢复",file:#filePath,line:#line)}
+    for native in [false,true] {
+        attempts=0
+        do {
+            _=try await HelperReadiness.wait(timeout:0.1,interval:0.001) {
+                attempts+=1
+                if native {throw HelperConnectionError(code:EINVAL)}
+                throw ProxyError("客户端身份不允许")
+            }
+            CheckHarness.failure("不应吞掉身份或永久连接错误",file:#filePath,line:#line)
+        }catch{expectEqual(attempts,1)}
+    }
+    let started=Date();attempts=0
+    do {
+        _=try await HelperReadiness.wait(timeout:0.02,interval:0.005) {attempts+=1;throw HelperConnectionError(code:ENOENT)}
+        CheckHarness.failure("辅助服务就绪检查应有截止时间",file:#filePath,line:#line)
+    }catch{expectTrue(attempts>=2);expectTrue(Date().timeIntervalSince(started)<1)}
+    let task=Task {try await HelperReadiness.wait(timeout:5) {throw HelperConnectionError(code:EACCES)}}
+    task.cancel()
+    do {_=try await task.value;CheckHarness.failure("取消应停止辅助服务重试",file:#filePath,line:#line)}catch{expectTrue(error is CancellationError)}
+    print("PASS HelperReadiness.startupRetryDeadlineIdentityAndCancellation")
 }

@@ -1,0 +1,20 @@
+{% extends 'base.html' %}{% from '_macros.html' import service_cards with context %}
+{% block location %}运行概览{% endblock %}
+{% block content %}
+<header class="page-header"><div><p class="eyebrow">你的私人网络</p><h1>运行概览</h1><p class="muted">连接、用量和设备状态，一目了然。</p></div><a class="button" href="{{ url_for('users') }}#create-user">＋ 新增用户</a></header>
+<div id="live-status" class="notice {{ 'info' if metrics.fresh else 'warning' }}">{{ '统计正常更新' if metrics.fresh else '统计尚未就绪或已过期，当前在线状态未知' }}<span>最近有效采集：<time id="sample-time">{{ metrics.captured_at|bjtime }}</time></span></div>
+<div class="cards">
+<article><span>启用用户</span><strong>{{ counts.enabled }}<small>/ {{ counts.total }}</small></strong><p>{{ device_count }} 台已登记设备</p></article>
+<article><span>在线客户端实例</span><strong id="metric-online">{{ metrics.online if metrics.online is not none else '—' }}</strong><p>实例数量，不等于物理设备数</p></article>
+<article><span>今日下载</span><strong id="metric-rx">{{ metrics.rx|bytes }}</strong><p>北京时间 00:00 起 · 已观测用量</p></article>
+<article><span>今日上传</span><strong id="metric-tx">{{ metrics.tx|bytes }}</strong><p>数据空档不计入累计</p></article>
+</div>
+{% include '_chart.html' %}
+<div class="two-columns">
+<section class="panel"><div class="panel-head"><h2>用户与设备</h2><a href="{{ url_for('users') }}">管理全部 →</a></div>
+{% for user in users %}<a class="user-list-row" href="{{ url_for('user_detail',user_id=user.id) }}"><span class="avatar">{{ user.display_name[:1] }}</span><span class="grow"><b>{{ user.display_name }}</b><small>{{ user.username }} · {{ user.device_count }} 台设备</small></span><span class="badge {{ 'positive' if user.enabled else '' }}">{{ '启用' if user.enabled else '停用' }}</span><span aria-hidden="true">→</span></a>{% else %}<div class="empty">先创建一个用户，再为实际设备生成订阅。<a href="{{ url_for('users') }}">创建用户 →</a></div>{% endfor %}
+</section>
+<section class="panel"><div class="panel-head"><h2>服务健康</h2><a href="{{ url_for('operations') }}">查看 →</a></div><div id="service-cards">{{ service_cards(service) }}</div><p class="muted">设备日常变更无需重启代理服务。</p></section></div>
+<section class="panel recent-activity"><div class="panel-head"><div><h2>最近操作</h2><p class="muted">最近 5 条管理记录</p></div><a href="{{ url_for('audit_page') }}">查看全部 →</a></div>
+<div class="table-wrap"><table><thead><tr><th scope="col">时间</th><th scope="col">操作</th><th scope="col">目标</th></tr></thead><tbody>{% for entry in recent_audit %}<tr><td class="nowrap">{{ entry.created_at|bjtime }}</td><td>{{ actions.get(entry.action,entry.action) }}</td><td class="mono">{{ entry.target or '—' }}</td></tr>{% else %}<tr><td class="empty" colspan="3">暂无管理记录</td></tr>{% endfor %}</tbody></table></div></section>
+{% endblock %}

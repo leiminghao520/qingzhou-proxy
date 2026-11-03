@@ -6,13 +6,16 @@ import QingzhouKit
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var model: AppModel?
     private var readyToQuit = false
+    private var quitTask: Task<Void,Never>?
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if readyToQuit { return .terminateNow }
         guard let model else { return .terminateNow }
-        Task {
+        guard quitTask==nil else{return .terminateLater}
+        quitTask=Task {
             let safe = await model.quit()
             readyToQuit = safe
             sender.reply(toApplicationShouldTerminate: safe)
+            quitTask=nil
         }
         return .terminateLater
     }
@@ -21,90 +24,167 @@ import QingzhouKit
 
 @main struct QingzhouApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
-    @StateObject private var model = AppModel()
-    
+    @StateObject private var lifetime = ApplicationLifetime()
+    private var model: AppModel { lifetime.model }
+    @State private var showingAbout = false
+    @AppStorage("interfaceMode") private var interfaceMode = InterfaceMode.simple
+
     var body: some Scene {
-        WindowGroup("轻舟代理") {
+        WindowGroup("汐航") {
             ContentView(model: model)
-                .frame(minWidth: 1040, minHeight: 700)
+                .tint(Theme.accentBlue)
+                .frame(minWidth: interfaceMode == .simple ? 820 : 1040, minHeight: interfaceMode == .simple ? 620 : 700)
                 .onAppear { delegate.model = model }
+                .sheet(isPresented:$showingAbout) { VStack { XihangAboutView(); Button("完成") { showingAbout=false }.keyboardShortcut(.cancelAction).padding(.bottom,24) } }
                 .task { await model.startupRecovery() }
         }
-        .defaultSize(width: 1140, height: 760)
-        
-        MenuBarExtra("轻舟代理", systemImage: model.connection == .connected ? "paperplane.fill" : "paperplane") {
-            Text("\(model.connection.rawValue) · \(model.state.mode.label)")
-            Text(model.actualName + " · " + model.state.captureMode.label)
-            if model.connection == .connected {
-                Text("↑ \(formatRate(model.uploadRate))  ↓ \(formatRate(model.downloadRate))")
+        .defaultSize(width: 900, height: 680)
+        .windowResizability(.contentMinSize)
+        .commands {
+            CommandGroup(replacing:.appInfo) { Button("关于汐航") { showingAbout=true } }
+        }
+
+        MenuBarExtra {
+            StableMenuContent(presentation: lifetime.menu)
+        } label: {
+            StableMenuBarLabel(presentation: lifetime.menu)
+        }
+    }
+}
+
+// 场景只持有模型生命周期，不订阅连接计数等高频数据。
+@MainActor final class ApplicationLifetime: ObservableObject {
+    let model: AppModel
+    let menu: MenuPresentation
+    init() {
+        let model = AppModel(dependencies: AppDependencies())
+        self.model = model
+        self.menu = MenuPresentation(model: model)
+    }
+}
+
+struct StableMenuBarLabel: View {
+    @ObservedObject var presentation: MenuPresentation
+    var body: some View {
+        OfficeMenuBarLabel(connected: presentation.model.connectionAvailable, status: presentation.model.connectionSummary)
+    }
+}
+
+struct StableMenuContent: View {
+    @ObservedObject var presentation: MenuPresentation
+    @AppStorage("interfaceMode") private var interfaceMode = InterfaceMode.simple
+    private var model: AppModel { presentation.model }
+    var body: some View {
+            Text("\(model.connectionSummary) · \(model.state.mode.label)")
+            Text(model.actualName + " · " + model.effectiveState.captureMode.label)
+            if model.activeRecovery != nil {
+                Text(model.effectivePathSummary)
+                Button("重试原方案"){Task{await model.retryOriginal()}}.disabled(model.locked)
+                Button("采用当前方案"){model.adoptRecovery()}.disabled(model.locked)
             }
-            Button(model.connection == .connected ? "断开" : "连接") {
+            if let title=model.issueTitle {Text(title)}
+            Text(presentation.healthLabel)
+            Toggle("完整接管", isOn: Binding(
+                get: { (model.captureSwitchTarget ?? model.effectiveState.captureMode) == .compatible },
+                set: { enabled in Task { await model.setCaptureMode(enabled ? .compatible : .systemProxy) } }
+            )).disabled(model.locked || model.recoveryPending)
+            if !(model.state.savedDiagnosticTargets ?? []).isEmpty {
+                Menu("常用目标路径检查") {
+                    ForEach(Array((model.state.savedDiagnosticTargets ?? []).prefix(5))) {target in
+                        Button(target.name) {model.inspectSavedTarget(target);model.office.diagnosticRequested=true}
+                    }
+                    Button("全部目标与诊断") {model.office.diagnosticRequested=true}
+                }.disabled(model.locked)
+            }
+            Button(model.networkWaiting ? "停止自动重连" : model.connection == .connected ? "断开" : model.connection == .connecting ? "取消连接" : "连接") {
                 Task {
-                    if model.connection == .connected { await model.disconnect() }
+                    if model.hasConnectionActivity { await model.disconnect() }
                     else { await model.connect() }
                 }
             }
-            .disabled(model.locked || (model.state.activePolicy == nil && model.state.mode != .direct))
-            
-            Menu("配置") {
-                ForEach(model.profiles) { profile in
-                    Button((model.currentProfileID == profile.id ? "✓ " : "") + profile.name) {
-                        Task { await model.changeProfile(profile.id) }
+            .disabled(model.stopDisabled || (model.state.activePolicy == nil && model.state.mode != .direct && model.connection != .connected) || (model.recoveryPending && !model.hasConnectionActivity))
+
+            if interfaceMode == .simple {
+                Menu("线路") {
+                    Button("自动选择") { Task { await model.selectPolicy(.automatic) } }
+                    ForEach(model.state.groups) { group in
+                        Button(group.name) { Task { await model.selectPolicy(.group(group.id)) } }
+                    }
+                    Button("更多线路") {model.office.linesRequested=true}
+                    ForEach(OfficeTelemetryCadence.menuNodes(model.state,actualTag:CoreAPIClient.actualTag(model.proxyInfo))) { node in
+                        Button((model.state.activePolicy == .node(node.id) ? "✓ " : "") + node.name) {
+                            Task { await model.select(node.id) }
+                        }
                     }
                 }
+                .disabled(model.locked || model.state.nodes.isEmpty)
+                Button("恢复网络") { Task { await model.recover() } }
+                    .disabled(model.loadingFailed || model.recovering)
+                Menu("更多") { advancedMenuActions }
+            } else {
+                advancedMenuActions
             }
-            .disabled(model.locked)
-            
-            Button("暂停代理") { Task { await model.disconnect() } }
-                .disabled(model.locked || model.connection != .connected)
-            
-            Button("一键诊断") { Task { await model.diagnose() } }
-                .disabled(model.locked)
-            
-            Menu("代理模式") {
-                ForEach(ProxyMode.allCases, id: \.self) { mode in
-                    Button((mode == model.state.mode ? "✓ " : "") + mode.label) {
-                        Task { await model.setMode(mode) }
-                    }
-                }
-            }
-            .disabled(model.locked)
-            
-            Menu("节点与策略") {
-                Button("自动选择") { Task { await model.selectPolicy(.automatic) } }
-                    .disabled(model.state.nodes.isEmpty)
-                ForEach(model.state.groups) { group in
-                    Button(group.name) { Task { await model.selectPolicy(.group(group.id)) } }
-                }
-                Divider()
-                ForEach(model.state.nodes.prefix(30)) { node in
-                    Button((model.state.favorites.contains(node.id) ? "★ " : "") + node.name) {
-                        Task { await model.select(node.id) }
-                    }
-                }
-            }
-            .disabled(model.locked)
-            
-            Button(model.measuring ? "取消测速" : "检测全部节点 HTTPS 延迟") {
-                if model.measuring { model.cancelMeasurement() }
-                else { model.measure() }
-            }
-            .disabled(model.busy || model.state.nodes.isEmpty)
-            
-            Button("更新订阅和规则") { Task { await model.refreshAll() } }
-                .disabled(model.locked)
-            
-            Button("复制终端代理命令") { model.copyTerminalProxy() }
-            Button("恢复原代理") { Task { await model.recover() } }
-                .disabled(model.locked)
-            
+
             Divider()
             Button("显示主窗口") {
                 NSApplication.shared.activate(ignoringOtherApps: true)
                 NSApplication.shared.windows.first { $0.canBecomeMain }?.makeKeyAndOrderFront(nil)
             }
-            Button("退出轻舟代理") { NSApplication.shared.terminate(nil) }
+            Button("退出汐航") { NSApplication.shared.terminate(nil) }
+    }
+    @ViewBuilder private var advancedMenuActions: some View {
+        Menu("配置") {
+            ForEach(model.profiles) { profile in
+                Button((model.currentProfileID == profile.id ? "✓ " : "") + profile.name) {
+                    Task { await model.requestProfileChange(profile.id) }
+                }
+            }
         }
+        .disabled(model.locked)
+
+        Button("暂停代理") { Task { await model.disconnect() } }
+            .disabled(!model.canStop || model.connection != .connected)
+
+        Button("一键诊断") { Task { await model.diagnose() } }
+            .disabled(model.locked)
+
+        Menu("代理模式") {
+            ForEach(ProxyMode.allCases, id: \.self) { mode in
+                Button((mode == model.state.mode ? "✓ " : "") + mode.label) {
+                    Task { await model.setMode(mode) }
+                }
+            }
+        }
+        .disabled(model.locked)
+
+        Menu("节点与策略") {
+            Button("自动选择") { Task { await model.selectPolicy(.automatic) } }
+                .disabled(model.state.nodes.isEmpty)
+            ForEach(model.state.groups) { group in
+                Button(group.name) { Task { await model.selectPolicy(.group(group.id)) } }
+            }
+            Divider()
+            Button("更多线路") {model.office.linesRequested=true}
+            ForEach(OfficeTelemetryCadence.menuNodes(model.state,actualTag:CoreAPIClient.actualTag(model.proxyInfo))) { node in
+                Button((model.state.favorites.contains(node.id) ? "★ " : "") + node.name) {
+                    Task { await model.select(node.id) }
+                }
+            }
+        }
+        .disabled(model.locked)
+
+        Button(model.measuring ? "取消测速" : "检测全部节点 HTTPS 延迟") {
+            if model.measuring { model.cancelMeasurement() }
+            else { model.measure() }
+        }
+        .disabled(model.busy || model.state.nodes.isEmpty)
+
+        Button("更新订阅和规则") { Task { await model.refreshAll() } }
+            .disabled(model.locked)
+
+        Button("开发工具代理助手") {model.office.developerRequested=true}
+        Button("恢复原代理") { Task { await model.recover() } }
+            .disabled(model.loadingFailed || model.recovering)
     }
 }
 
@@ -131,1394 +211,7 @@ func formatRate(_ value: Int64) -> String {
 }
 
 @MainActor func latency(_ node: Node, _ model: AppModel) -> String {
-    if let result = model.state.latency[node.id.uuidString] {
-        return result.milliseconds.map { "\($0) ms" } ?? "检测失败"
-    }
-    if let delay = model.proxyInfo[PolicyReference.node(node.id).tag]?.history?.last?.delay, delay > 0 {
-        return "\(delay) ms"
-    }
-    return "未检测"
+    LatencyPresentation.label(model.state.latency[node.id.uuidString],invalidatedAt:model.latencyInvalidatedAt,now:max(model.latencyClock,Date()))
 }
 
-// MARK: - Main Content View
-struct ContentView: View {
-    @ObservedObject var model: AppModel
-    @State private var page = "概览"
-    @State private var importing = false
-    @State private var editing: EditorRequest?
-    
-    // Grouped Navigation Items
-    private let navSections: [(title: String, items: [(name: String, icon: String)])] = [
-        ("核心控制", [
-            ("概览", "chart.line.uptrend.xyaxis"),
-            ("节点", "network"),
-            ("策略组", "square.stack.3d.up")
-        ]),
-        ("规则与配置", [
-            ("订阅", "arrow.triangle.2.circlepath"),
-            ("分流规则", "arrow.triangle.branch"),
-            ("配置", "slider.horizontal.3")
-        ]),
-        ("监控与工具", [
-            ("连接", "point.3.connected.trianglepath.dotted"),
-            ("规则解释", "magnifyingglass.circle"),
-            ("诊断", "stethoscope"),
-            ("运行日志", "terminal")
-        ]),
-        ("系统偏好", [
-            ("设置", "gearshape")
-        ])
-    ]
-    
-    var body: some View {
-        NavigationSplitView {
-            VStack(alignment: .leading, spacing: 0) {
-                // Brand Header
-                HStack(spacing: 12) {
-                    if let appIcon = NSImage(named: NSImage.applicationIconName) {
-                        Image(nsImage: appIcon)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 38, height: 38)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                            .shadow(color: .black.opacity(0.18), radius: 3, x: 0, y: 1.5)
-                    } else {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 8)
-                                .fill(LinearGradient(
-                                    colors: [Theme.accentBlue, Theme.purpleAccent],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                ))
-                                .frame(width: 38, height: 38)
-                            Image(systemName: "paperplane.fill")
-                                .font(.system(size: 18, weight: .bold))
-                                .foregroundStyle(.white)
-                        }
-                    }
-                    
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("轻舟代理")
-                            .font(.headline.weight(.bold))
-                        Text("Qingzhou Proxy · \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版")")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 20)
-                .padding(.bottom, 16)
-                
-                Divider().opacity(0.6)
-                
-                // Grouped Sidebar Items
-                ScrollView(showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 14) {
-                        ForEach(navSections, id: \.title) { section in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(section.title)
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(.secondary)
-                                    .padding(.horizontal, 10)
-                                    .padding(.top, 4)
-                                ForEach(section.items, id: \.name) { item in
-                                    let isSelected = page == item.name
-                                    let badgeText: String? = {
-                                        if item.name == "节点" {
-                                            return "\(model.state.nodes.count)"
-                                        } else if item.name == "连接" && !model.connections.isEmpty {
-                                            return "\(model.connections.count)"
-                                        }
-                                        return nil
-                                    }()
-                                    let badgeColor: Color? = (item.name == "连接") ? Theme.connectedGreen : nil
-                                    
-                                    SidebarNavItemRow(
-                                        name: item.name,
-                                        icon: item.icon,
-                                        isSelected: isSelected,
-                                        badgeText: badgeText,
-                                        badgeColor: badgeColor
-                                    ) {
-                                        page = item.name
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 12)
-                }
-                
-                Divider().opacity(0.6)
-                
-                // Sidebar Footer Quick Control Card (Clash Verge style)
-                VStack(spacing: 8) {
-                    // Row 1: Status & Master Switch Toggle
-                    HStack(spacing: 8) {
-                        Circle()
-                            .fill(model.connection == .connected ? Theme.connectedGreen : Theme.disconnectedGray)
-                            .frame(width: 8, height: 8)
-                        
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(model.connection == .connected ? "代理已连接" : "代理未开启")
-                                .font(.system(size: 11, weight: .bold))
-                            Text(model.connection == .connected ? model.selectedName : model.state.captureMode.label)
-                                .font(.system(size: 10))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-                        
-                        Spacer()
-                        
-                        Button {
-                            Task {
-                                if model.connection == .connected { await model.disconnect() }
-                                else { await model.connect() }
-                            }
-                        } label: {
-                            if model.busy {
-                                ProgressView().controlSize(.small)
-                            } else {
-                                Text(model.connection == .connected ? "断开" : "开启")
-                                    .font(.system(size: 11, weight: .bold))
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 4)
-                                    .background(model.connection == .connected ? Theme.dangerRed.opacity(0.15) : Theme.connectedGreen.opacity(0.18))
-                                    .foregroundStyle(model.connection == .connected ? Theme.dangerRed : Theme.connectedGreen)
-                                    .clipShape(Capsule())
-                                    .contentShape(Capsule())
-                            }
-                        }
-                        .buttonStyle(.plain)
-                        .contentShape(Capsule())
-                        .disabled(model.locked || (model.state.activePolicy == nil && model.state.mode != .direct))
-                    }
-                    
-                    // Row 2: Mode Selector Pills (Rule / Global / Direct)
-                    HStack(spacing: 4) {
-                        ForEach(ProxyMode.allCases, id: \.self) { mode in
-                            let isCurrent = model.state.mode == mode
-                            Button {
-                                Task { await model.setMode(mode) }
-                            } label: {
-                                Text(mode.label)
-                                    .font(.system(size: 11, weight: isCurrent ? .bold : .regular))
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 5)
-                                    .background(isCurrent ? Theme.accentBlue.opacity(0.2) : Color.secondary.opacity(0.08))
-                                    .foregroundStyle(isCurrent ? Theme.accentBlue : Color.secondary)
-                                    .clipShape(RoundedRectangle(cornerRadius: 5))
-                                    .contentShape(RoundedRectangle(cornerRadius: 5))
-                            }
-                            .buttonStyle(.plain)
-                            .contentShape(RoundedRectangle(cornerRadius: 5))
-                            .disabled(model.locked)
-                        }
-                    }
-                    
-                    // Row 3: Bottom info (sing-box + real-time rates if connected)
-                    HStack {
-                        Text(model.state.captureMode.label)
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                        
-                        Spacer(minLength: 4)
-                        
-                        if model.connection == .connected {
-                            Text("↑ \(formatRate(model.uploadRate))  ↓ \(formatRate(model.downloadRate))")
-                                .font(.system(size: 9, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .fixedSize(horizontal: true, vertical: false)
-                        } else {
-                            Text("sing-box")
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-                    }
-                    .frame(height: 16)
-                }
-                .padding(10)
-                .frame(maxWidth: .infinity, minHeight: 102, maxHeight: 102)
-                .background(Color.secondary.opacity(0.06))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(model.connection == .connected ? Theme.connectedGreen.opacity(0.3) : Theme.subtleBorder, lineWidth: 1)
-                )
-                .padding(10)
-            }
-            .navigationSplitViewColumnWidth(min: 210, ideal: 225, max: 250)
-        } detail: {
-            VStack(alignment: .leading, spacing: 0) {
-                // Page Detail Content
-                if model.loadingFailed {
-                    ContentUnavailableView(
-                        "配置加载失败",
-                        systemImage: "exclamationmark.triangle",
-                        description: Text("原配置未被覆盖，请检查错误提示并重启应用。")
-                    )
-                    .padding(24)
-                } else {
-                    content
-                        .padding(24)
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .background(Color(nsColor: .windowBackgroundColor))
-        }
-        .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
-            guard let provider = providers.first else { return false }
-            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
-                if let data = item as? Data, let url = URL(dataRepresentation: data, relativeTo: nil) {
-                    Task { @MainActor in await model.importFile(url) }
-                }
-            }
-            return true
-        }
-        .sheet(isPresented: $importing) { ImportSheet(model: model) }
-        .sheet(item: $editing) { request in NodeEditor(model: model, node: request.node) }
-        .sheet(isPresented: Binding(get: { model.preview != nil }, set: { if !$0 { model.cancelPreview() } })) {
-            PreviewSheet(model: model)
-        }
-        .alert("操作提示", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
-            Button("知道了") { model.errorMessage = nil }
-        } message: {
-            Text(model.errorMessage ?? "")
-        }
-    }
-    
-    @ViewBuilder private var content: some View {
-        switch page {
-        case "概览": OverviewView(model: model)
-        case "配置": ProfilesView(model: model)
-        case "规则解释": RuleExplanationView(model: model)
-        case "诊断": DiagnosticsView(model: model)
-        case "节点": NodesView(model: model, onEdit: { editing = EditorRequest(node: $0) }, onAdd: { editing = EditorRequest(node: nil) }, onImport: { importing = true })
-        case "策略组": GroupsView(model: model)
-        case "订阅": SubscriptionsView(model: model)
-        case "分流规则": RuleView(model: model)
-        case "连接": ConnectionsView(model: model)
-        case "运行日志":
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("最近 500 行 · 敏感链接与凭据已自动脱敏保护")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("清空日志") { model.logs = [] }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                }
-                ScrollView {
-                    Text(model.logs.joined(separator: "\n"))
-                        .font(.system(.caption, design: .monospaced))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                        .padding(14)
-                }
-                .background(Color(nsColor: .textBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: Theme.cornerRadius))
-            }
-        default: SettingsView(model: model)
-        }
-    }
-}
-
-// MARK: - Modern Overview View (With Hero Banner)
-struct OverviewView: View {
-    @ObservedObject var model: AppModel
-    
-    var body: some View {
-        ScrollView(showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 20) {
-                // Section 1: Top Hero Connection Control Banner
-                connectionHeroCard
-                
-                // Section 2: 4 Modern Stat Cards
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)], spacing: 14) {
-                    ModernStatCard(
-                        title: "实时下载速率",
-                        value: formatRate(model.downloadRate),
-                        icon: "arrow.down.circle.fill",
-                        iconColor: Theme.accentBlue
-                    )
-                    ModernStatCard(
-                        title: "实时上传速率",
-                        value: formatRate(model.uploadRate),
-                        icon: "arrow.up.circle.fill",
-                        iconColor: Theme.connectedGreen
-                    )
-                    ModernStatCard(
-                        title: "本次会话流量",
-                        value: bytes(model.downloadTotal + model.uploadTotal),
-                        icon: "chart.pie.fill",
-                        iconColor: Theme.purpleAccent,
-                        subtitle: "↑ \(bytes(model.uploadTotal))  ↓ \(bytes(model.downloadTotal))"
-                    )
-                    ModernStatCard(
-                        title: "活动连接数",
-                        value: String(model.connections.count),
-                        icon: "network",
-                        iconColor: Theme.amberAccent,
-                        subtitle: model.monitorStatus
-                    )
-                }
-                
-                // Section 3: Traffic Curve Chart
-                RateChart(samples: model.rateHistory)
-                
-                // Section 4: Quick Action Bar
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("快捷操作")
-                        .font(.headline)
-                    
-                    HStack(spacing: 12) {
-                        Button {
-                            Task { await model.selectPolicy(.automatic) }
-                        } label: {
-                            Label("自动选择最低延迟", systemImage: "bolt.badge.automatic")
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(model.state.nodes.isEmpty || model.locked)
-                        
-                        Button {
-                            model.measure()
-                        } label: {
-                            Label("检测全部节点延迟", systemImage: "waveform.path.ecg")
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(model.locked || model.state.nodes.isEmpty)
-                        
-                        Button {
-                            Task { await model.refreshAll() }
-                        } label: {
-                            Label("一键更新订阅与规则", systemImage: "arrow.clockwise")
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(model.locked)
-                        
-                        Button {
-                            model.copyTerminalProxy()
-                        } label: {
-                            Label("复制终端代理命令", systemImage: "terminal")
-                        }
-                        .buttonStyle(.bordered)
-                    }
-                    
-                    if model.measuring {
-                        HStack(spacing: 8) {
-                            ProgressView().controlSize(.small)
-                            Text(model.measurementProgress)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Button("取消测速") { model.cancelMeasurement() }
-                                .controlSize(.small)
-                        }
-                        .padding(.top, 4)
-                    }
-                }
-                .padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Theme.cardBackground)
-                .clipShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.cardCornerRadius)
-                        .stroke(Theme.subtleBorder, lineWidth: 1)
-                )
-                
-                // Section 5: Traffic Rankings by Node & Destination
-                HStack(alignment: .top, spacing: 14) {
-                    trafficRankingCard(
-                        title: "按节点观测流量 (Top 5)",
-                        icon: "server.rack",
-                        items: model.trafficByNode.sorted { $0.value > $1.value }.prefix(5).map { (model.label($0.key), $0.value) }
-                    )
-                    
-                    trafficRankingCard(
-                        title: "按目标观测流量 (Top 5)",
-                        icon: "globe",
-                        items: model.trafficByTarget.sorted { $0.value > $1.value }.prefix(5).map { ($0.key, $0.value) }
-                    )
-                }
-                
-                if model.state.subscriptions.contains(where: { $0.pendingReview }) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "exclamationmark.bubble.fill")
-                            .foregroundStyle(Theme.amberAccent)
-                        Text("部分订阅更新涉及敏感差异需要人工确认，请前往订阅页进行预览。")
-                            .font(.caption)
-                    }
-                    .padding(12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Theme.amberAccent.opacity(0.1))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                }
-            }
-        }
-    }
-    
-    // MARK: - Hero Connection Control Banner (Inside Overview)
-    private var connectionHeroCard: some View {
-        HStack(spacing: 16) {
-            // Left Status Glow Ring & Icon
-            ZStack {
-                Circle()
-                    .fill(statusGlowColor.opacity(0.14))
-                    .frame(width: 48, height: 48)
-                Image(systemName: statusSymbol)
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundStyle(statusGlowColor)
-            }
-            
-            // Connection Info
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 8) {
-                    Text(model.connection.rawValue)
-                        .font(.title3.bold())
-                    
-                    // Takeover Mode Tag
-                    Text(model.state.captureMode.label)
-                        .font(.caption2.bold())
-                        .foregroundStyle(Theme.accentBlue)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Theme.accentBlue.opacity(0.12))
-                        .clipShape(Capsule())
-                }
-                
-                HStack(spacing: 8) {
-                    Text(model.selectedName)
-                        .font(.subheadline)
-                        .lineLimit(1)
-                    if model.connection == .connected {
-                        let allPassed = model.connectivityResults.allSatisfy { $0.status == .passed }
-                        let anyFailed = model.connectivityResults.contains { $0.status == .failed }
-                        let tipText = model.connectivityResults.map(\.summary).joined(separator: "\n")
-                        
-                        HStack(spacing: 4) {
-                            Circle()
-                                .fill(allPassed ? Theme.connectedGreen : (anyFailed ? Theme.amberAccent : Color.secondary))
-                                .frame(width: 6, height: 6)
-                            Text(allPassed ? "链路正常" : (anyFailed ? "部分异常" : "检测中"))
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(allPassed ? Theme.connectedGreen : (anyFailed ? Theme.amberAccent : Color.secondary))
-                                .lineLimit(1)
-                                .fixedSize(horizontal: true, vertical: false)
-                            
-                            HelpTip(text: tipText)
-                        }
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2.5)
-                        .background((allPassed ? Theme.connectedGreen : (anyFailed ? Theme.amberAccent : Color.secondary)).opacity(0.1))
-                        .clipShape(Capsule())
-                        .fixedSize(horizontal: true, vertical: true)
-                    }
-                }
-            }
-            
-            Spacer()
-            
-            // Center Real-Time Speed Badges (strictly fixed single-line to prevent vertical jitter)
-            if model.connection == .connected {
-                HStack(spacing: 12) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrow.up")
-                            .font(.caption.bold())
-                            .foregroundStyle(Theme.connectedGreen)
-                        Text(formatRate(model.uploadRate))
-                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                            .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: false)
-                    }
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrow.down")
-                            .font(.caption.bold())
-                            .foregroundStyle(Theme.accentBlue)
-                        Text(formatRate(model.downloadRate))
-                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                            .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: false)
-                    }
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(Color.secondary.opacity(0.08))
-                .clipShape(Capsule())
-                .fixedSize(horizontal: true, vertical: true)
-            }
-            
-            // Proxy Mode Segmented Picker
-            Picker("", selection: Binding(get: { model.state.mode }, set: { mode in Task { await model.setMode(mode) } })) {
-                ForEach(ProxyMode.allCases, id: \.self) { mode in
-                    Text(mode.label).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 220)
-            .disabled(model.locked)
-            
-            // Recovery Button
-            if model.recoveryPending && model.connection != .connected {
-                Button("恢复网络") { Task { await model.recover() } }
-                    .buttonStyle(.bordered)
-                    .controlSize(.regular)
-                    .disabled(model.locked)
-            }
-            
-            // Big Hero Action Button
-            Button {
-                Task {
-                    if model.connection == .connected { await model.disconnect() }
-                    else { await model.connect() }
-                }
-            } label: {
-                HStack(spacing: 6) {
-                    if model.busy {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Image(systemName: model.connection == .connected ? "stop.fill" : "play.fill")
-                    }
-                    Text(model.connection == .connected ? "断开" : "连接")
-                }
-                .font(.system(size: 14, weight: .semibold))
-                .frame(minWidth: 70)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(model.connection == .connected ? Theme.dangerRed : Theme.accentBlue)
-            .controlSize(.large)
-            .disabled(model.locked || (model.state.activePolicy == nil && model.state.mode != .direct) || (model.recoveryPending && model.connection != .connected))
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, minHeight: 76, maxHeight: 76, alignment: .leading)
-        .background(Theme.cardBackground)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.cardCornerRadius)
-                .stroke(model.connection == .connected ? Theme.connectedGreen.opacity(0.3) : Theme.subtleBorder, lineWidth: 1)
-        )
-    }
-    
-    private var statusGlowColor: Color {
-        switch model.connection {
-        case .connected: return Theme.connectedGreen
-        case .connecting, .disconnecting: return Theme.connectingYellow
-        case .error: return Theme.dangerRed
-        case .disconnected: return Theme.disconnectedGray
-        }
-    }
-    
-    private var statusSymbol: String {
-        switch model.connection {
-        case .connected: return "checkmark.shield.fill"
-        case .connecting, .disconnecting: return "arrow.triangle.2.circlepath"
-        case .error: return "exclamationmark.triangle.fill"
-        case .disconnected: return "power.circle.fill"
-        }
-    }
-    
-    private func trafficRankingCard(title: String, icon: String, items: [(String, Int64)]) -> some View {
-        let maxVal = items.map(\.1).max() ?? 1
-        return VStack(alignment: .leading, spacing: 12) {
-            Label(title, systemImage: icon)
-                .font(.headline)
-            
-            if items.isEmpty {
-                VStack {
-                    Spacer()
-                    Text("暂无流量数据")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity)
-            } else {
-                VStack(spacing: 10) {
-                    ForEach(Array(items.enumerated()), id: \.offset) { index, item in
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text("\(index + 1). " + item.0)
-                                    .font(.caption.weight(.medium))
-                                    .lineLimit(1)
-                                Spacer()
-                                Text(bytes(item.1))
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(.secondary)
-                            }
-                            GeometryReader { geo in
-                                ZStack(alignment: .leading) {
-                                    Capsule()
-                                        .fill(Color.secondary.opacity(0.1))
-                                        .frame(height: 5)
-                                    Capsule()
-                                        .fill(Theme.accentBlue)
-                                        .frame(width: max(5, geo.size.width * CGFloat(Double(item.1) / Double(max(1, maxVal)))), height: 5)
-                                }
-                            }
-                            .frame(height: 5)
-                        }
-                    }
-                }
-            }
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, minHeight: 180, alignment: .topLeading)
-        .background(Theme.cardBackground)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.cardCornerRadius)
-                .stroke(Theme.subtleBorder, lineWidth: 1)
-        )
-    }
-}
-
-// MARK: - Modern Nodes View (Spacious Layout)
-struct NodesView: View {
-    @ObservedObject var model: AppModel
-    var onEdit: (Node) -> Void
-    var onAdd: () -> Void
-    var onImport: () -> Void
-    
-    @State private var query = ""
-    @State private var sort = "HTTPS 延迟"
-    @State private var selectedKind: ProxyKind? = nil
-    @State private var favoriteOnly = false
-    @State private var selection = Set<UUID>()
-    @State private var noteNode: Node?
-    @State private var note = ""
-    @State private var sharing: ShareRequest?
-    @State private var deleting = false
-    
-    private var filteredNodes: [Node] {
-        model.state.nodes.filter { node in
-            (!favoriteOnly || model.state.favorites.contains(node.id)) &&
-            (selectedKind == nil || node.kind == selectedKind) &&
-            (query.isEmpty || [node.name, node.server, node.kind.rawValue, model.state.notes[node.id.uuidString] ?? ""].contains { $0.localizedCaseInsensitiveContains(query) })
-        }
-        .sorted { a, b in
-            let fa = model.state.favorites.contains(a.id), fb = model.state.favorites.contains(b.id)
-            if fa != fb { return fa }
-            if sort == "HTTPS 延迟" {
-                let av = model.state.latency[a.id.uuidString]?.milliseconds ?? Int.max
-                let bv = model.state.latency[b.id.uuidString]?.milliseconds ?? Int.max
-                if av != bv { return av < bv }
-            }
-            if sort == "最近使用" {
-                let av = model.state.recentUse[a.id.uuidString] ?? .distantPast
-                let bv = model.state.recentUse[b.id.uuidString] ?? .distantPast
-                if av != bv { return av > bv }
-            }
-            if sort == "协议", a.kind != b.kind { return a.kind.rawValue < b.kind.rawValue }
-            if a.name != b.name { return a.name.localizedStandardCompare(b.name) == .orderedAscending }
-            return a.id.uuidString < b.id.uuidString
-        }
-    }
-    
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            // Row 1: Header Title & Main Action Buttons
-            HStack(alignment: .center) {
-                HStack(spacing: 8) {
-                    Text("代理节点")
-                        .font(.title2.bold())
-                    Text("\(model.state.nodes.count) 个")
-                        .font(.caption.bold())
-                        .foregroundStyle(Theme.accentBlue)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 2.5)
-                        .background(Theme.accentBlue.opacity(0.12))
-                        .clipShape(Capsule())
-                }
-                
-                Spacer()
-                
-                HStack(spacing: 10) {
-                    // Ping All Button
-                    Button {
-                        if model.measuring { model.cancelMeasurement() }
-                        else { model.measure() }
-                    } label: {
-                        Label(model.measuring ? "取消测速" : "一键测速", systemImage: "bolt.fill")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.regular)
-                    .disabled(model.busy || model.state.nodes.isEmpty)
-                    
-                    // Add & Import Menu
-                    Menu {
-                        Button { onAdd() } label: {
-                            Label("手动添加节点", systemImage: "plus")
-                        }
-                        Button { chooseFile() } label: {
-                            Label("从本地文件导入", systemImage: "doc")
-                        }
-                        Button { onImport() } label: {
-                            Label("从链接 / 订阅导入", systemImage: "link")
-                        }
-                    } label: {
-                        Label("添加节点", systemImage: "plus.circle")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.regular)
-                    
-                    // Sort Dropdown
-                    Picker("排序", selection: $sort) {
-                        ForEach(["HTTPS 延迟", "节点名称", "协议", "最近使用"], id: \.self) { Text($0) }
-                    }
-                    .frame(width: 140)
-                    
-                    // View Toggle
-                    Toggle(isOn: Binding(get: { model.state.compactNodes }, set: { model.setCompact($0) })) {
-                        Image(systemName: model.state.compactNodes ? "list.bullet" : "square.grid.2x2")
-                    }
-                    .toggleStyle(.button)
-                    .controlSize(.regular)
-                }
-            }
-            
-            // Row 2: Search Input & Filter Tags Bar (Spacious & Clean)
-            HStack(spacing: 14) {
-                // Search Input Field
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundStyle(.secondary)
-                    TextField("搜索节点名称、服务器或备注...", text: $query)
-                        .textFieldStyle(.plain)
-                    if !query.isEmpty {
-                        Button { query = "" } label: {
-                            Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
-                .frame(width: 260)
-                .background(Color.secondary.opacity(0.08))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                
-                // Protocol Filter Chips with guaranteed single-line display
-                HStack(spacing: 8) {
-                    filterChip("全部", active: selectedKind == nil && !favoriteOnly) {
-                        selectedKind = nil; favoriteOnly = false
-                    }
-                    filterChip("★ 收藏", active: favoriteOnly) {
-                        favoriteOnly.toggle()
-                    }
-                    filterChip("HY2", active: selectedKind == .hysteria2) {
-                        toggleKind(.hysteria2)
-                    }
-                    filterChip("VLESS", active: selectedKind == .vless) {
-                        toggleKind(.vless)
-                    }
-                    filterChip("SS", active: selectedKind == .shadowsocks) {
-                        toggleKind(.shadowsocks)
-                    }
-                    filterChip("Trojan", active: selectedKind == .trojan) {
-                        toggleKind(.trojan)
-                    }
-                }
-                
-                Spacer()
-            }
-            
-            // Batch Action Toolbar (if items selected)
-            if !selection.isEmpty {
-                HStack(spacing: 12) {
-                    Text("已选择 \(selection.count) 个节点")
-                        .font(.caption.bold())
-                    Button("设为收藏") { model.batchFavorite(selection, value: true) }
-                    Button("取消收藏") { model.batchFavorite(selection, value: false) }
-                    Button("批量测速") { model.measure(Array(selection)) }
-                    Button("删除所选", role: .destructive) { deleting = true }
-                    Spacer()
-                    Button("取消多选") { selection.removeAll() }
-                        .controlSize(.small)
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .background(Theme.accentBlue.opacity(0.12))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .disabled(model.locked)
-            }
-            
-            if model.measuring {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text(model.measurementProgress)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            
-            // Nodes Content Grid / List
-            if filteredNodes.isEmpty {
-                ContentUnavailableView(
-                    model.state.nodes.isEmpty ? "还没有任何节点" : "没有找到符合条件的节点",
-                    systemImage: "network.slash",
-                    description: Text("点击右上角「添加节点」导入节点链接或订阅配置。")
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if !model.state.compactNodes {
-                // Card Grid View (Spacious and breathable)
-                ScrollView(showsIndicators: false) {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 300, maximum: 380), spacing: 16)], spacing: 16) {
-                        ForEach(filteredNodes) { node in
-                            nodeCard(node)
-                        }
-                    }
-                    .padding(.vertical, 4)
-                }
-            } else {
-                // Compact List View
-                List(filteredNodes, selection: $selection) { node in
-                    nodeRow(node)
-                }
-                .clipShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
-            }
-        }
-        .sheet(item: $sharing) { request in ShareView(model: model, node: request.node) }
-        .sheet(item: $noteNode) { node in
-            VStack(spacing: 18) {
-                Text("个人备注").font(.headline)
-                TextEditor(text: $note).frame(height: 120)
-                HStack {
-                    Button("取消") { noteNode = nil }
-                    Spacer()
-                    Button("保存备注") {
-                        model.saveNote(node.id, note: note)
-                        if model.errorMessage == nil { noteNode = nil }
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-            }
-            .padding(24)
-            .frame(width: 440)
-        }
-        .confirmationDialog("确认删除所选节点？", isPresented: $deleting) {
-            Button("确认批量删除", role: .destructive) {
-                let ids = selection
-                selection = []
-                Task { await model.batchDelete(ids) }
-            }
-        } message: {
-            Text("所选节点将从当前配置中彻底移除。")
-        }
-    }
-    
-    private func toggleKind(_ kind: ProxyKind) {
-        if selectedKind == kind { selectedKind = nil } else { selectedKind = kind }
-    }
-    
-    private func filterChip(_ title: String, active: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 12, weight: active ? .semibold : .regular))
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
-                .padding(.horizontal, 11)
-                .padding(.vertical, 5.5)
-                .background(active ? Theme.accentBlue.opacity(0.18) : Color.secondary.opacity(0.08))
-                .foregroundStyle(active ? Theme.accentBlue : Color.primary)
-                .clipShape(Capsule())
-                .overlay(
-                    Capsule()
-                        .stroke(active ? Theme.accentBlue.opacity(0.3) : Color.clear, lineWidth: 1)
-                )
-                .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .contentShape(Capsule())
-    }
-    
-    private func chooseFile() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        panel.title = "选择节点列表或 Clash/Mihomo YAML"
-        panel.begin { response in
-            if response == .OK, let url = panel.url {
-                Task { await model.importFile(url) }
-            }
-        }
-    }
-    
-    // Modern Node Card
-    private func nodeCard(_ node: Node) -> some View {
-        let isSelected = model.state.activePolicy == .node(node.id)
-        let isFav = model.state.favorites.contains(node.id)
-        
-        return VStack(alignment: .leading, spacing: 12) {
-            // Header: Protocol + Insecure Warning + Star + Checkmark
-            HStack(spacing: 8) {
-                ProtocolBadge(kind: node.kind)
-                
-                if node.insecure {
-                    Image(systemName: "exclamationmark.shield.fill")
-                        .font(.caption)
-                        .foregroundStyle(Theme.amberAccent)
-                        .help("此节点跳过 TLS 证书验证")
-                }
-                
-                Spacer()
-                
-                Button {
-                    model.toggleFavorite(node.id)
-                } label: {
-                    Image(systemName: isFav ? "star.fill" : "star")
-                        .font(.system(size: 14))
-                        .foregroundStyle(isFav ? Theme.amberAccent : Color.secondary.opacity(0.5))
-                }
-                .buttonStyle(.plain)
-                
-                if isSelected {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(Theme.connectedGreen)
-                        .font(.system(size: 16))
-                }
-            }
-            
-            // Body: Node Name & Server Address
-            VStack(alignment: .leading, spacing: 4) {
-                Text(node.name)
-                    .font(.system(size: 15, weight: .bold))
-                    .lineLimit(1)
-                Text("\(node.server):\(node.port)")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                if let note = model.state.notes[node.id.uuidString], !note.isEmpty {
-                    Text(note)
-                        .font(.caption2)
-                        .foregroundStyle(Theme.accentBlue)
-                        .lineLimit(1)
-                }
-            }
-            
-            Divider().opacity(0.5)
-            
-            // Footer: Latency Pill + Quick Actions
-            HStack {
-                LatencyBadge(delayText: latency(node, model))
-                
-                Spacer()
-                
-                HStack(spacing: 6) {
-                    Button {
-                        model.measure([node.id])
-                    } label: {
-                        Image(systemName: "bolt")
-                            .font(.system(size: 11))
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    
-                    Menu {
-                        Button("分享节点") { sharing = ShareRequest(node: node) }
-                        Button("修改备注") {
-                            note = model.state.notes[node.id.uuidString] ?? ""
-                            noteNode = node
-                        }
-                        if node.subscriptionID == nil {
-                            Button("编辑节点") { onEdit(node) }
-                        }
-                        Divider()
-                        Button("删除节点", role: .destructive) {
-                            Task { await model.deleteNode(node.id) }
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis")
-                            .font(.system(size: 11))
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                }
-            }
-        }
-        .padding(16)
-        .background(isSelected ? Theme.connectedGreen.opacity(0.06) : Theme.cardBackground)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.cardCornerRadius)
-                .stroke(isSelected ? Theme.connectedGreen.opacity(0.6) : Theme.subtleBorder, lineWidth: isSelected ? 1.5 : 1)
-        )
-        .contentShape(Rectangle())
-        .onTapGesture {
-            Task { await model.select(node.id) }
-        }
-    }
-    
-    // List Row
-    private func nodeRow(_ node: Node) -> some View {
-        let isSelected = model.state.activePolicy == .node(node.id)
-        let isFav = model.state.favorites.contains(node.id)
-        
-        return HStack(spacing: 12) {
-            Button {
-                Task { await model.select(node.id) }
-            } label: {
-                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(isSelected ? Theme.connectedGreen : .secondary)
-            }
-            .buttonStyle(.plain)
-            
-            Button {
-                model.toggleFavorite(node.id)
-            } label: {
-                Image(systemName: isFav ? "star.fill" : "star")
-                    .foregroundStyle(isFav ? Theme.amberAccent : .secondary)
-            }
-            .buttonStyle(.plain)
-            
-            ProtocolBadge(kind: node.kind)
-            
-            VStack(alignment: .leading, spacing: 2) {
-                Text(node.name).font(.headline)
-                Text("\(node.server):\(node.port)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            
-            if node.insecure {
-                Image(systemName: "exclamationmark.shield.fill")
-                    .foregroundStyle(Theme.amberAccent)
-            }
-            
-            Spacer()
-            
-            LatencyBadge(delayText: latency(node, model))
-            
-            Button("测速") { model.measure([node.id]) }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            
-            Button("分享") { sharing = ShareRequest(node: node) }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            
-            if node.subscriptionID == nil {
-                Button("编辑") { onEdit(node) }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-            }
-            
-            Button(role: .destructive) {
-                Task { await model.deleteNode(node.id) }
-            } label: {
-                Image(systemName: "trash")
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-        }
-        .padding(.vertical, 6)
-        .tag(node.id)
-    }
-}
-
-// MARK: - Modern Connections View
-struct ConnectionsView: View {
-    @ObservedObject var model: AppModel
-    @State private var query = ""
-    @State private var detail: CoreConnection?
-    @State private var ruleDraft: RoutingRule?
-    @State private var order = "流量"
-    @State private var network = "全部"
-    
-    private var rows: [CoreConnection] {
-        model.connections.filter { row in
-            (network == "全部" || row.metadata.network?.uppercased() == network) &&
-            (query.isEmpty ||
-             row.target.localizedCaseInsensitiveContains(query) ||
-             (row.metadata.processPath ?? "").localizedCaseInsensitiveContains(query) ||
-             row.chains.contains { model.label($0).localizedCaseInsensitiveContains(query) })
-        }
-        .sorted { a, b in
-            if order == "目标" { return a.target.localizedStandardCompare(b.target) == .orderedAscending }
-            if order == "持续时间" { return a.start < b.start }
-            return a.upload + a.download > b.upload + b.download
-        }
-    }
-    
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            // Header
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("实时连接监控")
-                        .font(.title2.bold())
-                    Text("\(model.monitorPaused ? "刷新已暂停" : model.monitorStatus) · 当前 \(model.connections.count) 条活跃连接")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                
-                Spacer()
-                
-                Button(role: .destructive) {
-                    Task { await model.closeConnection(nil) }
-                } label: {
-                    Label("关闭全部连接", systemImage: "xmark.circle")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.regular)
-                .disabled(model.locked || model.connection != .connected)
-            }
-            
-            // Filters Bar
-            HStack(spacing: 12) {
-                HStack(spacing: 6) {
-                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    TextField("搜索目标、应用路径或出站节点...", text: $query)
-                        .textFieldStyle(.plain)
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .frame(width: 280)
-                .background(Color.secondary.opacity(0.08))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                
-                Picker("协议", selection: $network) {
-                    ForEach(["全部", "TCP", "UDP"], id: \.self) { Text($0) }
-                }
-                .frame(width: 120)
-                
-                Picker("排序", selection: $order) {
-                    ForEach(["流量", "目标", "持续时间"], id: \.self) { Text($0) }
-                }
-                .frame(width: 130)
-                
-                Toggle("暂停刷新", isOn: $model.monitorPaused)
-                    .toggleStyle(.checkbox)
-                
-                Spacer()
-            }
-            
-            if rows.isEmpty {
-                ContentUnavailableView(
-                    "暂无活动连接",
-                    systemImage: "network",
-                    description: Text("当代理运行并处理网络请求时，此处将实时展示各连接的流量与路由链路。")
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                List(Array(rows.prefix(1000))) { row in
-                    HStack(spacing: 14) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(row.target)
-                                .font(.headline)
-                                .lineLimit(1)
-                            
-                            HStack(spacing: 6) {
-                                Text(row.metadata.network?.uppercased() ?? "未知")
-                                    .font(.caption2.bold())
-                                    .padding(.horizontal, 5)
-                                    .padding(.vertical, 1.5)
-                                    .background(Color.secondary.opacity(0.12))
-                                    .clipShape(RoundedRectangle(cornerRadius: 4))
-                                
-                                Text(row.chains.map { model.label($0) }.joined(separator: " → "))
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        
-                        Spacer()
-                        
-                        VStack(alignment: .trailing, spacing: 3) {
-                            Text("↑ \(bytes(row.upload))  ↓ \(bytes(row.download))")
-                                .font(.system(size: 11, design: .monospaced))
-                            Text(row.duration)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                        
-                        Button("详情") { detail = row }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                        
-                        Button("关闭", role: .destructive) {
-                            Task { await model.closeConnection(row.id) }
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .disabled(model.locked)
-                    }
-                    .padding(.vertical, 4)
-                }
-                .clipShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
-            }
-        }
-        .sheet(item: $detail) { row in
-            VStack(alignment: .leading, spacing: 14) {
-                Text("连接详细信息").font(.title2.bold())
-                
-                VStack(alignment: .leading, spacing: 8) {
-                    detailRow("目标地址", row.target)
-                    detailRow("来源进程", row.metadata.processPath?.isEmpty == false ? row.metadata.processPath! : "核心未提供")
-                    detailRow("匹配规则", row.rule?.isEmpty == false ? row.rule! : "默认策略")
-                    detailRow("出站链路", row.chains.map { model.label($0) }.joined(separator: " → "))
-                    detailRow("持续时间", row.duration)
-                    detailRow("累计传输", "上传 \(bytes(row.upload)) · 下载 \(bytes(row.download))")
-                }
-                .padding(14)
-                .background(Theme.cardBackground)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                
-                HStack {
-                    Button("以此目标生成分流规则") {
-                        let host = row.metadata.host?.isEmpty == false ? row.metadata.host! : row.metadata.destinationIP ?? ""
-                        ruleDraft = RoutingRule(kind: row.metadata.host?.isEmpty == false ? .domain : .cidr, value: host, action: .proxy, target: .selected)
-                        detail = nil
-                    }
-                    .buttonStyle(.borderedProminent)
-                    
-                    Spacer()
-                    Button("关闭") { detail = nil }
-                        .buttonStyle(.bordered)
-                }
-            }
-            .padding(24)
-            .frame(width: 540)
-        }
-        .sheet(item: $ruleDraft) { draft in RuleDraftView(model: model, draft: draft) }
-    }
-    
-    private func detailRow(_ title: String, _ value: String) -> some View {
-        HStack(alignment: .top) {
-            Text(title)
-                .font(.caption.bold())
-                .foregroundStyle(.secondary)
-                .frame(width: 70, alignment: .leading)
-            Text(value)
-                .font(.system(.caption, design: .monospaced))
-                .textSelection(.enabled)
-        }
-    }
-}
-
-// MARK: - Modern Settings View
-struct SettingsView: View {
-    @ObservedObject var model: AppModel
-    @State private var port = "7890"
-    @State private var exclusions = ""
-    @State private var protectedDomains = ""
-    @State private var shortcutKey: UInt32 = 35
-    @State private var shortcutModifiers: UInt32 = 2304
-    
-    var body: some View {
-        Form {
-            Section {
-                Picker("接管方式", selection: Binding(get: { model.state.captureMode }, set: { value in Task { await model.setCaptureMode(value) } })) {
-                    Text("系统代理（默认）").tag(CaptureMode.systemProxy)
-                    Text("TUN 虚拟网卡（管理员辅助服务）").tag(CaptureMode.tun)
-                    Text("兼容接管（系统代理 + TUN，保护企业内网）").tag(CaptureMode.compatible)
-                }
-                .disabled(model.locked)
-                
-                Picker("目的地址协议",selection:Binding(get:{model.state.effectiveAddressFamilyPolicy},set:{value in Task{await model.setAddressFamily(value)}})) {
-                    ForEach(AddressFamilyPolicy.allCases,id:\.self){policy in Text(policy.label).tag(policy)}
-                }.disabled(model.locked)
-                if model.state.addressFamilyPolicy == nil {Text("旧配置已使用仅 IPv4，避免节点 IPv6 不可达；可在此调整。").font(.caption).foregroundStyle(.secondary)}
-                Text("兼容接管覆盖后台直连软件，并保留企业路由和 DNS；含 HTTP 兼容规则的 TUN 仍启用系统代理。").font(.caption).foregroundStyle(.secondary)
-                Picker("DNS 解析策略", selection: Binding(get: { model.state.dnsPreference }, set: { value in Task { await model.setDNS(value) } })) {
-                    Text("经代理的 HTTPS DNS").tag(DNSPreference.httpsProxy)
-                    Text("原系统原生解析").tag(DNSPreference.system)
-                }
-                .disabled(model.locked)
-                
-                TextField("额外直连网段（用逗号分隔）", text: $exclusions)
-                Button("保存 TUN 排除网段") { Task { await model.saveTunExclusions(exclusions) } }
-                    .disabled(model.locked)
-                
-                TextField("补充内网域名（用逗号分隔，需要企业 DNS）",text:$protectedDomains)
-                Button("保存内网域名") {Task{await model.saveProtectedDomains(protectedDomains)}}.disabled(model.locked)
-                if !model.protectionSummary.isEmpty {DisclosureGroup("生效的内网绕过项") {ForEach(model.protectionSummary,id:\.self){Text($0).font(.caption)}}}
-                HStack {
-                    Text("辅助服务状态：")
-                    Text(model.helperStatus)
-                        .foregroundStyle(model.helperStatus.contains("通过") ? Theme.connectedGreen : Theme.amberAccent)
-                    Spacer()
-                    Button("检查版本") { Task { await model.inspectHelper() } }
-                }
-                
-                HStack(spacing: 8) {
-                    Button("复制安装命令") { copyHelperCommand("install-helper.sh") }
-                    Button("复制修复命令") { copyHelperCommand("recover-helper.sh") }
-                    Button("复制卸载命令") { copyHelperCommand("uninstall-helper.sh") }
-                }
-            } header: {
-                Label("网络接管与管理员辅助服务", systemImage: "shield.lefthalf.filled")
-            } footer: {
-                Text("TUN 模式需要通过辅助服务获取路由权限。重新构建应用后需要在终端再次批准更新。")
-            }
-            
-            Section {
-                TextField("本地回环监听端口", text: $port)
-                Button("保存端口") { Task { await model.savePort(Int(port) ?? 0) } }
-                    .disabled(model.locked)
-                
-                Toggle("启动应用后自动连接", isOn: Binding(get: { model.state.autoConnect }, set: { model.setAutoConnect($0) }))
-                    .disabled(model.locked)
-                Toggle("登录 macOS 时自启动", isOn: Binding(get: { model.state.loginAtStartup }, set: { model.setLoginAtStartup($0) }))
-                    .disabled(model.locked)
-            } header: {
-                Label("通用代理与启动", systemImage: "gearshape")
-            }
-            
-            Section {
-                Picker("快捷键主按键", selection: $shortcutKey) {
-                    Text("P").tag(UInt32(35))
-                    Text("D").tag(UInt32(2))
-                    Text("R").tag(UInt32(15))
-                }
-                Picker("修饰键组合", selection: $shortcutModifiers) {
-                    Text("⌘⌥ (Command + Option)").tag(UInt32(2304))
-                    Text("⌘⌃ (Command + Control)").tag(UInt32(4352))
-                    Text("⌃⌥ (Control + Option)").tag(UInt32(6144))
-                    Text("⌘⌃⌥ (Command + Control + Option)").tag(UInt32(6400))
-                }
-                Toggle("启用全局连接开关快捷键", isOn: Binding(get: { model.state.shortcutEnabled }, set: { model.setShortcut(enabled: $0, key: shortcutKey, modifiers: shortcutModifiers) }))
-                    .disabled(model.locked)
-                Button("应用快捷键设置") {
-                    model.setShortcut(enabled: model.state.shortcutEnabled, key: shortcutKey, modifiers: shortcutModifiers)
-                }
-                .disabled(model.locked)
-            } header: {
-                Label("全局快捷键", systemImage: "keyboard")
-            }
-            
-            Section {
-                Button("恢复原始系统网络与代理设置") { Task { await model.recover() } }
-                    .disabled(model.locked)
-            } header: {
-                Label("应急恢复", systemImage: "arrow.counterclockwise")
-            } footer: {
-                Text("关闭窗口后菜单栏仍常驻运行。正常退出时将自动清理系统代理。")
-            }
-        }
-        .formStyle(.grouped)
-        .onAppear {
-            port = String(model.state.listenPort)
-            exclusions = model.state.tunExcludedCIDRs.joined(separator: ",")
-            protectedDomains = model.state.protectedDomains.joined(separator: ",")
-            shortcutKey = model.state.shortcutKey
-            shortcutModifiers = model.state.shortcutModifiers
-        }
-    }
-    
-    private func copyHelperCommand(_ script: String) {
-        func quote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'" }
-        let resources = Bundle.main.resourceURL!
-        let command = "sudo " + quote(resources.appendingPathComponent(script).path) + (script == "install-helper.sh" ? " " + quote(Bundle.main.bundleURL.path) : "")
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(command, forType: .string)
-    }
-}
-
-struct EditorRequest: Identifiable {
-    let id = UUID()
-    var node: Node?
-}
+// MARK: - 主内容视图

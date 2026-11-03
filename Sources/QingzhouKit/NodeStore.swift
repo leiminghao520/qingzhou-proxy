@@ -6,6 +6,10 @@ public final class StoreTransaction {
     public var nextCatalog:ProfileCatalog?
     fileprivate let created:[String]
     fileprivate let retired:[String]
+    public var historySource="配置修改"
+    public var connectionVerified=false
+    public fileprivate(set) var historyTransactionID:UUID?
+    fileprivate var historyPrepared=false
     fileprivate var finished=false
     fileprivate init(previous:AppState,next:AppState,created:[String]=[],retired:[String]=[]) {self.previous=previous;self.next=next;self.created=created;self.retired=retired}
 }
@@ -13,6 +17,7 @@ public final class NodeStore {
     public private(set) var state:AppState
     public private(set) var catalog:ProfileCatalog
     public let credentials:CredentialStore
+    public var history:ProfileHistoryStore?
     public let file:URL
     public init(file:URL,credentials:CredentialStore) throws {
         self.file=file;self.credentials=credentials;state=AppState();catalog=ProfileCatalog()
@@ -34,7 +39,16 @@ public final class NodeStore {
             do {let backup=file.deletingLastPathComponent().appendingPathComponent("migration-v3.qzb");try SecureFile.write(BackupService.encrypt(snapshot,password:password),to:backup);try SecureFile.write(Data(ref.utf8),to:file.deletingLastPathComponent().appendingPathComponent("migration-v3.keyref"));catalog.backupIndex.append(BackupIndex(fileName:"migration-v3.qzb"));try SecureFile.write(JSONEncoder().encode(catalog),to:file)}catch{try? credentials.remove(ref);throw error}
         }
     }
-    public func commit(_ next:AppState) throws {guard next.schemaVersion==2 else {throw ProxyError("不能保存未知配置版本")};var root=catalog;root.updateActive(next);try root.validate();try SecureFile.write(JSONEncoder().encode(root),to:file);catalog=root;state=next}
+    public func commit(_ next:AppState) throws {
+        let tx=prepareChange(next)
+        do {try commit(tx)}catch{abort(tx);throw error}
+    }
+    public func prepareHistory(_ tx:StoreTransaction) throws {
+        guard !tx.historyPrepared else{return}
+        var root=tx.nextCatalog ?? catalog;root.updateActive(tx.next);try root.validate()
+        tx.historyTransactionID=try history?.prepare(previous:catalog,next:root,source:tx.historySource)
+        tx.historyPrepared=true
+    }
     public func prepareCatalog(_ root:ProfileCatalog) throws -> StoreTransaction {try root.validate();let tx=StoreTransaction(previous:state,next:root.active,retired:Array(catalog.credentialRefs.subtracting(root.credentialRefs)));tx.nextCatalog=root;return tx}
     public func prepareRestore(_ snapshot:BackupSnapshot) throws -> StoreTransaction {
         var root=snapshot.catalog;var created:[String]=[]
@@ -46,17 +60,58 @@ public final class NodeStore {
     }
     public func prepareChange(_ next:AppState) -> StoreTransaction {StoreTransaction(previous:state,next:next)}
     public func commit(_ tx:StoreTransaction) throws {
-        guard !tx.finished else {throw ProxyError("更新事务已经结束")};if var root=tx.nextCatalog {root.updateActive(tx.next);try root.validate();try SecureFile.write(JSONEncoder().encode(root),to:file);catalog=root;state=root.active}else{try commit(tx.next)};tx.finished=true
+        guard !tx.finished else {throw ProxyError("更新事务已经结束")}
+        try prepareHistory(tx)
+        var root=tx.nextCatalog ?? catalog;root.updateActive(tx.next);try root.validate()
+        if let id=tx.historyTransactionID {root.lastHistoryTransactionID=id}
+        try SecureFile.write(JSONEncoder().encode(root),to:file,durable:tx.historyTransactionID != nil)
+        catalog=root;state=root.active;tx.finished=true
+        if let id=tx.historyTransactionID {
+            do {try history?.finish(id,verified:tx.connectionVerified)}catch{history?.noteFinalizationFailure()}
+        }
         for ref in tx.retired where !catalog.credentialRefs.contains(ref) {try? credentials.remove(ref)}
     }
-    public func abort(_ tx:StoreTransaction) {guard !tx.finished else{return};tx.finished=true;for ref in tx.created {try? credentials.remove(ref)}}
-    public func prepareImport(_ candidates:[Candidate],subscription:Subscription?=nil,source:String?=nil,replacingID:UUID?=nil,profile:ImportPreview?=nil,scope:ImportScope = .nodes) throws -> StoreTransaction {
+    public func abort(_ tx:StoreTransaction) {
+        guard !tx.finished else{return};tx.finished=true
+        if let id=tx.historyTransactionID {try? history?.abort(id)}
+        for ref in tx.created {try? credentials.remove(ref)}
+    }
+    public func prepareProfileRestore(_ snapshot:ProfileHistorySnapshot) throws -> StoreTransaction {
+        var profile=snapshot.profile,created:[String]=[]
+        if !catalog.profiles.contains(where:{$0.id==profile.id}) {profile.id=UUID();profile.name=String(profile.name.prefix(80))+"（历史恢复）"}
+        do {
+            var mapping:[String:String]=[:]
+            let state=profile.configuration
+            let bases=Set(state.nodes.map(\.credentialRef)+state.subscriptions.map(\.sourceRef)+state.remoteRules.map(\.sourceRef))
+            for ref in bases {
+                guard let value=snapshot.credentials[ref] else {throw ProxyError("历史凭据不完整")}
+                let fresh=UUID().uuidString;mapping[ref]=fresh;created.append(fresh);try credentials.set(value,for:fresh)
+                if let obfs=snapshot.credentials[ref+".obfs"] {created.append(fresh+".obfs");try credentials.set(obfs,for:fresh+".obfs")}
+            }
+            for i in profile.configuration.nodes.indices {profile.configuration.nodes[i].credentialRef=mapping[profile.configuration.nodes[i].credentialRef]!}
+            for i in profile.configuration.subscriptions.indices {profile.configuration.subscriptions[i].sourceRef=mapping[profile.configuration.subscriptions[i].sourceRef]!;profile.configuration.subscriptions[i].autoUpdate=false;profile.configuration.subscriptions[i].retryCount=0;profile.configuration.subscriptions[i].retryAfter=nil;profile.configuration.subscriptions[i].pendingReview=false;profile.configuration.subscriptions[i].lastError=nil}
+            for i in profile.configuration.remoteRules.indices {profile.configuration.remoteRules[i].sourceRef=mapping[profile.configuration.remoteRules[i].sourceRef]!;profile.configuration.remoteRules[i].autoUpdate=false;profile.configuration.remoteRules[i].retryCount=0;profile.configuration.remoteRules[i].retryAfter=nil;profile.configuration.remoteRules[i].lastError=nil}
+            profile.configuration.latency=[:];profile.configuration.recentUse=[:]
+            var root=catalog
+            if let i=root.profiles.firstIndex(where:{$0.id==profile.id}) {root.profiles[i]=profile}else{root.profiles.append(profile)}
+            try root.validate()
+            let tx=StoreTransaction(previous:self.state,next:root.active,created:created,retired:Array(catalog.credentialRefs.subtracting(root.credentialRefs)))
+            tx.nextCatalog=root;tx.historySource="历史恢复";return tx
+        }catch {for ref in created {try? credentials.remove(ref)};throw error}
+    }
+    public func prepareImport(_ candidates:[Candidate],subscription:Subscription?=nil,source:String?=nil,replacingID:UUID?=nil,profile:ImportPreview?=nil,scope:ImportScope = .nodes,adoptingManual:Set<UUID>=[]) throws -> StoreTransaction {
         guard !candidates.isEmpty else {throw ProxyError("没有可导入节点")}
         var next=state,created:[String]=[],retired:[String]=[];var mapping:[UUID:UUID]=[:];var seen:[String:Candidate]=[:]
         let oldNodes=subscription.map{sub in state.nodes.filter{$0.subscriptionID==sub.id}} ?? replacingID.map{id in state.nodes.filter{$0.id==id}} ?? []
+        let suggestions=NodeSubscriptionSupport.matches(state:state,incoming:candidates.map(\.node))
+        let adopted=suggestions.filter{adoptingManual.contains($0.manual.id)}
+        guard adoptingManual.isSubset(of:Set(suggestions.map(\.id))),adoptingManual.isEmpty || subscription != nil else{throw ProxyError("手动节点迁移建议已变化，请重新预览")}
+        next.nodes.removeAll{adoptingManual.contains($0.id)}
+        let matching=SubscriptionMatching(old:oldNodes,incoming:candidates.map(\.node))
         if let sub=subscription {next.nodes.removeAll{$0.subscriptionID==sub.id}}
         if let id=replacingID {next.nodes.removeAll{$0.id==id}}
-        retired=oldNodes.flatMap{[$0.credentialRef,$0.credentialRef+".obfs"]}
+        retired=(oldNodes+adopted.map(\.manual)).flatMap{[$0.credentialRef,$0.credentialRef+".obfs"]}
+        var changedIDs:[UUID:UUID]=[:]
         do {
             for candidate in candidates {
                 let fingerprint=candidate.node.fingerprint
@@ -67,14 +122,29 @@ public final class NodeStore {
                 seen[fingerprint]=candidate
                 if subscription==nil && replacingID==nil,let existing=next.nodes.first(where:{$0.subscriptionID==nil && $0.fingerprint==fingerprint}),(try? credentials.get(existing.credentialRef))==candidate.secret,(try? credentials.get(existing.credentialRef+".obfs"))==candidate.obfsSecret {mapping[candidate.node.id]=existing.id;continue}
                 var node=candidate.node
-                node.id=replacingID ?? oldNodes.first{$0.fingerprint==fingerprint}?.id ?? node.id
-                if let old=oldNodes.first(where:{$0.kind==node.kind && $0.server==node.server && $0.port==node.port}),oldNodes.filter({$0.kind==node.kind && $0.server==node.server && $0.port==node.port}).count==1 {
+                let manual=adopted.first{$0.incoming.id==candidate.node.id}?.manual
+                let previous=matching.previousByIncomingID[candidate.node.id]
+                node.id=replacingID ?? manual?.id ?? previous?.id ?? node.id
+                if let previous{changedIDs[previous.id]=node.id}
+                if let old=manual ?? previous {
                     if let note=state.notes[old.id.uuidString]{next.notes[node.id.uuidString]=note};if state.favorites.contains(old.id){next.favorites.insert(node.id)}
                     if let recent=state.recentUse[old.id.uuidString]{next.recentUse[node.id.uuidString]=recent}
                 }
-                mapping[candidate.node.id]=node.id;node.subscriptionID=subscription?.id;node.credentialRef=UUID().uuidString
-                created.append(node.credentialRef);try credentials.set(candidate.secret,for:node.credentialRef)
-                if let value=candidate.obfsSecret {created.append(node.credentialRef+".obfs");try credentials.set(value,for:node.credentialRef+".obfs")}
+                mapping[candidate.node.id]=node.id;node.subscriptionID=subscription?.id
+                // 凭据未变时复用原引用，避免每次订阅更新都写入和删除钥匙串项目。
+                let old=manual ?? previous
+                let reusable:Bool
+                if let old {
+                    let secret=try credentials.get(old.credentialRef)
+                    let obfs=old.parameters["obfs"]=="salamander" ? try credentials.get(old.credentialRef+".obfs") : nil
+                    reusable=secret==candidate.secret && obfs==candidate.obfsSecret
+                }else{reusable=false}
+                if reusable,let old {node.credentialRef=old.credentialRef}
+                else {
+                    node.credentialRef=UUID().uuidString
+                    created.append(node.credentialRef);try credentials.set(candidate.secret,for:node.credentialRef)
+                    if let value=candidate.obfsSecret {created.append(node.credentialRef+".obfs");try credentials.set(value,for:node.credentialRef+".obfs")}
+                }
                 next.nodes.append(node)
             }
             if var sub=subscription {
@@ -93,7 +163,9 @@ public final class NodeStore {
                         if next.rules.count>=baseline.count,Array(next.rules.prefix(baseline.count)).allSatisfy({$0.subscriptionID==nil}),next.rules.prefix(baseline.count).map(signature)==baseline.map(signature) {next.rules.removeFirst(baseline.count)}
                     }
                     let merged=try configuration.applying(to:next)
-                    next.shadowrocket=configuration;next.dnsPreference=merged.dnsPreference;next.tunExcludedCIDRs=merged.tunExcludedCIDRs;next.captureMode = .systemProxy
+                    // 订阅提供规则与节点，不能覆盖用户选择的 DNS 或接管模式。
+                    next.shadowrocket=configuration
+                    try next.setBypasses(next.effectiveBypasses+NetworkBypassPolicy.migrate(domains:[],cidrs:merged.tunExcludedCIDRs).filter{item in !next.effectiveBypasses.contains{$0.kind==item.kind && $0.value==item.value}})
                 }
                 guard profile.unsupported.isEmpty else {throw ProxyError("完整导入包含不支持内容，请选择仅节点")}
                 let oldGroups=subscription.map{sub in state.groups.filter{$0.subscriptionID==sub.id}} ?? []
@@ -105,6 +177,12 @@ public final class NodeStore {
                 for var rule in profile.rules {rule.target=rule.target.map(remap);rule.subscriptionID=subscription?.id;next.rules.append(rule)}
                 if let final=profile.final {next.ruleFinal=remap(final)}
             }
+            // 保持原节点在选择器、策略组和规则中的引用，不因迁移而切到其他线路。
+            func remapExisting(_ ref:PolicyReference)->PolicyReference {if case .node(let id)=ref{return .node(changedIDs[id] ?? id)};return ref}
+            next.selectedID=next.selectedID.map{changedIDs[$0] ?? $0}
+            next.selectedPolicy=next.selectedPolicy.map(remapExisting);next.ruleFinal=next.ruleFinal.map(remapExisting)
+            for i in next.groups.indices{next.groups[i].members=next.groups[i].members.map(remapExisting);next.groups[i].selected=next.groups[i].selected.map(remapExisting)}
+            for i in next.rules.indices{next.rules[i].target=next.rules[i].target.map(remapExisting)}
             PolicyValidator.repair(&next)
             if state.nodes.isEmpty && state.activePolicy==nil {next.selectedID=next.nodes.first?.id;next.selectedPolicy=next.selectedID.map(PolicyReference.node)}
             try PolicyValidator.validate(next)

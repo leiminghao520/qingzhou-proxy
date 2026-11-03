@@ -8,7 +8,7 @@ struct RuleTargetPicker: View {
     var body: some View {
         Picker("目标动作", selection: $target) {
             Text("当前代理选择").tag(PolicyReference.selected)
-            Text("直接连接 (Direct)").tag(PolicyReference.direct)
+            Text("普通直连 (DIRECT)").tag(PolicyReference.direct)
             Text("拦截丢弃 (Reject)").tag(PolicyReference.reject)
             Divider()
             ForEach(state.groups) { group in
@@ -21,23 +21,49 @@ struct RuleTargetPicker: View {
 struct RuleView: View {
     @ObservedObject var model: AppModel
     @State private var tab = "自定义规则"
-    @State private var kind = RuleKind.domain
-    @State private var value = ""
-    @State private var target = PolicyReference.selected
+    @State private var conversion:RoutingRule?
     @State private var addingRemote = false
+    @State private var showingText=false
+    @State private var textError:String?
+    @ObservedObject private var draft:RulesDraft
+    init(model:AppModel) {self.model=model;draft=model.drafts.rules(profile:model.currentProfileID)}
+    private var displayedRules:[RoutingRule] {draft.rules ?? model.state.rules}
+    private func beginDraft() {draft.begin(state:model.state,revision:try? model.ruleRevision())}
+    private func resetDraft() {draft.discard();textError=nil}
+    private func previewMove(from source:IndexSet,to destination:Int) {
+        guard source.allSatisfy({displayedRules.indices.contains($0)}),(0...displayedRules.count).contains(destination) else {return}
+        beginDraft();draft.rules!.move(fromOffsets:source,toOffset:destination)
+    }
+    private func previewStep(_ id:UUID,by offset:Int) {
+        guard let index=displayedRules.firstIndex(where:{$0.id==id}),displayedRules.indices.contains(index+offset) else {return}
+        previewMove(from:IndexSet(integer:index),to:index+offset+(offset>0 ? 1:0))
+    }
     
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Picker("规则来源", selection: $tab) {
                 Text("自定义分流规则 (\(model.state.rules.count))").tag("自定义规则")
                 Text("远程分流规则集 (\(model.state.remoteRules.count))").tag("远程规则源")
+                Text("绕过汐航 (\(model.state.effectiveBypasses.count))").tag("网络绕过")
             }
             .pickerStyle(.segmented)
             
-            if tab == "自定义规则" {
-                // Add New Rule Bar
+            if tab == "网络绕过" {
+                NetworkBypassView(model:model)
+            } else if tab == "自定义规则" {
+                HStack {
+                    Button("批量文本编辑…") {
+                        do {
+                            if draft.text==nil {let text=try RuleTextCodec.encode(displayedRules);draft.text=text;draft.textBaseline=text;if draft.rules==nil {draft.revision=try model.ruleRevision()}}
+                            showingText=true;textError=nil
+                        }
+                        catch {textError=error.localizedDescription}
+                    }.disabled(model.locked)
+                    if let textError {Text(textError).font(.caption).foregroundStyle(Theme.dangerRed)}
+                }
+                // 添加规则草稿
                 HStack(spacing: 10) {
-                    Picker("规则类型", selection: $kind) {
+                    Picker("规则类型", selection: $draft.kind) {
                         Text("域名 (DOMAIN)").tag(RuleKind.domain)
                         Text("后缀 (SUFFIX)").tag(RuleKind.suffix)
                         Text("关键词 (KEYWORD)").tag(RuleKind.keyword)
@@ -45,34 +71,32 @@ struct RuleView: View {
                     }
                     .frame(width: 160)
                     
-                    TextField("匹配内容（如 google.com, 10.0.0.0/8）", text: $value)
+                    TextField("匹配内容（如 google.com, 10.0.0.0/8）", text: $draft.input)
                         .textFieldStyle(.roundedBorder)
                     
-                    RuleTargetPicker(state: model.state, target: $target)
+                    RuleTargetPicker(state: model.state, target: $draft.target)
                         .frame(width: 190)
                     
                     Button {
                         let rule = RoutingRule(
-                            kind: kind,
-                            value: value.trimmingCharacters(in: .whitespaces),
-                            action: target == .direct ? .direct : target == .reject ? .reject : .proxy,
-                            target: target
+                            kind: draft.kind,
+                            value: draft.input.trimmingCharacters(in: .whitespaces),
+                            action: draft.target == .direct ? .direct : draft.target == .reject ? .reject : .proxy,
+                            target: draft.target
                         )
-                        Task {
-                            await model.addRule(rule)
-                            if model.errorMessage == nil { value = "" }
-                        }
+                        beginDraft();draft.rules!.append(rule);draft.input=""
                     } label: {
-                        Label("添加规则", systemImage: "plus")
+                        Label("加入草稿", systemImage: "plus")
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(model.locked || value.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .disabled(model.locked || draft.input.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
                 .padding(12)
                 .background(Theme.cardBackground)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
+                .disabled(model.locked)
                 
-                // Default Final Rule Bar
+                // 默认未命中兜底策略
                 HStack(spacing: 10) {
                     Text("默认未命中兜底策略：")
                         .font(.caption.bold())
@@ -80,25 +104,39 @@ struct RuleView: View {
                     RuleTargetPicker(
                         state: model.state,
                         target: Binding(
-                            get: { model.state.ruleFinal ?? .selected },
-                            set: { ref in Task { await model.setRuleFinal(ref) } }
+                            get: { draft.final ?? model.state.ruleFinal ?? .selected },
+                            set: { ref in beginDraft();draft.final=ref }
                         )
                     )
                     .frame(width: 220)
                     Spacer()
                 }
                 .padding(.horizontal, 4)
+                .disabled(model.locked)
                 
-                // Custom Rules Table
-                if model.state.rules.isEmpty {
-                    ContentUnavailableView(
-                        "暂无自定义规则",
-                        systemImage: "arrow.triangle.branch",
-                        description: Text("在上方输入规则内容、类型和目标动作即可添加。")
-                    )
+                // 所有自定义规则修改先留在草稿中，点击应用时统一重连一次。
+                HStack {
+                    Text(draft.rules == nil ? "拖动、添加和删除仅修改草稿，不影响当前连接；越靠上越先匹配。":"规则草稿尚未应用，当前代理继续使用原配置。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    if let rules=draft.rules,let revision=draft.revision {
+                        Button("撤销草稿") {resetDraft()}.disabled(model.locked)
+                        Button(model.connection == .connected ? "应用规则（重新连接一次）":"保存规则") {
+                            let final=draft.final ?? .selected
+                            Task {if await model.applyRuleDraft(rules,final:final,revision:revision) {resetDraft()}}
+                        }.buttonStyle(.borderedProminent).disabled(model.locked)
+                    }
+                }
+                if displayedRules.isEmpty {
+                    ContentUnavailableView("暂无自定义规则",systemImage:"arrow.triangle.branch",description:Text("在上方添加规则草稿后点击保存。"))
                 } else {
-                    List(model.state.rules) { rule in
+                    List {
+                        ForEach(displayedRules) { rule in
                         HStack(spacing: 12) {
+                            Image(systemName: "line.3.horizontal")
+                                .foregroundStyle(.tertiary)
+                                .help("拖动此行调整规则顺序")
+                                .accessibilityLabel("拖动调整规则顺序")
                             ruleKindBadge(rule.kind)
                             
                             Text(rule.value)
@@ -110,8 +148,14 @@ struct RuleView: View {
                             ruleTargetBadge(rule.target ?? (rule.action == .direct ? .direct : rule.action == .reject ? .reject : .selected))
                             
                             HStack(spacing: 4) {
+                                if (rule.target ?? (rule.action == .direct ? .direct:.selected)) == .direct,[RuleKind.domain,.suffix,.cidr].contains(rule.kind) {
+                                    Button("转为绕过…") {conversion=rule}
+                                        .disabled(draft.rules != nil)
+                                        .help("先应用或撤销普通规则草稿，再转换已保存的规则")
+                                }
+
                                 Button {
-                                    Task { await model.moveRule(rule.id, by: -1) }
+                                    previewStep(rule.id,by:-1)
                                 } label: {
                                     Image(systemName: "arrow.up")
                                 }
@@ -119,7 +163,7 @@ struct RuleView: View {
                                 .controlSize(.small)
                                 
                                 Button {
-                                    Task { await model.moveRule(rule.id, by: 1) }
+                                    previewStep(rule.id,by:1)
                                 } label: {
                                     Image(systemName: "arrow.down")
                                 }
@@ -127,7 +171,7 @@ struct RuleView: View {
                                 .controlSize(.small)
                                 
                                 Button(role: .destructive) {
-                                    Task { await model.removeRule(rule.id) }
+                                    beginDraft();draft.rules!.removeAll{$0.id==rule.id}
                                 } label: {
                                     Image(systemName: "trash")
                                 }
@@ -137,6 +181,11 @@ struct RuleView: View {
                         }
                         .padding(.vertical, 4)
                         .disabled(model.locked)
+                        }
+                        .onMove { source, destination in
+                            previewMove(from:source,to:destination)
+                        }
+                        .moveDisabled(model.locked)
                     }
                     .clipShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
                 }
@@ -173,6 +222,18 @@ struct RuleView: View {
                     }
                 }
             }
+        }
+        .sheet(isPresented:$showingText) {
+            if let text=draft.text {
+                RuleTextEditor(app:model,text:text,rules:displayedRules,final:draft.final,baselineText:draft.textBaseline,onTextChange:{draft.text=$0},onDiscard:{draft.discardText()}) {rules in
+                    beginDraft();draft.rules=rules;draft.discardText()
+                }
+            }
+        }
+        .sheet(item:$conversion) {rule in
+            DraftEditorSheet(draft:model.drafts.bypass(profile:model.currentProfileID,items:model.state.effectiveBypasses,revision:try? model.bypassRevision(),corporateDNS:model.state.trustedCorporateDNS ?? []),store:model.drafts,title:"转换网络绕过") {
+                NetworkBypassView(model:model,conversion:rule)
+            }.padding(20).frame(minWidth:850,minHeight:650)
         }
         .sheet(isPresented: $addingRemote) { RemoteEditor(model: model) }
     }
@@ -352,8 +413,7 @@ struct RemoteEditor: View {
                 Spacer()
                 Button("下载并添加") {
                     Task {
-                        await model.addRemote(name: name, url: url, target: target)
-                        if model.errorMessage == nil { dismiss() } else { error = model.errorMessage }
+                        if await model.addRemote(name: name, url: url, target: target) { dismiss() } else { error = model.errorMessage }
                     }
                 }
                 .buttonStyle(.borderedProminent)

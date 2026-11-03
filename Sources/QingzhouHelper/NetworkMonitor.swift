@@ -6,76 +6,161 @@ import Darwin
 extension Service {
     func protect(_ route:ProtectedRoute) throws {
         // 接口限定路由不能保护未绑定的应用；补充同出口的全局路由并记录所有权。
-        if route.scope != nil {try addRoute(route.destination,route.gateway,route.interface,ipv6:route.ipv6)}
+        if route.scope != nil || route.source == "用户网络绕过" {try addRoute(route.destination,route.gateway,route.interface,ipv6:route.ipv6)}
     }
-    func verifyProtection()->Bool {
+    func verifyProtection(sample:NetworkRouteSample?=nil)->Bool {
         guard let plan=capturePlan else{return false}
-        guard let table=try? NetworkInspection.command("/usr/sbin/netstat",["-rn"]) else{return false}
-        let routes=NetworkSnapshot.parseRoutes(table)
+        guard let actual=try? (sample ?? routeSample()) else{return false}
+        let routes=actual.ownershipRoutes
         return plan.protectedRoutes.allSatisfy {expected in
-            routes.contains{actual in NetworkInspection.samePrefix(actual.destination,expected.destination) && actual.interface==expected.interface && actual.scope==nil}
+            routes.contains{actual in NetworkInspection.samePrefix(actual.destination,expected.destination) && actual.interface==expected.interface && actual.gateway==expected.gateway && actual.scope==nil}
         }
     }
-    // 路由表由调用方传入，同一轮检查只读取一次 netstat。
-    func verifyOwnedNetwork(routeTable table:String)->Bool {
-        guard let record=journal,let expected=try? PropertyListSerialization.propertyList(from:record.expectedDNS,format:nil) as? NSDictionary else{return false}
-        let routes=NetworkSnapshot.parseRoutes(table)
-        guard (SCDynamicStoreCopyValue(dynamic,record.dnsKey as CFString) as? NSDictionary)==expected else{return false}
-        return record.routes.allSatisfy{owned in routes.contains{current in NetworkInspection.samePrefix(current.destination,owned.destination) && current.interface==owned.interface && current.scope==owned.scope && current.gateway==owned.gateway}}
+    func verifyOwnedNetwork()->Bool {(try? inspectOwnedNetwork()) == true}
+    func inspectOwnedNetwork() throws -> Bool {try ownedNetworkIssues().isEmpty}
+    func ownedNetworkIssues(sample: NetworkRouteSample? = nil,excluding:Set<String>=[]) throws -> [String] {
+        guard let record=journal else{return ["恢复快照缺失或 DNS 快照不可读取"]}
+        let routes=try (sample ?? routeSample()).ownershipRoutes
+        var issues=dnsServiceIssues()
+        let expectedRoutes=record.routes.filter{!excluding.contains($0.destination)}.map{ProtectedRoute(destination:$0.destination,gateway:$0.gateway,interface:$0.interface,scope:$0.scope)}
+        var confirmed=routes
+        let required=expectedRoutes.filter{!CaptureOwnership.hasEquivalentHostPath($0,actual:routes)}+CaptureOwnership.monitoredPreservedRoutes(record.preservedRoutes ?? [])
+        let verificationDeadline=Date().addingTimeInterval(1)
+        for expected in required {
+            // 表采样遗漏时再做目标查询；同作用域的同前缀冲突不能被查询掩盖。
+            guard !routes.contains(where:{NetworkInspection.samePrefix($0.destination,expected.destination) && $0.scope==expected.scope}),
+                  let info=try? routeInfo(expected.destination,ipv6:expected.ipv6,scope:expected.scope,deadline:verificationDeadline),
+                  CaptureOwnership.matchesQuery(expected,info:info) else {continue}
+            confirmed.append(expected)
+        }
+        issues += CaptureOwnership.protectionIssues(owned:expectedRoutes,preserved:record.preservedRoutes ?? [],actual:confirmed)
+        return issues
     }
-    func currentSnapshot(routeTable routes:String) throws -> NetworkSnapshot {
-        guard let record=journal,let global=SCDynamicStoreCopyValue(dynamic,"State:/Network/Global/IPv4" as CFString) as? [String:Any],let primary=global["PrimaryInterface"] as? String else{throw ProxyError("网络快照无法更新")}
-        var snapshot=try NetworkSnapshot.read(store:dynamic,primary:primary,routes:routes,ownedDNSKey:record.dnsKey,ownedTunnel:record.interface)
-        snapshot.routes.removeAll {route in record.routes.contains{owned in NetworkInspection.samePrefix(route.destination,owned.destination) && route.interface==owned.interface && route.scope==owned.scope}}
+    func currentSnapshot(sample: NetworkRouteSample? = nil) throws -> NetworkSnapshot {
+        guard let record=journal else{throw NetworkEnvironmentNotReady("网络快照无法更新")}
+        let sample=try sample ?? routeSample()
+        var snapshot: NetworkSnapshot
+        if let networkSnapshotRead { snapshot=try networkSnapshotRead(sample) }
+        else {
+            guard let global=SCDynamicStoreCopyValue(dynamic,"State:/Network/Global/IPv4" as CFString) as? [String:Any],let primary=global["PrimaryInterface"] as? String else{throw NetworkEnvironmentNotReady("网络快照无法更新")}
+            snapshot=try NetworkSnapshot.read(store:dynamic,primary:primary,routes:sample.table,ownedDNSKey:record.dnsKey,ownedDNSKeys:Set(record.allDNSServices.map(\.key)),ownedTunnel:record.interface,structuredRoutes:sample.planningRoutes,lookup:{try self.routeInfo($0,ipv6:$1)})
+        }
+        snapshot.routes.removeAll {route in record.routes.contains{owned in NetworkInspection.samePrefix(route.destination,owned.destination) && route.interface==owned.interface && route.gateway==owned.gateway && route.scope==owned.scope}}
         return snapshot
     }
     func startNetworkMonitor() {
         networkTimer?.cancel()
+        routeEvents?.cancel()
+        networkChecks?.cancel()
+        let checks=NetworkCheckScheduler(enqueue: { [weak self] operation in self?.queue.async(execute: operation) }, operation: { [weak self] in self?.checkNetworkChange() })
+        networkChecks=checks
         var context=SCDynamicStoreContext(version:0,info:Unmanaged.passUnretained(self).toOpaque(),retain:nil,release:nil,copyDescription:nil)
-        networkStore=SCDynamicStoreCreate(nil,"轻舟企业保护监控" as CFString,{_,_,info in
-            guard let info else{return};Unmanaged<Service>.fromOpaque(info).takeUnretainedValue().scheduleNetworkCheck()
+        networkStore=SCDynamicStoreCreate(nil,"汐航企业保护监控" as CFString,{_,_,info in
+            guard let info else{return};Unmanaged<Service>.fromOpaque(info).takeUnretainedValue().networkChecks?.request()
         },&context)
         if let networkStore {SCDynamicStoreSetNotificationKeys(networkStore,nil,["State:/Network/Global/.*","State:/Network/Service/.*/(DNS|IPv4|IPv6)","State:/Network/Interface/.*/.*"] as CFArray);SCDynamicStoreSetDispatchQueue(networkStore,queue)}
         let descriptor=socket(PF_ROUTE,SOCK_RAW,0)
         if descriptor>=0 {
-            _=fcntl(descriptor,F_SETFL,O_NONBLOCK)
             let source=DispatchSource.makeReadSource(fileDescriptor:descriptor,queue:queue);routeEvents=source
-            source.setEventHandler{[weak self] in var buffer=[UInt8](repeating:0,count:8192);while recv(descriptor,&buffer,buffer.count,0)>0 {};self?.scheduleNetworkCheck()}
+            source.setEventHandler { [weak self, weak checks] in
+                guard let self, let checks else { return }
+                let listening=RouteEventPump.drain(read:{RouteEventPump.receive(descriptor)},
+                    cancelled:{self.networkChecks !== checks},
+                    observe:{self.networkMonitorObservation?($0)},request:{checks.request()})
+                if !listening {self.routeEvents?.cancel()}
+            }
             source.setCancelHandler{close(descriptor)};source.resume()
         }
         let timer=DispatchSource.makeTimerSource(queue:queue);networkTimer=timer
-        // 变化以 SCDynamicStore 和路由事件驱动；定时器只作兜底，避免每秒 fork netstat。
-        timer.schedule(deadline:.now()+15,repeating:15)
-        timer.setEventHandler{[weak self] in self?.checkNetworkChange()};timer.resume()
-    }
-    // 合并短时间内的连续事件（包括本服务自己写路由触发的事件），只执行一次检查。
-    func scheduleNetworkCheck(after delay:TimeInterval=0.5) {
-        guard !networkCheckScheduled else{return};networkCheckScheduled=true
-        queue.asyncAfter(deadline:.now()+delay){[weak self] in self?.networkCheckScheduled=false;self?.checkNetworkChange()}
+        timer.schedule(deadline:.now()+1,repeating:1)
+        timer.setEventHandler{[weak checks] in checks?.request()};timer.resume()
     }
     func checkNetworkChange() {
-        guard phase=="active",let previous=capturePlan,let request=activeRequest,let fd=owner else{return}
+        networkMonitorObservation?(.checkExecuted)
+        guard ["active","networkRetry"].contains(phase),let previous=capturePlan,let request=activeRequest,let fd=owner else{return}
+        // 每轮重新采样；所有权和重规划共享本轮路由，退避期间也核对外部改写。
+        let sample: NetworkRouteSample
         do {
-            let table=try NetworkInspection.command("/usr/sbin/netstat",["-rn"])
-            var snapshot=try currentSnapshot(routeTable:table);snapshot.proxies=previous.snapshot.proxies
-            let fresh=try CapturePlan.make(snapshot:snapshot,extraCIDRs:request.state?.tunExcludedCIDRs ?? [],extraDomains:request.state?.protectedDomains ?? [])
-            let defaultsChanged=fresh.snapshot.routes.filter{$0.destination.hasSuffix("/0")} != previous.snapshot.routes.filter{$0.destination.hasSuffix("/0")}
-            let ownedNetworkChanged = !verifyOwnedNetwork(routeTable:table)
-            let ownedProxyChanged=request.systemProxyPort != nil && !verifyProxy()
-            let changed=fresh.snapshot.primaryInterface != previous.snapshot.primaryInterface || fresh.snapshot.resolvers != previous.snapshot.resolvers || fresh.protectedRoutes != previous.protectedRoutes || defaultsChanged || ownedProxyChanged || ownedNetworkChanged
-            if !changed {pendingNetworkChange=nil;return}
-            // 变化需持续 1 秒才重规划；兜底定时器间隔较长，因此主动安排复核。
-            guard let pending=pendingNetworkChange else{pendingNetworkChange=Date();scheduleNetworkCheck(after:1.1);return}
-            guard Date().timeIntervalSince(pending)>=1 else{scheduleNetworkCheck(after:1.1);return}
-            phase="networkReplan"
-            try stop()
-            guard !ownedProxyChanged,!ownedNetworkChanged else{throw ProxyError("接管设置被外部修改，已停止接管并保留外部设置")}
-            try start(request,fd:fd)
-            guard let activate=activatePrepared else{throw ProxyError("网络重规划未完成")};try activate();activatePrepared=nil;phase="active"
-        }catch{
-            let message="内网保护更新失败："+error.localizedDescription
-            do{try stop();lastFailure=message+"；原网络已恢复"}catch{lastFailure=message+"；恢复冲突："+error.localizedDescription}
-            phase="networkProtectionFailed"
+            try verifyBypassFirewall()
+            sample=try routeSample()
+            var issues=try essentialNetworkIssues(sample: sample)
+            if request.systemProxyPort != nil {issues += proxyOwnershipIssues()}
+            if !issues.isEmpty {
+                failNetworkChange("网络保护核验未通过："+issues.prefix(8).joined(separator:"；"));return
+            }
+        } catch {retrySnapshot(error);return}
+        // 指定出口掉线时保留内核拒绝保护，不进入会撤销防火墙的通用重建流程。
+        if let state=request.state,!state.pinnedBypasses.isEmpty {
+            let services=bypassServicesRead()
+            if state.pinnedBypasses.contains(where:{item in !services.contains{$0.id==item.serviceID && $0.active}}) {
+                suspendCorporateQueries();phase="networkRetry"
+                lastFailure="指定网卡未就绪，拒绝其他出口；等待原网络恢复"
+                return
+            }
         }
+        guard snapshotRetry.ready(now:networkUptime()) else{return}
+        var fresh:CapturePlan
+        do {
+            var snapshot=try currentSnapshot(sample: sample);snapshot.proxies=previous.snapshot.proxies
+            // 每轮仍读取真实路由和 DNS；只有完整快照一致才复用派生计划。
+            fresh = snapshot == previous.snapshot ? previous : try CapturePlan.make(snapshot:snapshot,state:request.state ?? AppState(),pinned:try PinnedBypassPolicy.routes(request.state?.pinnedBypasses ?? [],services:bypassServicesRead()))
+        } catch let error as NetworkCaptureConflict {failNetworkChange(error.localizedDescription);return}
+        catch {suspendCorporateQueries();retrySnapshot(error);return}
+        snapshotRetry.reset();phase="active"
+        do {
+            let issues=try reconciledNetworkIssues(fresh,sample:sample)
+            if !issues.isEmpty {failNetworkChange("网络保护核验未通过："+issues.joined(separator:"；"));return}
+        } catch {retrySnapshot(error);return}
+        if fresh == previous {
+            pendingNetworkChange=nil;changeWindow.reset()
+            if protectedQueriesSuspended {capturePlan=fresh;protectedQueriesSuspended=false;dnsForwarder?.updatePlan(fresh)}
+            return
+        }
+        knownProtectedDomains.formUnion(fresh.domains)
+        fresh.domains=Array(knownProtectedDomains).sorted()
+        let defaultsChanged=fresh.snapshot.routes.filter{$0.destination.hasSuffix("/0")} != previous.snapshot.routes.filter{$0.destination.hasSuffix("/0")}
+        let answerTargets=dynamicAnswerRoutes.values.map{String($0.destination.split(separator:"/")[0])}
+        let dnsTargets=fresh.snapshot.resolvers.flatMap(\.servers).map{$0.components(separatedBy:"%")[0]}
+        let bootstrapTargets=Set(answerTargets+captureNodeAddresses.values.flatMap{$0}+dnsTargets+["1.1.1.1"])
+        let originalPathsChanged=bootstrapTargets.contains {target in
+            (try? CaptureRoutePlan.systemPath(target,routes:fresh.snapshot.routes)) != (try? CaptureRoutePlan.systemPath(target,routes:previous.snapshot.routes))
+        }
+        let changed=fresh.snapshot.primaryService != previous.snapshot.primaryService || originalPathsChanged || fresh.snapshot.primaryInterface != previous.snapshot.primaryInterface || fresh.snapshot.resolvers != previous.snapshot.resolvers || fresh.domains != previous.domains || fresh.protectedRoutes != previous.protectedRoutes || defaultsChanged
+        if !changed {
+            pendingNetworkChange=nil;changeWindow.reset()
+            if protectedQueriesSuspended {
+                // 恢复同一路径时同步权威计划，避免转发器的新快照被旧计划身份拒绝。
+                capturePlan=fresh;protectedQueriesSuspended=false;dnsForwarder?.updatePlan(fresh)
+            }
+            return
+        }
+        do {try stageCorporateQueries(fresh)} catch {lastFailure="企业域名更新暂不可用："+error.localizedDescription;return}
+        guard changeWindow.observe(fresh,now:networkUptime()) else {
+            if changeWindow.expired(now:networkUptime()) {lastFailure="企业网络仍在变化，普通代理继续运行；内网解析暂不可用";changeWindow.reset()}
+            return
+        }
+        do {
+            if try applyCorporatePlan(fresh,sample:sample) {changeWindow.reset();pendingNetworkChange=nil;return}
+        } catch let error as NetworkEnvironmentNotReady {
+            lastFailure=error.localizedDescription
+            if changeWindow.expired(now:networkUptime()) {changeWindow.reset()}
+            return
+        } catch {suspendCorporateQueries();lastFailure="网络保护更新暂不可用，保留当前保护："+error.localizedDescription;return}
+        changeWindow.reset()
+        beginNetworkResume(request,fd:fd)
+    }
+    private func retrySnapshot(_ error:Error) {
+        let now=networkUptime()
+        // 事件风暴不能提前耗尽下一次重试预算。
+        guard snapshotRetry.ready(now:now) else{return}
+        if snapshotRetry.failed(now:now) {phase="networkRetry"}
+        else if let request=activeRequest,let fd=owner {
+            // 快照仍未就绪时先安全恢复旧接管，再使用同一连接的有限重建流程。
+            beginNetworkResume(request,fd:fd)
+        } else {failNetworkChange("网络快照重试耗尽："+error.localizedDescription)}
+    }
+    private func failNetworkChange(_ reason:String) {
+        do{try stop(preserveExternal:true);lastFailure=reason+"；原网络已恢复"}catch{lastFailure=reason+"；恢复冲突："+error.localizedDescription}
+        phase="networkProtectionFailed"
     }
 }

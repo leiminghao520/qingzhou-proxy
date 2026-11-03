@@ -1,0 +1,17 @@
+[Unit]
+Description=Qingzhou online encrypted backup
+[Service]
+Type=oneshot
+UMask=0077
+WorkingDirectory=/opt/hy2-admin
+EnvironmentFile=/etc/hy2-admin.env
+ExecStart=/opt/qingzhou-client-venv/bin/python backup_job.py
+TimeoutStartSec=180
+RuntimeDirectory=qingzhou-backup
+RuntimeDirectoryMode=0700
+ProtectSystem=strict
+ReadWritePaths=/var/backups/qingzhou-client
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true

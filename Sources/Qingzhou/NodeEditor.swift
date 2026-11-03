@@ -140,8 +140,7 @@ struct NodeEditor: View {
             let candidate = try NodeParser.parse(uri)
             guard !candidate.node.insecure || insecureConfirmed else { throw ProxyError("请确认跳过证书验证设置") }
             Task {
-                await model.saveManual(candidate, editingID: node?.id)
-                if model.errorMessage == nil { dismiss() }
+                if await model.saveManual(candidate, editingID: node?.id) { dismiss() } else {error=model.errorMessage}
             }
         } catch {
             self.error = error.localizedDescription

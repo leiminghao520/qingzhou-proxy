@@ -75,6 +75,7 @@ struct PreviewSheet: View {
     @State private var scope = ImportScope.nodes
     @State private var confirmedInsecure = false
     @State private var confirmedSkipping = false
+    @State private var adoptingManual:Set<UUID> = []
     
     private var insecure: Bool { model.preview?.candidates.contains { $0.node.insecure } == true }
     private var issues: [String] { model.preview?.unsupported ?? [] }
@@ -114,6 +115,10 @@ struct PreviewSheet: View {
                             if !diff.changed.isEmpty {
                                 Text("更新节点：" + diff.changed.joined(separator: "、")).font(.caption)
                             }
+                            if !diff.ambiguousNodes.isEmpty {Text("节点身份有歧义，不继承个人信息："+diff.ambiguousNodes.joined(separator:"、")).font(.caption).foregroundStyle(Theme.amberAccent)}
+                            if diff.ruleChanges {Text("规则行为发生变化（包含 no-resolve），将按新规则顺序生效。").font(.caption)}
+                            if diff.strategyChanges {Text("策略组发生变化。").font(.caption)}
+                            if diff.compatibilityChanges {Text("HTTP 重写、兼容配置或规则资产发生变化；兼容模式开关保留当前设置。").font(.caption).foregroundStyle(Theme.amberAccent)}
                             if diff.removesSelection {
                                 Text("当前选中节点将在更新后被移除，系统将提示重新选择。").font(.caption.bold()).foregroundStyle(Theme.amberAccent)
                             }
@@ -124,6 +129,18 @@ struct PreviewSheet: View {
                 .padding(12)
                 .background(Theme.cardBackground)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+
+            if let preview=model.preview,preview.source != nil {
+                let matches=NodeSubscriptionSupport.matches(state:model.state,incoming:preview.candidates.map(\.node))
+                if !matches.isEmpty {
+                    VStack(alignment:.leading,spacing:6) {
+                        Text("发现同端点的手动节点；仅替换勾选项，保留收藏、备注和选择关系。").font(.caption)
+                        ForEach(matches) { match in
+                            Toggle("将手动节点「\(match.manual.name)」替换为订阅节点「\(match.incoming.name)」",isOn:Binding(get:{adoptingManual.contains(match.id)},set:{if $0{adoptingManual.insert(match.id)}else{adoptingManual.remove(match.id)}})).font(.caption)
+                        }
+                    }
+                }
             }
             
             Picker("导入范围", selection: $scope) {
@@ -185,7 +202,7 @@ struct PreviewSheet: View {
                 Spacer()
                 
                 Button("确认导入并应用") {
-                    Task { await model.confirmImport(scope: scope) }
+                    Task { await model.confirmImport(scope: scope,adoptingManual:adoptingManual) }
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(
@@ -238,14 +255,14 @@ struct SubscriptionsView: View {
         .sheet(item: $editing) { sub in
             VStack(alignment: .leading, spacing: 18) {
                 Text("修改订阅名称").font(.title2.bold())
+                if let message=model.issueTitle {Text(message).font(.caption).foregroundStyle(.red)}
                 TextField("订阅名称", text: $name)
                     .textFieldStyle(.roundedBorder)
                 HStack {
                     Button("取消") { editing = nil }
                     Spacer()
                     Button("保存") {
-                        model.updateSubscription(sub.id, name: name)
-                        if model.errorMessage == nil { editing = nil }
+                        if model.updateSubscription(sub.id, name: name) { editing = nil }
                     }
                     .buttonStyle(.borderedProminent)
                 }
@@ -260,8 +277,9 @@ struct SubscriptionsView: View {
         let (used, total) = extractUsageBytes(sub.usage)
         
         return VStack(alignment: .leading, spacing: 12) {
-            // Header
+            // 订阅摘要
             HStack {
+                Image(systemName:"square.stack.3d.up.fill").font(.title3).foregroundStyle(Theme.accentBlue).padding(12).background(Theme.accentBlue.opacity(0.10),in:RoundedRectangle(cornerRadius:12))
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 8) {
                         Text(sub.name)

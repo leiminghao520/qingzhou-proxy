@@ -65,10 +65,10 @@ public struct PolicyGroup: Codable,Identifiable,Sendable {
     public var id: UUID;public var name: String;public var kind: GroupKind;public var members:[PolicyReference];public var selected:PolicyReference?;public var subscriptionID:UUID?
     public init(id:UUID=UUID(),name:String,kind:GroupKind,members:[PolicyReference],selected:PolicyReference?=nil,subscriptionID:UUID?=nil) {self.id=id;self.name=name;self.kind=kind;self.members=members;self.selected=selected;self.subscriptionID=subscriptionID}
 }
-public struct LatencyResult:Codable,Sendable {public var milliseconds:Int?;public var testedAt:Date;public init(milliseconds:Int?,testedAt:Date=Date()){self.milliseconds=milliseconds;self.testedAt=testedAt}}
+public struct LatencyResult:Codable,Sendable {public var milliseconds:Int?;public var testedAt:Date;public var failure:NodeDetectionFailure?;public init(milliseconds:Int?,testedAt:Date=Date(),failure:NodeDetectionFailure?=nil){self.milliseconds=milliseconds;self.testedAt=testedAt;self.failure=failure}}
 public enum RuleKind: String, Codable, CaseIterable, Sendable { case domain, suffix, keyword, cidr, match, geoip, asn, userAgent }
 public enum RuleAction: String, Codable, CaseIterable, Sendable { case direct, proxy, reject }
-public struct RoutingRule: Codable, Identifiable, Sendable {
+public struct RoutingRule: Codable, Identifiable, Equatable, Sendable {
     public var noResolve:Bool?;public var id = UUID();public var kind: RuleKind;public var value: String;public var action: RuleAction;public var target:PolicyReference?;public var subscriptionID:UUID?
     public init(kind: RuleKind, value: String, action: RuleAction,target:PolicyReference?=nil,subscriptionID:UUID?=nil) {self.kind=kind;self.value=value;self.action=action;self.target=target;self.subscriptionID=subscriptionID}
 }
@@ -77,6 +77,14 @@ public struct RemoteRuleSource:Codable,Identifiable,Sendable {
     public init(name:String,sourceRef:String=UUID().uuidString,target:PolicyReference = .selected){self.name=name;self.sourceRef=sourceRef;self.target=target}
 }
 public struct AppState: Codable, Sendable {
+    public var disconnectProtection:Bool?
+    public var protectsDisconnect:Bool {disconnectProtection == true}
+    public var strictDNS:Bool?
+    public var savedDiagnosticTargets:[SavedDiagnosticTarget]?
+    public var trustedCorporateDNS:[TrustedCorporateDNS]?
+    public var networkBypasses:[NetworkBypass]?
+    public var httpCompatibilityEnabled=false
+    public var usesHTTPCompatibility:Bool {httpCompatibilityEnabled && shadowrocket != nil}
     public var shadowrocket:ShadowrocketConfiguration?;public var schemaVersion = 2;public var nodes:[Node]=[];public var subscriptions:[Subscription]=[];public var rules:[RoutingRule]=[]
     public var mode:ProxyMode = .rule;public var listenPort=7890;public var selectedID:UUID?;public var selectedPolicy:PolicyReference?;public var groups:[PolicyGroup]=[];public var remoteRules:[RemoteRuleSource]=[];public var favorites:Set<UUID>=[];public var latency:[String:LatencyResult]=[:];public var ruleFinal:PolicyReference?;public var autoConnect=false;public var loginAtStartup=false
     public var addressFamilyPolicy:AddressFamilyPolicy?
@@ -85,15 +93,17 @@ public struct AppState: Codable, Sendable {
     public var rulesEnabled:Bool {get {mode == .rule} set {mode = newValue ? .rule : .global}}
     public var activePolicy:PolicyReference? {selectedPolicy ?? selectedID.map(PolicyReference.node)}
     public init() {}
-    enum CodingKeys:String,CodingKey {case protectedDomains,addressFamilyPolicy,shadowrocket,shortcutEnabled,shortcutKey,shortcutModifiers,tunExcludedCIDRs,captureMode,dnsPreference,notes,recentUse,compactNodes,schemaVersion,nodes,subscriptions,rules,mode,listenPort,selectedID,selectedPolicy,groups,remoteRules,favorites,latency,ruleFinal,autoConnect,loginAtStartup}
+    enum CodingKeys:String,CodingKey {case disconnectProtection,strictDNS,trustedCorporateDNS,savedDiagnosticTargets,networkBypasses,httpCompatibilityEnabled,protectedDomains,addressFamilyPolicy,shadowrocket,shortcutEnabled,shortcutKey,shortcutModifiers,tunExcludedCIDRs,captureMode,dnsPreference,notes,recentUse,compactNodes,schemaVersion,nodes,subscriptions,rules,mode,listenPort,selectedID,selectedPolicy,groups,remoteRules,favorites,latency,ruleFinal,autoConnect,loginAtStartup}
     enum LegacyKeys:String,CodingKey {case rulesEnabled}
     public init(from decoder:Decoder) throws {
-        let c=try decoder.container(keyedBy:CodingKeys.self);shadowrocket=try c.decodeIfPresent(ShadowrocketConfiguration.self,forKey:.shadowrocket);schemaVersion=try c.decodeIfPresent(Int.self,forKey:.schemaVersion) ?? 1
+        let c=try decoder.container(keyedBy:CodingKeys.self);disconnectProtection=try c.decodeIfPresent(Bool.self,forKey:.disconnectProtection);strictDNS=try c.decodeIfPresent(Bool.self,forKey:.strictDNS);savedDiagnosticTargets=try c.decodeIfPresent([SavedDiagnosticTarget].self,forKey:.savedDiagnosticTargets);try SavedDiagnosticTarget.validate(savedDiagnosticTargets ?? []);httpCompatibilityEnabled=try c.decodeIfPresent(Bool.self,forKey:.httpCompatibilityEnabled) ?? false;shadowrocket=try c.decodeIfPresent(ShadowrocketConfiguration.self,forKey:.shadowrocket);schemaVersion=try c.decodeIfPresent(Int.self,forKey:.schemaVersion) ?? 1
         nodes=try c.decodeIfPresent([Node].self,forKey:.nodes) ?? [];subscriptions=try c.decodeIfPresent([Subscription].self,forKey:.subscriptions) ?? [];rules=try c.decodeIfPresent([RoutingRule].self,forKey:.rules) ?? []
         let old=try decoder.container(keyedBy:LegacyKeys.self);mode=try c.decodeIfPresent(ProxyMode.self,forKey:.mode) ?? ((try old.decodeIfPresent(Bool.self,forKey:.rulesEnabled) ?? true) ? .rule : .global)
         listenPort=try c.decodeIfPresent(Int.self,forKey:.listenPort) ?? 7890;selectedID=try c.decodeIfPresent(UUID.self,forKey:.selectedID);selectedPolicy=try c.decodeIfPresent(PolicyReference.self,forKey:.selectedPolicy)
         groups=try c.decodeIfPresent([PolicyGroup].self,forKey:.groups) ?? [];remoteRules=try c.decodeIfPresent([RemoteRuleSource].self,forKey:.remoteRules) ?? [];favorites=try c.decodeIfPresent(Set<UUID>.self,forKey:.favorites) ?? [];latency=try c.decodeIfPresent([String:LatencyResult].self,forKey:.latency) ?? [:];ruleFinal=try c.decodeIfPresent(PolicyReference.self,forKey:.ruleFinal)
         addressFamilyPolicy=try c.decodeIfPresent(AddressFamilyPolicy.self,forKey:.addressFamilyPolicy);captureMode=try c.decodeIfPresent(CaptureMode.self,forKey:.captureMode) ?? .systemProxy;dnsPreference=try c.decodeIfPresent(DNSPreference.self,forKey:.dnsPreference) ?? .httpsProxy;notes=try c.decodeIfPresent([String:String].self,forKey:.notes) ?? [:];recentUse=try c.decodeIfPresent([String:Date].self,forKey:.recentUse) ?? [:];compactNodes=try c.decodeIfPresent(Bool.self,forKey:.compactNodes) ?? false;shortcutEnabled=try c.decodeIfPresent(Bool.self,forKey:.shortcutEnabled) ?? false;shortcutKey=try c.decodeIfPresent(UInt32.self,forKey:.shortcutKey) ?? 35;shortcutModifiers=try c.decodeIfPresent(UInt32.self,forKey:.shortcutModifiers) ?? 2304;protectedDomains=try c.decodeIfPresent([String].self,forKey:.protectedDomains) ?? [];tunExcludedCIDRs=try c.decodeIfPresent([String].self,forKey:.tunExcludedCIDRs) ?? []
+        if let items=try c.decodeIfPresent([NetworkBypass].self,forKey:.networkBypasses) {networkBypasses=try NetworkBypassPolicy.normalize(items)}
+        if let values=try c.decodeIfPresent([TrustedCorporateDNS].self,forKey:.trustedCorporateDNS) {trustedCorporateDNS=try TrustedCorporateDNS.normalize(values)}
         autoConnect=try c.decodeIfPresent(Bool.self,forKey:.autoConnect) ?? false;loginAtStartup=try c.decodeIfPresent(Bool.self,forKey:.loginAtStartup) ?? false
     }
     public func label(_ ref:PolicyReference?) -> String {
@@ -107,7 +117,7 @@ public enum UpdateSchedule {
         if retryCount>0 {return retryAfter.map{$0<=now} == true}
         return updatedAt.map{now.timeIntervalSince($0)>=86400} ?? true
     }
-    public static func nextRetry(_ count:Int,now:Date=Date()) -> Date? {guard (1...3).contains(count) else{return nil};return now.addingTimeInterval([60.0,300,1800][count-1])}
+    public static func nextRetry(_ count:Int,now:Date=Date()) -> Date? {guard count>0 else{return nil};return now.addingTimeInterval([60.0,300,1800,3600][min(count,4)-1])}
 }
 public protocol CredentialStore: AnyObject {
     func get(_ ref: String) throws -> String
@@ -117,7 +127,7 @@ public protocol CredentialStore: AnyObject {
 public final class MemoryCredentials: CredentialStore {
     private var values: [String:String] = [:]
     public init() {}
-    public func get(_ ref: String) throws -> String { guard let v = values[ref] else { throw ProxyError("凭据不存在，请重新导入节点") }; return v }
+    public func get(_ ref: String) throws -> String { guard let v = values[ref] else { throw MissingCredential() }; return v }
     public func set(_ value: String, for ref: String) throws { values[ref] = value }
     public func remove(_ ref: String) throws { values.removeValue(forKey: ref) }
 }

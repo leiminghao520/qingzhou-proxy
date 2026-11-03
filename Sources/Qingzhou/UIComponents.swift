@@ -2,37 +2,41 @@ import SwiftUI
 import AppKit
 import QingzhouKit
 
-// MARK: - Qingzhou UI Theme & Styles
+// MARK: - 汐航主题与基础样式
 enum Theme {
-    static let cornerRadius: CGFloat = 12
-    static let cardCornerRadius: CGFloat = 14
-    static let controlRadius: CGFloat = 8
+    static let cornerRadius: CGFloat = 16
+    static let cardCornerRadius: CGFloat = 16
+    static let controlRadius: CGFloat = 10
     
-    // Status Colors
-    static let connectedGreen = Color(red: 0.18, green: 0.78, blue: 0.44)
-    static let connectingYellow = Color(red: 0.95, green: 0.65, blue: 0.12)
+    // 状态色与品牌色
+    static let connectedGreen = Color(nsColor: NSColor(name:nil) { $0.bestMatch(from:[.darkAqua,.aqua]) == .darkAqua ? NSColor.systemGreen : NSColor(red:0.08,green:0.45,blue:0.25,alpha:1) })
+    static let connectingYellow = Color(nsColor: .systemOrange)
     static let disconnectedGray = Color.secondary
-    static let dangerRed = Color(red: 0.92, green: 0.28, blue: 0.28)
-    static let accentBlue = Color(red: 0.12, green: 0.52, blue: 0.96)
-    static let purpleAccent = Color(red: 0.58, green: 0.35, blue: 0.92)
-    static let cyanAccent = Color(red: 0.08, green: 0.72, blue: 0.82)
-    static let amberAccent = Color(red: 0.95, green: 0.55, blue: 0.15)
+    static let dangerRed = Color(nsColor: .systemRed)
+    static let accentBlue = Color(nsColor: NSColor(name:nil) { $0.bestMatch(from:[.darkAqua,.aqua]) == .darkAqua ? NSColor(red:0.15,green:0.83,blue:0.85,alpha:1) : NSColor(red:0.02,green:0.45,blue:0.49,alpha:1) })
+    static let brand = Color(red:22/255,green:184/255,blue:197/255)
+    static let purpleAccent = Color(red:88/255,green:101/255,blue:232/255)
+    static let cyanAccent = accentBlue
+    static let amberAccent = Color(nsColor: NSColor(name:nil) { $0.bestMatch(from:[.darkAqua,.aqua]) == .darkAqua ? NSColor.systemOrange : NSColor(red:0.62,green:0.33,blue:0.04,alpha:1) })
     
-    // Background Tints
+    static let trafficUpload = purpleAccent
+    static let trafficDownload = accentBlue
+
+    // 背景颜色
     static var cardBackground: Color {
-        Color(nsColor: .controlBackgroundColor)
+        Color(nsColor: NSColor(name:nil) { $0.bestMatch(from:[.darkAqua,.aqua]) == .darkAqua ? NSColor(red:0.080,green:0.112,blue:0.163,alpha:1) : NSColor.white })
     }
     
     static var secondaryBackground: Color {
-        Color(nsColor: .windowBackgroundColor)
+        Color(nsColor: NSColor(name:nil) { $0.bestMatch(from:[.darkAqua,.aqua]) == .darkAqua ? NSColor(red:0.045,green:0.065,blue:0.103,alpha:1) : NSColor(red:0.955,green:0.970,blue:0.980,alpha:1) })
     }
     
     static var subtleBorder: Color {
-        Color.primary.opacity(0.07)
+        Color.primary.opacity(0.10)
     }
 }
 
-// MARK: - Protocol Tag Badge
+// MARK: - 协议标签
 struct ProtocolBadge: View {
     let kind: ProxyKind
     
@@ -60,13 +64,14 @@ struct ProtocolBadge: View {
     }
 }
 
-// MARK: - Latency Pill Badge
+// MARK: - 延迟标签
 struct LatencyBadge: View {
     let delayText: String
     
     private var color: Color {
+        if delayText.contains("历史结果") {return Color.secondary}
         if delayText.contains("ms") {
-            let num = Int(delayText.replacingOccurrences(of: " ms", with: "").trimmingCharacters(in: .whitespaces)) ?? 999
+            let num = Int(delayText.split(separator:" ").first.map(String.init) ?? "") ?? 999
             if num <= 100 { return Theme.connectedGreen }
             if num <= 250 { return Theme.accentBlue }
             if num <= 500 { return Theme.amberAccent }
@@ -82,18 +87,23 @@ struct LatencyBadge: View {
             Circle()
                 .fill(color)
                 .frame(width: 6, height: 6)
-            Text(delayText)
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
+            Text((delayText.contains("历史结果") ? "历史 · " : "") + (delayText.components(separatedBy:" · ").first ?? delayText))
+                .lineLimit(1)
+                .help(delayText)
+                .font(.system(size: 11, weight: .medium, design: .rounded)).monospacedDigit()
                 .foregroundStyle(color)
         }
         .padding(.horizontal, 7)
         .padding(.vertical, 3)
         .background(color.opacity(0.1))
         .clipShape(Capsule())
+        .fixedSize(horizontal:true,vertical:false)
+        .help(delayText)
+        .accessibilityLabel(delayText)
     }
 }
 
-// MARK: - Modern Stat Card
+// MARK: - 统计卡片
 struct ModernStatCard: View {
     let title: String
     let value: String
@@ -125,6 +135,7 @@ struct ModernStatCard: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(value)
                     .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .monospacedDigit()
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                 Text(title)
@@ -135,16 +146,11 @@ struct ModernStatCard: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, minHeight: 96, maxHeight: 96, alignment: .leading)
-        .background(Theme.cardBackground)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.cardCornerRadius))
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.cardCornerRadius)
-                .stroke(Theme.subtleBorder, lineWidth: 1)
-        )
+        .liquidContentSurface(cornerRadius: Theme.cardCornerRadius)
     }
 }
 
-// MARK: - Modern Section Header
+// MARK: - 页面标题
 struct SectionHeader: View {
     let title: String
     var subtitle: String? = nil
@@ -156,7 +162,7 @@ struct SectionHeader: View {
         HStack(alignment: .center) {
             HStack(spacing: 6) {
                 Text(title)
-                    .font(.headline.weight(.semibold))
+                    .font(.system(size:20,weight:.bold,design:.rounded))
                 
                 if let subtitle, !subtitle.isEmpty {
                     HelpTip(text: subtitle)
@@ -180,7 +186,7 @@ struct SectionHeader: View {
     }
 }
 
-// MARK: - Modern Help / Info Tooltip Indicator (Interactive Hover + Click Pill)
+// 信息提示支持悬停查看和点击固定，长说明自动换行。
 struct HelpTip: View {
     let text: String
     @State private var isHovered = false
@@ -213,8 +219,9 @@ struct HelpTip: View {
                     Text(text)
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(Color.primary)
-                        .fixedSize(horizontal: true, vertical: false)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
+                .frame(width: 340, alignment: .leading)
                 .padding(.horizontal, 9)
                 .padding(.vertical, 5)
                 .background(
@@ -236,7 +243,7 @@ struct HelpTip: View {
     }
 }
 
-// MARK: - Usage Progress Bar
+// MARK: - 订阅用量进度
 struct UsageProgressBar: View {
     let usedBytes: Int64?
     let totalBytes: Int64?
@@ -269,13 +276,14 @@ struct UsageProgressBar: View {
     }
 }
 
-// MARK: - Sidebar Navigation Item Row (Full-Width Hit Testing & Hover)
+// MARK: - 侧栏导航与玻璃选中态
 struct SidebarNavItemRow: View {
     let name: String
     let icon: String
     let isSelected: Bool
     var badgeText: String? = nil
     var badgeColor: Color? = nil
+    var selectionNamespace: Namespace.ID? = nil
     let action: () -> Void
     
     @State private var isHovered = false
@@ -307,10 +315,11 @@ struct SidebarNavItemRow: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
             .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: Theme.controlRadius)
-                    .fill(isSelected ? Theme.accentBlue.opacity(0.14) : (isHovered ? Color.primary.opacity(0.06) : Color.clear))
-            )
+            .background {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(!isSelected && isHovered ? Color.primary.opacity(0.06) : .clear)
+            }
+            .modifier(LiquidSelectionSurface(selected: isSelected, namespace: selectionNamespace, id: "sidebar-selection", cornerRadius: 12))
             .contentShape(RoundedRectangle(cornerRadius: Theme.controlRadius))
         }
         .buttonStyle(.plain)

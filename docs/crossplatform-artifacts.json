@@ -1,0 +1,76 @@
+{
+  "date": "2026-10-17",
+  "version": "0.8.10+24",
+  "core": "1.14.3",
+  "coreCommit": "7054cac5124465ffdb145870d7c01885566711b1",
+  "artifacts": [
+    {
+      "kind": "android_debug_apk",
+      "path": "outputs/crossplatform-android-20261017-115322-1488b291/app-debug.apk",
+      "bytes": 212565987,
+      "sha256": "4e67bc0ab37765714a533224f07dbc2c8b7ca914c5f47fd4d247f4ccd88831db"
+    },
+    {
+      "kind": "windows_source_bundle",
+      "path": "outputs/windows-source-20261017-115518-a112d20a/qingzhou-windows-source.zip",
+      "bytes": 338209,
+      "sha256": "e4ef1b18c1434928da9400aa20e35126b6d76f275ac5fa9d4aaf5525ea3c8da1"
+    },
+    {
+      "kind": "windows_service_only",
+      "path": "outputs/crossplatform-windows-20261017-115255-7e460729/qingzhou-service.exe",
+      "bytes": 42762752,
+      "sha256": "4840f6b97dc607dc9eb84ba8d020a13d04d199dad5d6946ee8ae7586aca429fb"
+    }
+  ],
+  "checks": {
+    "flutterTests": 23,
+    "flutterAnalyze": "passed",
+    "swiftChecks": {
+      "scenarios": 121,
+      "assertions": 1258,
+      "failures": 0
+    },
+    "goRace": "passed",
+    "backupInterop": "passed",
+    "androidSignatureV2": "passed",
+    "androidABI": "arm64-v8a",
+    "embeddedCoreProvenance": "passed",
+    "iOSBuild": "paused_by_user",
+    "windowsClientBuild": "not_verified_user_will_build_on_windows",
+    "installed": "not_verified",
+    "realNetwork": "not_verified",
+    "stability2h": "not_verified",
+    "lineCoverageGate": "failed",
+    "mutationGate": "not_verified",
+    "flutterLineCoverage": {
+      "hit": 982,
+      "total": 1791
+    },
+    "flutterBranchCoverage": {
+      "hit": 268,
+      "total": 655
+    },
+    "goSystemProxyStatementCoverage": 98.4,
+    "windowsSourceStructure": "passed"
+  },
+  "activeScope": [
+    "android",
+    "windows"
+  ],
+  "iosPaused": true,
+  "previousArtifacts": [
+    {
+      "kind": "android_debug_apk",
+      "path": "outputs/crossplatform-android-20261017-012116-6670a8ba/app-debug.apk",
+      "bytes": 212565987,
+      "sha256": "e3c648bcea2f3cb409736b6d2108c6256494c30022587c7b637fd0c7fdb3412d"
+    },
+    {
+      "kind": "windows_service_only",
+      "path": "outputs/crossplatform-windows-20261017-012012-6c1d9a5a/qingzhou-service.exe",
+      "bytes": 42754048,
+      "sha256": "fb55abcb33bae40b3bdaa96313da6e816caf64b405e0564389418ff2e089dc79"
+    }
+  ]
+}

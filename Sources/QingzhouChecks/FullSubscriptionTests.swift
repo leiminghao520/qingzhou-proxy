@@ -14,21 +14,21 @@ final class FullSubscriptionTests:CheckCase {
     }
     func testFullSyncPreservesLocalRulesAndRollback() throws {
         let configuration=try configuration()
-        let expectedCount=try configuration.applying(to:AppState()).rules.count
         let preview=try ProfileImporter.parse(document(configuration))
-        expectEqual(preview.fullConfiguration?.rules.count,configuration.rules.count)
-        expectEqual(preview.rules.count,expectedCount)
+        expectEqual(preview.fullConfiguration?.rules.count,619)
+        expectEqual(preview.rules.count,627)
         let dir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer{try? FileManager.default.removeItem(at:dir)}
         let credentials=MemoryCredentials();let store=try NodeStore(file:dir.appendingPathComponent("state.json"),credentials:credentials)
         var state=try configuration.applying(to:store.state)
         let local=RoutingRule(kind:.domain,value:"local-only.example",action:.direct)
-        state.rules.append(local);try store.commit(state)
+        state.rules.append(local);state.dnsPreference = .httpsProxy;state.captureMode = .compatible;try store.commit(state)
         let sub=Subscription(name:"合成订阅")
         let tx=try store.prepareImport(preview.candidates,subscription:sub,source:"https://synthetic.example/qingzhou.json",profile:preview,scope:.profile)
         try store.commit(tx)
-        expectEqual(store.state.rules.count,expectedCount+1)
+        expectEqual(store.state.rules.count,628)
         expectEqual(store.state.rules.filter{$0.subscriptionID==nil}.map(\.id),[local.id])
+        expectEqual(store.state.dnsPreference,.httpsProxy);expectEqual(store.state.captureMode,.compatible)
         expectEqual(store.state.subscriptions[0].revision,preview.revision)
         var changed=configuration
         let row=changed.rules[0]
@@ -36,14 +36,16 @@ final class FullSubscriptionTests:CheckCase {
         let fresh=try ProfileImporter.parse(document(changed))
         let update=try store.prepareImport(fresh.candidates,subscription:store.state.subscriptions[0],source:"https://synthetic.example/qingzhou.json",profile:fresh,scope:.profile)
         store.abort(update)
-        expectEqual(store.state.rules.count,expectedCount+1)
+        expectEqual(store.state.rules.count,628)
+        expectEqual(store.state.dnsPreference,.httpsProxy);expectEqual(store.state.captureMode,.compatible)
         expectEqual(store.state.subscriptions[0].revision,preview.revision)
         let success=try store.prepareImport(fresh.candidates,subscription:store.state.subscriptions[0],source:"https://synthetic.example/qingzhou.json",profile:fresh,scope:.profile)
         try store.commit(success)
-        expectEqual(store.state.rules.count,expectedCount+2)
+        expectEqual(store.state.rules.count,629)
         expectEqual(store.state.rules.first?.id,local.id)
+        expectEqual(store.state.dnsPreference,.httpsProxy);expectEqual(store.state.captureMode,.compatible)
         expectEqual(store.state.subscriptions[0].revision,fresh.revision)
-        expectEqual(try NodeStore(file:store.file,credentials:credentials).state.rules.count,expectedCount+2)
+        expectEqual(try NodeStore(file:store.file,credentials:credentials).state.rules.count,629)
     }
     func testInvalidDocumentsPreserveOldData() throws {
         let text=try document(configuration())

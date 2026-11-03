@@ -1,0 +1,1 @@
+hy2admin ALL=(root) NOPASSWD: /usr/local/sbin/hy2-admin-helper status, /usr/local/sbin/hy2-admin-helper reload

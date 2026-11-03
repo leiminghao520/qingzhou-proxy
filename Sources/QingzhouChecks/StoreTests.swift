@@ -34,6 +34,29 @@ final class StoreTests: CheckCase {
         try store.importNodes([try NodeParser.parse("hy2://other@other.example")],subscription:store.state.subscriptions[0],source:source)
         expectNil(store.state.selectedID);try store.deleteSubscription(sub.id);expectEqual(store.state.nodes.count,1);expectTrue(store.state.subscriptions.isEmpty)
     }
+    func testUnchangedCredentialsReuseAndRollback() throws {
+        let credentials=FailingCredentials();let store=try NodeStore(file:dir.appendingPathComponent("reuse.json"),credentials:credentials)
+        let sub=Subscription(name:"复用")
+        func candidate(_ password:String="one",_ obfs:String="mask")throws->Candidate {try NodeParser.parse("hy2://\(password)@reuse.example?obfs=salamander&obfs-password=\(obfs)#改名")}
+        try store.importNodes([candidate()],subscription:sub)
+        let old=store.state.nodes[0]
+        credentials.fail=true
+        let unchanged=try store.prepareImport([candidate()],subscription:sub)
+        expectEqual(unchanged.next.nodes[0].credentialRef,old.credentialRef)
+        store.abort(unchanged);expectEqual(try credentials.get(old.credentialRef),"one")
+        try store.commit(try store.prepareImport([candidate()],subscription:sub))
+        expectEqual(store.state.nodes[0].credentialRef,old.credentialRef)
+        expectEqual(try credentials.get(old.credentialRef+".obfs"),"mask")
+        credentials.fail=false
+        let rotated=try store.prepareImport([candidate("two")],subscription:sub)
+        let temporary=rotated.next.nodes[0].credentialRef
+        expectFalse(temporary==old.credentialRef);store.abort(rotated)
+        expectThrows(try credentials.get(temporary));expectEqual(try credentials.get(old.credentialRef),"one")
+        try store.commit(try store.prepareImport([candidate("one","new-mask")],subscription:sub))
+        let changed=store.state.nodes[0];expectFalse(changed.credentialRef==old.credentialRef)
+        expectEqual(try credentials.get(changed.credentialRef+".obfs"),"new-mask")
+        expectThrows(try credentials.get(old.credentialRef))
+    }
     func testFailureLeavesOldStateAndCredentials() throws {
         let credentials = FailingCredentials();let store = try NodeStore(file:dir.appendingPathComponent("state.json"),credentials:credentials)
         let sub = Subscription(name:"订阅");try store.importNodes([try NodeParser.parse("hy2://old@node.example")],subscription:sub,source:"https://example.com/hy2.txt")
