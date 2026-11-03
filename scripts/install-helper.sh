@@ -8,6 +8,8 @@ resources="$app/Contents/Resources"
 for file in QingzhouHelper sing-box; do test -f "$resources/$file"; test ! -L "$resources/$file"; test -x "$resources/$file"; done
 root=/Library/PrivilegedHelperTools/cn.qingzhou.proxy
 plist=/Library/LaunchDaemons/cn.qingzhou.proxy.helper.plist
+# 损坏的恢复记录已被辅助服务隔离，必须先人工核对网络设置并移走隔离文件。
+if /bin/ls "$root"/recovery.corrupt-*.json >/dev/null 2>&1; then echo '存在已隔离的损坏恢复记录，请先手动核对路由、DNS 与系统代理后再继续。'; exit 1; fi
 # 已授权更新时，用随包恢复器先处理旧记录，解除旧客户端身份导致的恢复死锁。
 if [ -f "$root/recovery.json" ]; then
     test -x "$resources/recover-helper.sh"
