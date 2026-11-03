@@ -12,6 +12,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -128,11 +129,40 @@ func (w flushWriter) Write(data []byte) (int, error) {
 	}
 	return n, err
 }
-func transferDiagnostic(entry, stage, category string, start time.Time, sent, received int64) {
+
+// 传输诊断输出目标；测试可替换为缓冲区。
+var diagnosticOutput io.Writer = os.Stderr
+
+const (
+	relayAggregateWindow = 30 * time.Second
+	relayFailureWindow   = 10 * time.Second
+	// SOCKS5 无认证握手：问候回包 2 字节加 IPv4 CONNECT 回包 10 字节。
+	socksReplyBytes = 12
+	// 客户端问候与 CONNECT 请求的最小长度，超过即表示已发送业务数据。
+	socksRequestBytes = 25
+)
+
+type transferAggregate struct {
+	count      uint64
+	sent       int64
+	received   int64
+	maxElapsed int64
+}
+
+var (
+	transferMu         sync.Mutex
+	transferOK         = map[[2]string]*transferAggregate{}
+	transferFailures   = map[[3]string]*transferAggregate{}
+	transferLastFailed = map[[3]string]time.Time{}
+	transferFlushOnce  sync.Once
+	transferNow        = time.Now
+)
+
+func emitTransfer(entry, stage, category string, elapsed int64, count uint64, sent, received int64) {
 	diagnosticMu.Lock()
 	defer diagnosticMu.Unlock()
 	// 只记录固定入口和传输计数，不记录目标、凭据、请求头或正文。
-	_ = json.NewEncoder(os.Stderr).Encode(struct {
+	_ = json.NewEncoder(diagnosticOutput).Encode(struct {
 		Entry    string `json:"entry"`
 		Stage    string `json:"stage"`
 		Category string `json:"category"`
@@ -140,7 +170,76 @@ func transferDiagnostic(entry, stage, category string, start time.Time, sent, re
 		Count    uint64 `json:"count"`
 		Sent     int64  `json:"sentBytes"`
 		Received int64  `json:"receivedBytes"`
-	}{entry, stage, category, time.Since(start).Milliseconds(), 1, sent, received})
+	}{entry, stage, category, elapsed, count, sent, received})
+}
+
+// 已发送业务数据却只收到 SOCKS 握手回包就结束，说明上游未响应，不能记为成功。
+func transferCategory(entry, category string, sent, received int64) string {
+	if category == "ok" && entry == "socks" && sent > socksRequestBytes && received <= socksReplyBytes {
+		return "noResponse"
+	}
+	return category
+}
+
+func (a *transferAggregate) add(elapsed int64, sent, received int64) {
+	a.count++
+	a.sent += sent
+	a.received += received
+	if elapsed > a.maxElapsed {
+		a.maxElapsed = elapsed
+	}
+}
+
+// 成功传输按入口汇总，每个窗口输出一行；失败逐类首次立即输出，窗口内重复的合并计数。
+func transferDiagnostic(entry, stage, category string, start time.Time, sent, received int64) {
+	transferFlushOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(relayAggregateWindow)
+			for range ticker.C {
+				flushTransferDiagnostics()
+			}
+		}()
+	})
+	category = transferCategory(entry, category, sent, received)
+	elapsed := time.Since(start).Milliseconds()
+	transferMu.Lock()
+	if category == "ok" {
+		key := [2]string{entry, stage}
+		if transferOK[key] == nil {
+			transferOK[key] = &transferAggregate{}
+		}
+		transferOK[key].add(elapsed, sent, received)
+		transferMu.Unlock()
+		return
+	}
+	key := [3]string{entry, stage, category}
+	now := transferNow()
+	if last, ok := transferLastFailed[key]; ok && now.Sub(last) < relayFailureWindow {
+		if transferFailures[key] == nil {
+			transferFailures[key] = &transferAggregate{}
+		}
+		transferFailures[key].add(elapsed, sent, received)
+		transferMu.Unlock()
+		return
+	}
+	transferLastFailed[key] = now
+	transferMu.Unlock()
+	emitTransfer(entry, stage, category, elapsed, 1, sent, received)
+}
+
+// 输出并清空当前窗口内的汇总；退出前也应调用，避免丢失最后一个窗口。
+func flushTransferDiagnostics() {
+	transferMu.Lock()
+	ok, failures := transferOK, transferFailures
+	transferOK = map[[2]string]*transferAggregate{}
+	transferFailures = map[[3]string]*transferAggregate{}
+	transferMu.Unlock()
+	for key, a := range ok {
+		emitTransfer(key[0], key[1], "ok", a.maxElapsed, a.count, a.sent, a.received)
+	}
+	for key, a := range failures {
+		emitTransfer(key[0], key[1], key[2], a.maxElapsed, a.count, a.sent, a.received)
+	}
 }
 func (g *gateway) upgrade(w http.ResponseWriter, r *http.Request, response *http.Response, start time.Time) {
 	upstream, ok := response.Body.(io.ReadWriteCloser)
