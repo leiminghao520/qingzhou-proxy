@@ -20,6 +20,7 @@ final class Service {
     var networkStore:SCDynamicStore?
     var routeEvents:DispatchSourceRead?
     var pendingNetworkChange:Date?
+    var networkCheckScheduled=false
     var lastFailure:String?
     var process:Process?
     var activatePrepared:(() throws -> Void)?

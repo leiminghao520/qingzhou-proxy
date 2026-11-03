@@ -16,15 +16,15 @@ extension Service {
             routes.contains{actual in NetworkInspection.samePrefix(actual.destination,expected.destination) && actual.interface==expected.interface && actual.scope==nil}
         }
     }
-    func verifyOwnedNetwork()->Bool {
-        guard let record=journal,let table=try? NetworkInspection.command("/usr/sbin/netstat",["-rn"]),let expected=try? PropertyListSerialization.propertyList(from:record.expectedDNS,format:nil) as? NSDictionary else{return false}
+    // 路由表由调用方传入，同一轮检查只读取一次 netstat。
+    func verifyOwnedNetwork(routeTable table:String)->Bool {
+        guard let record=journal,let expected=try? PropertyListSerialization.propertyList(from:record.expectedDNS,format:nil) as? NSDictionary else{return false}
         let routes=NetworkSnapshot.parseRoutes(table)
         guard (SCDynamicStoreCopyValue(dynamic,record.dnsKey as CFString) as? NSDictionary)==expected else{return false}
         return record.routes.allSatisfy{owned in routes.contains{current in NetworkInspection.samePrefix(current.destination,owned.destination) && current.interface==owned.interface && current.scope==owned.scope && current.gateway==owned.gateway}}
     }
-    func currentSnapshot() throws -> NetworkSnapshot {
+    func currentSnapshot(routeTable routes:String) throws -> NetworkSnapshot {
         guard let record=journal,let global=SCDynamicStoreCopyValue(dynamic,"State:/Network/Global/IPv4" as CFString) as? [String:Any],let primary=global["PrimaryInterface"] as? String else{throw ProxyError("网络快照无法更新")}
-        let routes=try NetworkInspection.command("/usr/sbin/netstat",["-rn"])
         var snapshot=try NetworkSnapshot.read(store:dynamic,primary:primary,routes:routes,ownedDNSKey:record.dnsKey,ownedTunnel:record.interface)
         snapshot.routes.removeAll {route in record.routes.contains{owned in NetworkInspection.samePrefix(route.destination,owned.destination) && route.interface==owned.interface && route.scope==owned.scope}}
         return snapshot
@@ -33,32 +33,40 @@ extension Service {
         networkTimer?.cancel()
         var context=SCDynamicStoreContext(version:0,info:Unmanaged.passUnretained(self).toOpaque(),retain:nil,release:nil,copyDescription:nil)
         networkStore=SCDynamicStoreCreate(nil,"轻舟企业保护监控" as CFString,{_,_,info in
-            guard let info else{return};Unmanaged<Service>.fromOpaque(info).takeUnretainedValue().checkNetworkChange()
+            guard let info else{return};Unmanaged<Service>.fromOpaque(info).takeUnretainedValue().scheduleNetworkCheck()
         },&context)
         if let networkStore {SCDynamicStoreSetNotificationKeys(networkStore,nil,["State:/Network/Global/.*","State:/Network/Service/.*/(DNS|IPv4|IPv6)","State:/Network/Interface/.*/.*"] as CFArray);SCDynamicStoreSetDispatchQueue(networkStore,queue)}
         let descriptor=socket(PF_ROUTE,SOCK_RAW,0)
         if descriptor>=0 {
             _=fcntl(descriptor,F_SETFL,O_NONBLOCK)
             let source=DispatchSource.makeReadSource(fileDescriptor:descriptor,queue:queue);routeEvents=source
-            source.setEventHandler{[weak self] in var buffer=[UInt8](repeating:0,count:8192);while recv(descriptor,&buffer,buffer.count,0)>0 {};self?.checkNetworkChange()}
+            source.setEventHandler{[weak self] in var buffer=[UInt8](repeating:0,count:8192);while recv(descriptor,&buffer,buffer.count,0)>0 {};self?.scheduleNetworkCheck()}
             source.setCancelHandler{close(descriptor)};source.resume()
         }
         let timer=DispatchSource.makeTimerSource(queue:queue);networkTimer=timer
-        timer.schedule(deadline:.now()+1,repeating:1)
+        // 变化以 SCDynamicStore 和路由事件驱动；定时器只作兜底，避免每秒 fork netstat。
+        timer.schedule(deadline:.now()+15,repeating:15)
         timer.setEventHandler{[weak self] in self?.checkNetworkChange()};timer.resume()
+    }
+    // 合并短时间内的连续事件（包括本服务自己写路由触发的事件），只执行一次检查。
+    func scheduleNetworkCheck(after delay:TimeInterval=0.5) {
+        guard !networkCheckScheduled else{return};networkCheckScheduled=true
+        queue.asyncAfter(deadline:.now()+delay){[weak self] in self?.networkCheckScheduled=false;self?.checkNetworkChange()}
     }
     func checkNetworkChange() {
         guard phase=="active",let previous=capturePlan,let request=activeRequest,let fd=owner else{return}
         do {
-            var snapshot=try currentSnapshot();snapshot.proxies=previous.snapshot.proxies
+            let table=try NetworkInspection.command("/usr/sbin/netstat",["-rn"])
+            var snapshot=try currentSnapshot(routeTable:table);snapshot.proxies=previous.snapshot.proxies
             let fresh=try CapturePlan.make(snapshot:snapshot,extraCIDRs:request.state?.tunExcludedCIDRs ?? [],extraDomains:request.state?.protectedDomains ?? [])
             let defaultsChanged=fresh.snapshot.routes.filter{$0.destination.hasSuffix("/0")} != previous.snapshot.routes.filter{$0.destination.hasSuffix("/0")}
-            let ownedNetworkChanged = !verifyOwnedNetwork()
+            let ownedNetworkChanged = !verifyOwnedNetwork(routeTable:table)
             let ownedProxyChanged=request.systemProxyPort != nil && !verifyProxy()
             let changed=fresh.snapshot.primaryInterface != previous.snapshot.primaryInterface || fresh.snapshot.resolvers != previous.snapshot.resolvers || fresh.protectedRoutes != previous.protectedRoutes || defaultsChanged || ownedProxyChanged || ownedNetworkChanged
             if !changed {pendingNetworkChange=nil;return}
-            guard let pending=pendingNetworkChange else{pendingNetworkChange=Date();return}
-            guard Date().timeIntervalSince(pending)>=1 else{return}
+            // 变化需持续 1 秒才重规划；兜底定时器间隔较长，因此主动安排复核。
+            guard let pending=pendingNetworkChange else{pendingNetworkChange=Date();scheduleNetworkCheck(after:1.1);return}
+            guard Date().timeIntervalSince(pending)>=1 else{scheduleNetworkCheck(after:1.1);return}
             phase="networkReplan"
             try stop()
             guard !ownedProxyChanged,!ownedNetworkChanged else{throw ProxyError("接管设置被外部修改，已停止接管并保留外部设置")}

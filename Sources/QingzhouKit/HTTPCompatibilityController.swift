@@ -32,7 +32,8 @@ import Darwin
     public func stop() async {
         guard let child=process else{return};process=nil
         if child.isRunning {child.terminate();for _ in 0..<20 where child.isRunning {try? await Task.sleep(nanoseconds:50_000_000)};if child.isRunning{_ = Darwin.kill(child.processIdentifier,SIGKILL)}}
-        child.waitUntilExit()
+        // 异步等待退出，不在主线程上调用 waitUntilExit 阻塞并重入 runloop。
+        for _ in 0..<40 where child.isRunning {try? await Task.sleep(nanoseconds:25_000_000)}
     }
 }
 
