@@ -1,8 +1,7 @@
 name: Publish verified Windows preview
+# 开发线已统一到 main；发布只允许手动触发，避免合并时因文件新增而误发版本。
 on:
-  push:
-    branches: [codex/android-windows-preview]
-    paths: ['.github/workflows/publish-windows-preview.yml']
+  workflow_dispatch:
 permissions:
   actions: read
   contents: write

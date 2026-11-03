@@ -1,7 +1,7 @@
 name: Windows client installer
 on:
   push:
-    branches: [codex/android-windows-preview]
+    branches: [main]
     paths:
       - '.github/workflows/windows-client.yml'
       - 'clients/qingzhou/**'
