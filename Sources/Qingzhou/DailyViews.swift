@@ -197,12 +197,18 @@ struct BackupView: View {
                     .textFieldStyle(.roundedBorder)
                 SecureField("导出时请再次确认口令", text: $confirm)
                     .textFieldStyle(.roundedBorder)
+                // 导出要求最小长度；恢复旧备份不受限制。
+                if !password.isEmpty && password.count < BackupService.minimumPasswordLength {
+                    Text("导出备份的口令至少 \(BackupService.minimumPasswordLength) 位")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
             }
             
             HStack(spacing: 12) {
                 Button("导出加密备份 (.qzb)") { export() }
                     .buttonStyle(.borderedProminent)
-                    .disabled(password.isEmpty || password != confirm || working)
+                    .disabled(password.count < BackupService.minimumPasswordLength || password != confirm || working)
                 
                 Button("打开备份文件并预览") { load() }
                     .buttonStyle(.bordered)

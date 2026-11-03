@@ -8,6 +8,8 @@ public struct BackupSnapshot:Codable,Sendable {
 }
 private struct BackupEnvelope:Codable {var version:Int;var rounds:Int;var salt:Data;var sealed:Data}
 public enum BackupService {
+    // 仅约束新导出的备份；解密不检查长度，旧的短口令备份仍可恢复。
+    public static let minimumPasswordLength=8
     public static func snapshot(_ catalog:ProfileCatalog,credentials:CredentialStore) throws -> BackupSnapshot {try catalog.validate();var secrets:[String:String]=[:];for ref in catalog.credentialRefs{secrets[ref]=try credentials.get(ref)};return BackupSnapshot(catalog:catalog,credentials:secrets)}
     private static func key(_ password:String,salt:Data,rounds:Int) throws -> SymmetricKey {
         guard !password.isEmpty,password.utf8.count<=4096,salt.count==16,rounds==600000 else{throw ProxyError("备份口令或格式无效")}
@@ -16,6 +18,7 @@ public enum BackupService {
         guard status==kCCSuccess else{throw ProxyError("备份密钥生成失败")};return SymmetricKey(data:result)
     }
     public static func encrypt(_ snapshot:BackupSnapshot,password:String) throws -> Data {
+        guard password.count>=minimumPasswordLength else{throw ProxyError("备份口令至少 \(minimumPasswordLength) 位")}
         try snapshot.catalog.validate();var salt=Data();for _ in 0..<16{salt.append(UInt8.random(in:0...255))}
         let data=try JSONEncoder().encode(snapshot);guard data.count<=32*1024*1024 else{throw ProxyError("备份超过 32 MiB")}
         let sealed=try AES.GCM.seal(data,using:key(password,salt:salt,rounds:600000),authenticating:Data("QingzhouBackup-v1".utf8)).combined!
