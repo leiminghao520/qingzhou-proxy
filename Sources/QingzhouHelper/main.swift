@@ -456,7 +456,9 @@ return};var issues:[String]=[]
             if request.verifyNetwork==true,let record=journal,process?.isRunning==true {
                 return try wakeNetworkReply(record:record,sample:routeSample())
             }
-            return TunReply(ok:true,message:networkStatus+(journal != nil && process==nil ? " · 存在待恢复记录":""),coreDiagnostics:process?.isRunning==true ? coreDiagnostics.recent:nil,running:helperIsRunning,protectionSummary:networkSummary,phase:phase)
+            var reply=TunReply(ok:true,message:networkStatus+(journal != nil && process==nil ? " · 存在待恢复记录":""),coreDiagnostics:process?.isRunning==true ? coreDiagnostics.recent:nil,running:helperIsRunning,protectionSummary:networkSummary,phase:phase)
+            if protectedQueriesSuspended {reply.corporateDNSSuspension=lastFailure ?? "企业网络更新中"}
+            return reply
         case "systemProxy":return try startManagedSystemProxy(request,fd:fd)
         case "pinBypasses":
             guard request.protocolVersion==5,let state=request.state,state.captureMode == .systemProxy else {throw ProxyError("指定出口辅助协议或模式无效，请更新辅助服务")}
