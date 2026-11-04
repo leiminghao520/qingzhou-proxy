@@ -202,6 +202,31 @@ final class FullCaptureTests:CheckCase {
         expectTrue(try BypassRoutePlan.capture(destinations:["239.255.255.250/32"],existingPrefixes:TunAddressPlan.routePrefixes("Internet:\n224.0.0/4 link#11 UmCS en0 !\n"),hasIPv6:false,existingRoutes:multicastParent,lookup:{_,_ in multicastPath}).routes.isEmpty)
         expectEqual(try BypassRoutePlan.capture(destinations:["239.255.255.250/32"],existingPrefixes:[],hasIPv6:false,existingRoutes:[],lookup:{_,_ in multicastPath}).routes.map(\.destination),["239.255.255.250/32"])
         expectEqual(try BypassRoutePlan.capture(destinations:["239.255.255.250/32"],existingPrefixes:[],hasIPv6:false,existingRoutes:NetworkSnapshot.parseRoutes("Internet:\n224.0.0/4 link#9 UmCS en9",includeTransient:true),lookup:{_,_ in multicastPath}).routes.map(\.destination),["239.255.255.250/32"])
+        // 贯穿规划入口：绕过列表中的组播项不能进入任何写路由的计划，否则重启后首次接管必定失败。
+        do {
+            let table="Internet:\ndefault 192.168.5.1 UGScg en0\n224.0.0/4 link#11 UmCS en0 !\n"
+            var snapshot=NetworkSnapshot(primaryInterface:"en0",routes:NetworkSnapshot.parseRoutes(table),resolvers:[DNSResolverScope(service:"svc",interface:"en0",servers:["192.168.5.1"])])
+            snapshot.primaryService="svc"
+            var multicastState=AppState()
+            try multicastState.setBypasses([NetworkBypass(kind:.cidr,value:"239.255.255.250/32",exit:.system),NetworkBypass(kind:.cidr,value:"203.0.113.9/32",exit:.system)])
+            let multicastPlan=try CapturePlan.make(snapshot:snapshot,state:multicastState)
+            expectFalse(multicastPlan.protectedRoutes.contains{$0.destination=="239.255.255.250/32"})
+            expectTrue(multicastPlan.protectedRoutes.contains{$0.destination=="203.0.113.9/32" && $0.interface=="en0"})
+            let multicastBypass=try BypassRoutePlan.capture(destinations:multicastPlan.exclusions,existingPrefixes:TunAddressPlan.routePrefixes(table),hasIPv6:false,existingRoutes:NetworkSnapshot.parseRoutes(table,includeTransient:true),lookup:{address,_ in
+                RouteRecord(route:try CaptureRoutePlan.systemPath(address,routes:snapshot.routes),flags:3).queryText
+            })
+            expectFalse(multicastBypass.routes.contains{$0.destination=="239.255.255.250/32"})
+            var written:[String]=[]
+            try RouteProtectionBatch.run(protected:multicastPlan.protectedRoutes,bypass:multicastBypass.routes,baseline:NetworkRouteSample(routes:snapshot.routes),
+                read:{
+                    var seen=Set(snapshot.routes.map(\.destination))
+                    return NetworkRouteSample(routes:snapshot.routes+(multicastPlan.protectedRoutes+multicastBypass.routes).filter{seen.insert($0.destination).inserted})
+                },check:{},add:{route,_ in written.append(route.destination)})
+            expectTrue(written.contains("203.0.113.9/32"));expectFalse(written.contains("239.255.255.250/32"))
+            // 没有组播父网段时原路径无法由系统提供，仍需写入保护。
+            var bare=snapshot;bare.routes=NetworkSnapshot.parseRoutes("Internet:\ndefault 192.168.5.1 UGScg en0\n")
+            expectTrue(try CapturePlan.make(snapshot:bare,state:multicastState).protectedRoutes.contains{$0.destination=="239.255.255.250/32"})
+        }
         // 普通单播不受组播判断影响。
         expectEqual(try BypassRoutePlan.capture(destinations:["203.0.113.9/32"],existingPrefixes:[],hasIPv6:false,existingRoutes:multicastParent,lookup:{_,_ in gateway}).routes.count,1)
         try plan.validate(lookup:{_,_ in gateway})

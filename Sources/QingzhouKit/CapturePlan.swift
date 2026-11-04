@@ -186,6 +186,8 @@ public struct CapturePlan:Codable,Equatable,Sendable {
             if item.exit == .pinned {path=pinned.first{NetworkInspection.samePrefix($0.destination,item.value)}}
             else {path=plan.originalRoute(for:address)}
             if item.exit == .system,item.value.contains(":"),path==nil {continue}
+            // 原出口就是接口的组播父网段时无需主机路由；写入后内核转成组播邻居项，无法核验所有权，也无法撤回。
+            if item.exit == .system,let path,path.destination=="224.0.0.0/4",let target=IPPrefix(item.value),target.bits>4 {continue}
             guard let path else {throw NetworkEnvironmentNotReady("绕过目标的原出口无法确认："+item.value)}
             let route=ProtectedRoute(destination:item.value,gateway:path.gateway,interface:path.interface,source:"用户网络绕过")
             if let previous=plan.protectedRoutes.first(where:{NetworkInspection.samePrefix($0.destination,item.value)}) {
