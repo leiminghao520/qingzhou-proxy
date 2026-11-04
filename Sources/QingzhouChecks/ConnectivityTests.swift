@@ -93,6 +93,12 @@ func runConnectivityChecks() async {
     expectNil(CompatibilityDiagnostic.message(safe.replacingOccurrences(of:"identify",with:"https://private")))
     expectNil(CompatibilityDiagnostic.message(safe.replacingOccurrences(of:"timeout",with:"password")))
     expectNil(CompatibilityDiagnostic.message(safe.replacingOccurrences(of:"10000",with:"-1")))
+    // 内网解析短暂停顿不提示，持续超过阈值才提示，恢复后清除并重新计时。
+    var suspension=CorporateDNSSuspensionTracker()
+    expectNil(suspension.update(reason:"更新中",uptime:100));expectNil(suspension.update(reason:"更新中",uptime:109.9))
+    expectEqual(suspension.update(reason:"缺出口",uptime:110),"缺出口")
+    expectNil(suspension.update(reason:nil,uptime:111));expectNil(suspension.update(reason:"再次暂停",uptime:112))
+    expectNil(try? JSONDecoder().decode(TunReply.self,from:Data("{\"ok\":true,\"message\":\"旧版\",\"running\":true}".utf8)).corporateDNSSuspension)
     // 兼容层新增“上游无响应”类别，必须能展示而不是被白名单丢弃。
     expectTrue(CompatibilityDiagnostic.message("{\"entry\":\"socks\",\"stage\":\"relay\",\"category\":\"noResponse\",\"elapsedMs\":1005,\"count\":6,\"sentBytes\":3180,\"receivedBytes\":72}")?.contains("category=noResponse")==true)
     print("PASS Connectivity.independentResultsAndPrivateEvents")

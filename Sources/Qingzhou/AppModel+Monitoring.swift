@@ -108,6 +108,11 @@ extension AppModel {
         let waiting = status.phase == "networkWaiting"
         if networkWaiting != waiting { networkWaiting = waiting }
         publishOfficeHelper(status)
+        let notice=corporateDNSSuspension.update(reason:status.corporateDNSSuspension,uptime:ProcessInfo.processInfo.systemUptime)
+        if corporateDNSNotice != notice {
+            if let notice {log("内网解析已暂停，外网不受影响："+notice)} else {log("内网解析已恢复")}
+            corporateDNSNotice=notice
+        }
         if helperStatus != status.message {helperStatus=status.message}
         let summary=status.protectionSummary ?? []
         if protectionSummary != summary {protectionSummary=summary}
@@ -126,7 +131,7 @@ extension AppModel {
         }
     }
 
-    func stopTelemetry() {trafficDisplay.menu.reset();verifiedSelectionTag=nil;history.finish();networkReconnecting=false;cancelHealthRefresh();epoch=UUID();connectivityEpoch=UUID();healthRefreshPending=false;healthTask?.cancel();healthTask=nil;telemetryTask?.cancel();connectionListTask?.cancel();policyTask?.cancel();trafficTask?.cancel();telemetryTask=nil;connectionListTask=nil;policyTask=nil;trafficTask=nil;if let old=api{Task{await old.shutdown()}};api=nil;connections=[];proxyInfo=[:];uploadRate=0;downloadRate=0;uploadTotal=0;downloadTotal=0;monitor=RuntimeMonitorState()}
+    func stopTelemetry() {corporateDNSSuspension=CorporateDNSSuspensionTracker();corporateDNSNotice=nil;trafficDisplay.menu.reset();verifiedSelectionTag=nil;history.finish();networkReconnecting=false;cancelHealthRefresh();epoch=UUID();connectivityEpoch=UUID();healthRefreshPending=false;healthTask?.cancel();healthTask=nil;telemetryTask?.cancel();connectionListTask?.cancel();policyTask?.cancel();trafficTask?.cancel();telemetryTask=nil;connectionListTask=nil;policyTask=nil;trafficTask=nil;if let old=api{Task{await old.shutdown()}};api=nil;connections=[];proxyInfo=[:];uploadRate=0;downloadRate=0;uploadTotal=0;downloadTotal=0;monitor=RuntimeMonitorState()}
 
     func closeConnection(_ id:String?) async {guard !locked,let api else{return};do{if let id{try await api.closeConnection(id)}else{try await api.closeAllConnections()}}catch{report(error)}}
     func aggregate(_ rows:[CoreConnection]) {

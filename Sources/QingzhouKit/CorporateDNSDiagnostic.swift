@@ -40,3 +40,15 @@ public struct CorporateDNSDiagnostic:Codable,Sendable {
         DiagnosticResult("企业 DNS",[CorporateDNSOutcome.answered,.noRecords].contains(outcome) ? "通过":"失败",summary,code:"corporateDNS."+outcome.rawValue)
     }
 }
+
+// 网络变化时解析会短暂暂停属于正常流程；持续超过阈值才提示，恢复后立即清除。
+public struct CorporateDNSSuspensionTracker:Sendable {
+    public static let threshold:TimeInterval=10
+    private var since:TimeInterval?
+    public init() {}
+    public mutating func update(reason:String?,uptime:TimeInterval)->String? {
+        guard let reason else {since=nil;return nil}
+        let began=since ?? uptime;since=began
+        return uptime-began>=Self.threshold ? reason:nil
+    }
+}

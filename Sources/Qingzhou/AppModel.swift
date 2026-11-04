@@ -47,6 +47,8 @@ import QingzhouKit
     @Published var networkReleased=false
     var lastAutomaticRefresh=Date.distantPast
     var automaticRefreshRequested=true
+    @Published var corporateDNSNotice:String?
+    var corporateDNSSuspension=CorporateDNSSuspensionTracker()
     // 连通性日志去重：结果与上次相同且未满 5 分钟时只计数，不重复刷屏。
     var healthRefreshReason="周期检查"
     var connectivityLogSignature:String?

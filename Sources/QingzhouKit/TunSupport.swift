@@ -19,6 +19,8 @@ public struct TunRequest:Codable,Sendable {
     public init(operation:String,state:AppState?=nil,credentials:[String:String]?=nil,control:CoreControlContext?=nil,verifyNetwork:Bool=false,httpCompatibilityPort:Int?=nil,systemProxyPort:Int?=nil,preserveExternal:Bool=false){self.preserveExternal=preserveExternal;self.systemProxyPort=systemProxyPort;self.httpCompatibilityPort=httpCompatibilityPort;self.verifyNetwork=verifyNetwork;self.operation=operation;self.state=state;self.credentials=credentials;self.control=control}
 }
 public struct TunReply: Codable, Sendable {
+    // 企业解析暂停时的原因；旧辅助服务不返回，按未暂停处理。
+    public var corporateDNSSuspension:String?
     public var failurePhase:String?
     public var recoveryPhase:String?
     public var failureKind:ConnectionFailureKind?

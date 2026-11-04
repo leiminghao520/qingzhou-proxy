@@ -5,6 +5,24 @@ struct ConnectionNoticeView:View {
     @ObservedObject var model:AppModel
     @State private var details=false
     var body:some View {
+        VStack(spacing:0) {
+            connectionNotice
+            if let reason=model.corporateDNSNotice {
+                // 连通性检查只测外网，内网解析暂停必须单独提示。
+                VStack(alignment:.leading,spacing:6) {
+                    HStack {
+                        Image(systemName:"exclamationmark.triangle")
+                        Text("内网解析不可用，公司内部网站可能打不开；外网不受影响").font(.callout.weight(.medium))
+                        Spacer()
+                        Button("重新连接"){Task{await model.retryOriginal()}}.disabled(model.locked)
+                    }
+                    Text(reason).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                }
+                .padding(12).background(.regularMaterial,in:RoundedRectangle(cornerRadius:12)).padding(12)
+            }
+        }
+    }
+    @ViewBuilder private var connectionNotice:some View {
         if model.errorMessage != nil || model.activeRecovery != nil {
             VStack(alignment:.leading,spacing:8) {
                 HStack {
