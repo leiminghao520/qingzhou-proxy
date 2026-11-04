@@ -195,6 +195,15 @@ final class FullCaptureTests:CheckCase {
         var queried:[String]=[]
         let plan=try BypassRoutePlan.capture(destinations:["10.0.0.0/8","192.168.0.0/16","10.0.0.0/8","::1/128"],existingPrefixes:["::1/128"],hasIPv6:true,lookup:{host,_ in queried.append(host);return gateway})
         expectEqual(queried,["10.0.0.0","192.168.0.0"]);expectEqual(plan.routes.count,2)
+        // 组播绕过项：同接口有父网段时不写路由；没有父网段或父网段在其他接口时仍按原路径保护。
+        let multicastPath="route to: 239.255.255.250\ndestination: 224.0.0.0\nmask: 240.0.0.0\ninterface: en0\nflags: <UP,DONE,CLONING,STATIC,MULTICAST>"
+        let multicastParent=NetworkSnapshot.parseRoutes("Internet:\n224.0.0/4 link#11 UmCS en0 !\n224.0.0/4 link#22 UmCSI utun7",includeTransient:true)
+        expectEqual(multicastParent.filter{$0.scope==nil}.count,1)
+        expectTrue(try BypassRoutePlan.capture(destinations:["239.255.255.250/32"],existingPrefixes:TunAddressPlan.routePrefixes("Internet:\n224.0.0/4 link#11 UmCS en0 !\n"),hasIPv6:false,existingRoutes:multicastParent,lookup:{_,_ in multicastPath}).routes.isEmpty)
+        expectEqual(try BypassRoutePlan.capture(destinations:["239.255.255.250/32"],existingPrefixes:[],hasIPv6:false,existingRoutes:[],lookup:{_,_ in multicastPath}).routes.map(\.destination),["239.255.255.250/32"])
+        expectEqual(try BypassRoutePlan.capture(destinations:["239.255.255.250/32"],existingPrefixes:[],hasIPv6:false,existingRoutes:NetworkSnapshot.parseRoutes("Internet:\n224.0.0/4 link#9 UmCS en9",includeTransient:true),lookup:{_,_ in multicastPath}).routes.map(\.destination),["239.255.255.250/32"])
+        // 普通单播不受组播判断影响。
+        expectEqual(try BypassRoutePlan.capture(destinations:["203.0.113.9/32"],existingPrefixes:[],hasIPv6:false,existingRoutes:multicastParent,lookup:{_,_ in gateway}).routes.count,1)
         try plan.validate(lookup:{_,_ in gateway})
         expectThrows(try plan.validate(lookup:{_,_ in gateway.replacingOccurrences(of:"192.0.2.1",with:"192.0.2.2")}))
         expectThrows(try BypassRoutePlan.capture(destinations:["10.0.0.0/8"],existingPrefixes:[],hasIPv6:true,lookup:{_,_ in "interface: en0\nflags: <REJECT>"}))

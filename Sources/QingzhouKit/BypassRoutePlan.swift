@@ -52,6 +52,9 @@ public struct BypassRoutePlan:Sendable {
             do {
                 let info=try lookup(target,ipv6)
                 guard let gateway=NetworkInspection.routeGateway(info),let interface=NetworkInspection.routeField("interface",info) else {throw ProxyError("原路径不完整："+summary(info))}
+                // 同接口的组播父网段已提供出口；补写主机路由后内核会转成组播邻居项，既无法核验所有权也无法撤回。
+                if let prefix=IPPrefix(destination),let multicast=IPPrefix("224.0.0.0/4"),multicast.contains(prefix),
+                   existingRoutes.contains(where:{$0.scope==nil && $0.interface==interface && IPPrefix($0.destination)?.bits==4 && IPPrefix($0.destination)?.contains(prefix)==true}) {continue}
                 routes.append(ProtectedRoute(destination:destination,gateway:gateway,interface:interface,source:"接管前绕过路径"))
             }catch{throw ProxyError("绕过项 "+destination+" 快照失败："+error.localizedDescription)}
         }
