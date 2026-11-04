@@ -526,6 +526,31 @@ final class Service {
             }
         }
 
+        // 只有隧道作用域的 IPv6 默认路由时没有全局原路径；计划更新不能因 ::1、fc00::/7 缺出口而让企业解析一直暂停。
+        do {
+            let loop=try fixture()
+            let v4=ProtectedRoute(destination:"0.0.0.0/0",gateway:"192.168.1.1",interface:"en0")
+            let v6=ProtectedRoute(destination:"::/0",gateway:"fe80::%utun0",interface:"utun0",scope:"utun0")
+            loop.capturePlan!.snapshot.routes=[v4,v6]
+            let initial=loop.capturePlan!
+            loop.dynamicRules=try DynamicCaptureRules(directory:directory.appendingPathComponent("loopback"),plan:initial)
+            loop.journal!.routes=[]
+            var actual=[v4,v6]
+            loop.routeSample={NetworkRouteSample(routes:actual)}
+            loop.routeLookupHook={target,ipv6,scope in
+                RouteRecord(route:try CaptureRoutePlan.systemPath(target=="default" ? (ipv6 ? "::/0":"0.0.0.0/0"):target,routes:actual.filter{$0.scope==scope}),flags:3).queryText
+            }
+            loop.writeRouteHook={args in
+                if let route=loop.journal!.routes.last,!args.contains("delete") {actual.append(ProtectedRoute(destination:route.destination,gateway:route.gateway,interface:route.interface,scope:route.scope))}
+                return ""
+            }
+            var next=initial;next.protectedRoutes=[];next.exclusions=["::1/128","fc00::/7"]
+            let applied=try loop.applyCorporatePlan(next,sample:loop.routeSample())
+            check(applied,"作用域 IPv6 默认路由不阻断企业计划更新")
+            check(!loop.protectedQueriesSuspended,"计划更新后企业解析恢复")
+            check(!(loop.journal!.routes.contains{$0.destination=="::1/128" || $0.destination=="fc00::/7"}),"无全局 IPv6 时不写入 IPv6 绕过路由")
+        } catch {check(false,"作用域 IPv6 默认路由阻断企业计划更新："+error.localizedDescription)}
+
         // 使用正式网络检查生成查询响应，比较旧入口和过滤入口是否会自行补查。
         func packet(_ type:Int32) -> Data {
             var header=rt_msghdr();header.rtm_msglen=UInt16(MemoryLayout<rt_msghdr>.size)

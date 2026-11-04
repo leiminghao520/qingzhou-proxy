@@ -67,7 +67,8 @@ extension Service {
         let dns=fresh.snapshot.resolvers.flatMap(\.servers).map{$0.components(separatedBy:"%")[0]}
         let bootstrap=Set(dns+["1.1.1.1"]+captureNodeAddresses.values.flatMap{$0})
         let destinations=fresh.exclusions.filter{cidr in !state.pinnedBypasses.contains{NetworkInspection.samePrefix($0.value,cidr)}}+bootstrap.map{$0+($0.contains(":") ? "/128":"/32")}
-        let bypass=try BypassRoutePlan.capture(destinations:destinations,existingPrefixes:original.map(\.destination),hasIPv6:original.contains{$0.destination=="::/0"},existingRoutes:original,lookup:{address,_ in
+        // 只有全局 IPv6 默认路由才算有 IPv6 出口，与启动时一致；隧道的作用域默认路由不能提供 ::1、fc00::/7 的原路径。
+        let bypass=try BypassRoutePlan.capture(destinations:destinations,existingPrefixes:original.map(\.destination),hasIPv6:original.contains{$0.destination=="::/0" && $0.scope==nil},existingRoutes:original,lookup:{address,_ in
             let path=try CaptureRoutePlan.systemPath(address,routes:original)
             return RouteRecord(route:path,flags:3).queryText
         })
