@@ -14,7 +14,6 @@ struct ContentView: View {
     @AppStorage("interfaceMode") private var interfaceMode = InterfaceMode.simple
     @State private var page = AppPage.home
     @State private var utility: UtilityPage?
-    @Namespace private var navigationGlass
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var importing = false
     @State private var editing: EditorRequest?
@@ -37,173 +36,62 @@ struct ContentView: View {
         ]
     }
 
-    var body: some View {
-        NavigationSplitView {
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 12) {
-                    XihangMark().frame(width:29,height:31).padding(8)
-                        .background(Color(red:0.05,green:0.09,blue:0.17),in:RoundedRectangle(cornerRadius:12))
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("汐航")
-                            .font(.headline.weight(.bold))
-                        Text("Xihang")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
+    private var sidebar: some View {
+    // 原生侧栏：系统负责选中高亮、键盘导航与深浅色适配。
+    List(selection: Binding<AppPage?>(get: { page }, set: { if let value = $0 { withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) { page = value } } })) {
+        ForEach(navSections, id: \.title) { section in
+            Section(section.title) {
+                ForEach(section.items) { item in
+                    Label(item.title, systemImage: item.icon)
+                        .badge(badge(for: item))
+                        .tag(item)
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, 20)
-                .padding(.bottom, 16)
-
-                Divider().opacity(0.6)
-
-                ScrollView(showsIndicators: false) {
-                    LiquidGlassGroup(spacing: 6) {
-                        VStack(alignment: .leading, spacing: 14) {
-                            ForEach(navSections, id: \.title) { section in
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(section.title)
-                                        .font(.system(size: 11, weight: .semibold))
-                                        .foregroundStyle(.secondary)
-                                        .padding(.horizontal, 10)
-                                        .padding(.top, 4)
-                                    ForEach(section.items) { item in
-                                        let isSelected = page == item
-                                        let badgeText: String? = {
-                                            if (item == .nodes || item == .lines) {
-                                                return "\(model.state.nodes.count)"
-                                            } else if item == .connections && !model.connections.isEmpty {
-                                                return "\(model.connections.count)"
-                                            }
-                                            return nil
-                                        }()
-                                        let badgeColor: Color? = (item == .connections) ? Theme.connectedGreen : nil
-
-                                        SidebarNavItemRow(
-                                            name: item.title,
-                                            icon: item.icon,
-                                            isSelected: isSelected,
-                                            badgeText: badgeText,
-                                            badgeColor: badgeColor,
-                                            selectionNamespace: navigationGlass
-                                        ) {
-                                            withAnimation(reduceMotion ? nil : .easeInOut(duration:0.25)) { page = item }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 12)
-                    }
-                }
-                .frame(minHeight: 0, maxHeight: .infinity)
-                .layoutPriority(-1)
-
-                Divider().opacity(0.6)
-
-                if interfaceMode == .professional && page != .overview {
-                    VStack(spacing: 8) {
-                        HStack(spacing: 8) {
-                            Circle()
-                                .fill(model.connectionAvailable ? Theme.connectedGreen : model.hasConnectionActivity ? Theme.amberAccent:Theme.disconnectedGray)
-                                .frame(width: 8, height: 8)
-
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(model.connectionTitle)
-                                    .font(.system(size: 11, weight: .bold))
-                                    .lineLimit(1)
-                                Text(model.connection == .connected ? model.actualName : "尚未连接")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                    .help(model.actualName)
-                            }
-
-                            Spacer()
-
-                            Button {
-                                Task {
-                                    if model.hasConnectionActivity { await model.disconnect() }
-                                    else { await model.connect() }
-                                }
-                            } label: {
-                                if model.busy && model.connection != .connected {
-                                    ProgressView().controlSize(.small)
-                                } else {
-                                    Text(model.hasConnectionActivity ? "断开" : "开启")
-                                        .font(.system(size: 11, weight: .bold))
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 4)
-                                        .background(model.connection == .connected ? Theme.dangerRed.opacity(0.15) : Theme.connectedGreen.opacity(0.18))
-                                        .foregroundStyle(model.connection == .connected ? Theme.dangerRed : Theme.connectedGreen)
-                                        .clipShape(Capsule())
-                                        .contentShape(Capsule())
-                                }
-                            }
-                            .frame(width:54,height:26)
-                            .buttonStyle(.plain)
-                            .contentShape(Capsule())
-                            .disabled(model.stopDisabled || (model.state.activePolicy == nil && model.state.mode != .direct && model.connection != .connected) || (model.recoveryPending && !model.hasConnectionActivity))
-                        }
-
-                        HStack(spacing: 4) {
-                            ForEach(ProxyMode.allCases, id: \.self) { mode in
-                                let isCurrent = model.state.mode == mode
-                                Button {
-                                    Task { await model.setMode(mode) }
-                                } label: {
-                                    Text(mode.label)
-                                        .font(.system(size: 11, weight: isCurrent ? .bold : .regular))
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 5)
-                                        .background(isCurrent ? Theme.accentBlue.opacity(0.2) : Color.secondary.opacity(0.08))
-                                        .foregroundStyle(isCurrent ? Theme.accentBlue : Color.secondary)
-                                        .clipShape(RoundedRectangle(cornerRadius: 5))
-                                        .contentShape(RoundedRectangle(cornerRadius: 5))
-                                }
-                                .buttonStyle(.plain)
-                                .contentShape(RoundedRectangle(cornerRadius: 5))
-                                .disabled(model.locked)
-                            }
-                        }
-
-                        // 接管方式与速率分行，窄侧栏优先保留可操作的连接状态。
-                        HStack {
-                            Text(model.effectiveState.captureMode.label).font(.system(size:10)).fixedSize()
-                            Spacer(minLength:4)
-                            if model.healthChecking {Text("检测中").font(.system(size:10)).foregroundStyle(.secondary)}
-                        }
-                        OfficeRateLine(display:model.trafficDisplay,available:model.connection == .connected && model.monitor.traffic == .available && !model.monitorPaused)
-                                .font(.system(size:9,design:.monospaced)).monospacedDigit()
-                                .frame(maxWidth:.infinity,alignment:.leading).lineLimit(1).minimumScaleFactor(0.8)
-
-                    }
-                    .padding(10)
-                    .frame(maxWidth: .infinity, minHeight: 126, maxHeight: 126)
-                    .background(Color.secondary.opacity(0.06))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(model.connection == .connected ? Theme.connectedGreen.opacity(0.3) : Theme.subtleBorder, lineWidth: 1)
-                    )
-                    .padding(10)
-                }
-                if interfaceMode == .simple || page == .overview {
-                    HStack(spacing:8) {
-                        Circle().fill(model.connectionAvailable ? Theme.connectedGreen : model.hasConnectionActivity ? Theme.amberAccent : Color.secondary).frame(width:6,height:6)
-                        Text(model.connectionTitle).font(.caption).lineLimit(1)
-                        Spacer()
-                    }.padding(.horizontal,20).padding(.vertical,12)
-                }
-                LiquidModePicker(selection: $interfaceMode)
-                    .padding(12)
-                AppearanceMenu()
-                    .frame(maxWidth: .infinity)
-                    .padding(.bottom, 12)
             }
-            .navigationSplitViewColumnWidth(min: 210, ideal: 225, max: 250)
+        }
+    }
+    .listStyle(.sidebar)
+    .safeAreaInset(edge: .top, spacing: 0) {
+        HStack(spacing: 10) {
+            XihangMark().frame(width: 20, height: 22).padding(6)
+                .background(Color(red: 0.05, green: 0.09, blue: 0.17), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            VStack(alignment: .leading, spacing: 0) {
+                Text("汐航").font(.headline)
+                Text(interfaceMode == .simple ? "简洁模式" : "专业模式").font(.caption2).foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10)
+    }
+    .safeAreaInset(edge: .bottom, spacing: 0) {
+        // 侧栏底部只保留一行连接状态，操作统一放在工具栏。
+        HStack(spacing: 8) {
+            Circle().fill(model.statusTint).frame(width: 7, height: 7)
+            Text(model.connectionTitle).font(.caption).lineLimit(1)
+            Spacer(minLength: 4)
+            if model.connection == .connected {
+                Text(model.state.mode.label).font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 12)
+        .accessibilityElement(children: .combine)
+    }
+    }
+
+    private func badge(for item: AppPage) -> Int {
+        if item == .nodes || item == .lines { return model.state.nodes.count }
+        if item == .connections { return model.connections.count }
+        return 0
+    }
+
+    private var subtitle: String {
+        model.connection == .connected && model.state.mode != .direct ? model.connectionTitle + " · " + model.actualName : model.connectionTitle
+    }
+
+    // 窗口骨架单独拆出，降低 body 类型推断复杂度。
+    private var chrome: some View {
+        NavigationSplitView {
+            sidebar
+            .navigationSplitViewColumnWidth(min: 190, ideal: 210, max: 250)
         } detail: {
             VStack(alignment: .leading, spacing: 0) {
                 if model.loadingFailed {
@@ -233,6 +121,16 @@ struct ContentView: View {
                 }
             }
         }
+        .navigationTitle(page.title)
+        .navigationSubtitle(subtitle)
+        .toolbar {
+            MainToolbar(model: model, interfaceMode: $interfaceMode, onImport: { importing = true },
+                        onDiagnose: { utility = .diagnostics }, onSubscriptions: { page = .subscriptions })
+        }
+    }
+
+    var body: some View {
+        chrome
         .preferredColorScheme(appearance.colorScheme)
         .scrollIndicators(.hidden)
         .onAppear {

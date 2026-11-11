@@ -47,22 +47,17 @@ struct XihangStatusPill: View {
             .background(color.opacity(0.12),in:Capsule())
     }
 }
+// 连接状态卡：一个主按钮完成连接/断开，线路、模式与接管方式集中在同一张卡片里。
 struct XihangConnectionHeader: View {
     @ObservedObject var model: AppModel
     var onImport: () -> Void
     var onLines: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorSchemeContrast) private var contrast
-    private var needsImport: Bool { model.state.nodes.isEmpty && model.state.mode != .direct }
-    private var needsSelection: Bool { model.state.mode != .direct && (model.state.activePolicy.map { !PolicyValidator.exists($0,in:model.state) } ?? true) }
-    private var statusColor: Color { model.connectionAvailable ? Theme.connectedGreen : model.hasConnectionActivity || model.recoveryPending ? Theme.amberAccent : Theme.accentBlue }
+    private var statusColor: Color { model.connectionAvailable ? Theme.connectedGreen : model.hasConnectionActivity || model.recoveryPending ? Theme.amberAccent : Color.secondary }
     var body: some View {
         VStack(alignment:.leading,spacing:12) {
-            ViewThatFits(in:.horizontal) {
-                HStack(alignment:.top,spacing:16) { hero.frame(minWidth:300,maxWidth:.infinity); route.frame(width:210) }
-                VStack(spacing:12) { hero; route }
-            }
+            card
             if model.recoveryPending {
                 HStack {
                     Label("网络设置尚未恢复",systemImage:"exclamationmark.triangle.fill").foregroundStyle(Theme.amberAccent)
@@ -78,46 +73,42 @@ struct XihangConnectionHeader: View {
             }
         }
     }
-    private var hero: some View {
-        VStack(alignment:.leading,spacing:18) {
-            HStack(alignment:.top) {
-                VStack(alignment:.leading,spacing:7) {
-                    Text("让连接，自然流动").font(.system(size:11,weight:.medium)).foregroundStyle(.secondary)
-                    Text(model.connectionTitle).font(.system(size:25,weight:.bold,design:.rounded)).fixedSize(horizontal:false,vertical:true)
+    private var card: some View {
+        VStack(alignment:.leading,spacing:0) {
+            HStack(alignment:.center,spacing:18) {
+                powerButton
+                VStack(alignment:.leading,spacing:4) {
+                    Text(model.connectionTitle).font(.title2.weight(.semibold)).lineLimit(1)
                         .accessibilityIdentifier("connectionStatus")
-                    if model.connection == .connected {
-                        Label(model.linkStatusLabel,systemImage:model.connectionAvailable ? "checkmark.circle.fill":"circle.dotted").font(.caption).foregroundStyle(statusColor)
-                    } else {
-                        Text(model.connection == .error ? "连接未完成，可查看诊断或重新尝试" : model.connection == .connecting ? "正在建立连接，请稍候" : model.connection == .disconnecting ? "正在释放网络接管" : model.networkWaiting ? "等待网络恢复" : "选择一条线路，即可开始").font(.caption).foregroundStyle(.secondary)
+                    Group {
+                        if model.connection == .connected {
+                            Label(model.linkStatusLabel,systemImage:model.connectionAvailable ? "checkmark.circle.fill":"circle.dotted").foregroundStyle(statusColor)
+                        } else {
+                            Text(model.connection == .error ? "连接未完成，可查看诊断或重新尝试" : model.connection == .connecting ? "正在建立连接，请稍候" : model.connection == .disconnecting ? "正在释放网络接管" : model.networkWaiting ? "等待网络恢复" : model.needsFirstImport ? "添加订阅或节点后即可连接" : "点击左侧按钮开始连接").foregroundStyle(.secondary)
+                        }
+                    }.font(.callout).lineLimit(1)
+                }
+                Spacer(minLength:8)
+                if let since=model.connectedSince,model.connection == .connected {
+                    VStack(alignment:.trailing,spacing:2) {
+                        Text("已连接").font(.caption2).foregroundStyle(.secondary)
+                        Text(since,style:.timer).font(.callout.monospacedDigit())
                     }
                 }
-                Spacer(minLength:8)
-                XihangMark().frame(width:64,height:68).rotationEffect(.degrees(model.connection == .connected && !reduceMotion ? -5 : 0))
-                    .changeEffect(.shine(duration:0.3),value:model.connection == .connected,isEnabled:!reduceMotion && model.connection == .connected)
             }
-            HStack {
-                if needsImport && !model.hasConnectionActivity {
-                    Button("添加订阅或节点",action:onImport).buttonStyle(.borderedProminent).disabled(model.locked)
-                } else {
-                    Button {
-                        Task { if model.hasConnectionActivity { await model.disconnect() } else { await model.connect() } }
-                    } label: {
-                        Label(model.networkWaiting ? "停止自动重连" : model.connection == .connected ? "断开连接" : model.connection == .connecting ? "取消连接" : model.connection == .disconnecting ? "正在断开" : "连接",systemImage:model.hasConnectionActivity ? "stop.fill":"power")
-                            .font(.system(size:13,weight:.semibold)).padding(.horizontal,10).padding(.vertical,5)
-                    }.buttonStyle(.borderedProminent)
-                        .tint(model.hasConnectionActivity ? Color.secondary : Theme.accentBlue)
-                        .disabled(model.stopDisabled || (!model.hasConnectionActivity && (needsSelection || model.recoveryPending)))
-                        .accessibilityIdentifier("primaryConnectionButton")
-                }
-                Spacer(minLength:6)
-                if let since=model.connectedSince,model.connection == .connected {
-                    Text(since,style:.timer).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                } else { XihangStatusPill(title:model.effectiveState.captureMode.label,color:statusColor) }
-            }
+            .padding(18)
+            Divider()
+            routeRow.padding(.horizontal,18).padding(.vertical,12)
+            Divider()
             HStack(spacing:12) {
-                Text(model.captureSwitchTarget == nil ? model.effectiveState.captureMode.label : "正在切换接管方式…")
-                    .font(.caption).foregroundStyle(.secondary)
+                Picker("代理模式",selection:Binding(get:{model.state.mode},set:{mode in Task{await model.setMode(mode)}})) {
+                    ForEach(ProxyMode.allCases,id:\.self) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented).labelsHidden().fixedSize()
+                .disabled(model.locked)
                 Spacer(minLength:8)
+                Text(model.captureSwitchTarget == nil ? model.effectiveState.captureMode.label : "正在切换…")
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 Toggle("完整接管", isOn: Binding(
                     get: { (model.captureSwitchTarget ?? model.effectiveState.captureMode) == .compatible },
                     set: { enabled in Task { await model.setCaptureMode(enabled ? .compatible : .systemProxy) } }
@@ -127,36 +118,59 @@ struct XihangConnectionHeader: View {
                 .accessibilityIdentifier("fullCaptureToggle")
                 .help("开启 TUN 与系统代理；切换后自动保存并重连，关闭后使用系统代理。")
             }
+            .padding(.horizontal,18).padding(.vertical,10)
         }
-        .padding(22).frame(maxWidth:.infinity,minHeight:192,alignment:.topLeading)
-        .background {
-            RoundedRectangle(cornerRadius:24).fill(Theme.cardBackground)
-            if !reduceTransparency && contrast != .increased {
-                RoundedRectangle(cornerRadius:24).fill(LinearGradient(colors:[Theme.brand.opacity(0.16),Theme.purpleAccent.opacity(0.07),.clear],startPoint:.topLeading,endPoint:.bottomTrailing))
-            }
-        }
-        .overlay(RoundedRectangle(cornerRadius:24).strokeBorder(Theme.accentBlue.opacity(contrast == .increased ? 0.7 : 0.2),lineWidth:1))
+        .liquidContentSurface()
+        .overlay(RoundedRectangle(cornerRadius:Theme.cardCornerRadius,style:.continuous).strokeBorder(statusColor.opacity(model.connectionAvailable ? (contrast == .increased ? 0.8 : 0.35) : 0),lineWidth:1).allowsHitTesting(false))
         .animation(reduceMotion ? nil : .easeInOut(duration:0.25),value:model.connection)
     }
-    private var route: some View {
-        VStack(alignment:.leading,spacing:10) {
-            HStack { Label("当前线路",systemImage:"point.topleft.down.to.point.bottomright.curvepath").font(.caption).foregroundStyle(.secondary);Spacer() }
-            Text(model.state.mode == .direct ? "直接连接" : model.selectedName).font(.system(size:16,weight:.semibold)).lineLimit(2).help(model.selectedName)
-            if model.connection == .connected && model.state.mode != .direct {
-                Text("实际出口："+model.actualName).font(.caption2).foregroundStyle(.secondary).lineLimit(1).help(model.actualName)
-            } else if let node=model.selected {
-                VStack(alignment:.leading,spacing:8) {
-                    ProtocolBadge(kind:node.kind)
-                    LatencyBadge(delayText:latency(node,model))
+    // 圆形主按钮：未导入线路时直接引导添加，其余情况连接或断开。
+    private var powerButton: some View {
+        let importing = model.needsFirstImport && !model.hasConnectionActivity
+        let active = model.hasConnectionActivity
+        let tint: Color = model.connectionAvailable ? Theme.connectedGreen : active ? Theme.amberAccent : Theme.accentBlue
+        return Button {
+            if importing { onImport() } else { Task { await model.togglePrimaryConnection() } }
+        } label: {
+            ZStack {
+                Circle().fill(active ? tint : tint.opacity(0.12))
+                if model.busy && model.connection != .connected && model.connection != .disconnected {
+                    ProgressView().controlSize(.small).tint(.white)
+                } else {
+                    Image(systemName: importing ? "plus" : "power")
+                        .font(.system(size:24,weight:.semibold))
+                        .foregroundStyle(active ? Color.white : tint)
                 }
-            } else { Text("自动调度与规则分流").font(.caption2).foregroundStyle(.secondary) }
-            Spacer(minLength:0)
-            HStack {
-                Text("\(model.state.nodes.count) 条线路").font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Button("切换",action:onLines).buttonStyle(.borderless).disabled(model.locked)
             }
-        }.padding(20).frame(maxWidth:.infinity,minHeight:192,maxHeight:192,alignment:.topLeading).liquidContentSurface().modifier(XihangHover())
+            .frame(width:60,height:60)
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(importing ? model.locked : model.primaryActionDisabled)
+        .opacity((importing ? model.locked : model.primaryActionDisabled) ? 0.45 : 1)
+        .help(importing ? "添加订阅或节点" : model.primaryActionTitle)
+        .accessibilityLabel(importing ? "添加订阅或节点" : model.primaryActionTitle)
+        .accessibilityIdentifier("primaryConnectionButton")
+        .changeEffect(.shine(duration:0.3),value:model.connection == .connected,isEnabled:!reduceMotion && model.connection == .connected)
+    }
+    private var routeRow: some View {
+        HStack(spacing:10) {
+            Image(systemName:"point.topleft.down.to.point.bottomright.curvepath").foregroundStyle(.secondary).frame(width:18)
+            VStack(alignment:.leading,spacing:2) {
+                Text(model.state.mode == .direct ? "直接连接" : model.selectedName).font(.body.weight(.medium)).lineLimit(1).help(model.selectedName)
+                if model.connection == .connected && model.state.mode != .direct {
+                    Text("实际出口："+model.actualName).font(.caption).foregroundStyle(.secondary).lineLimit(1).help(model.actualName)
+                } else if model.selected == nil {
+                    Text(model.state.nodes.isEmpty ? "暂无线路" : "自动调度与规则分流").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength:8)
+            if let node=model.selected {
+                ProtocolBadge(kind:node.kind)
+                LatencyBadge(delayText:latency(node,model))
+            }
+            Button("切换线路",action:onLines).disabled(model.locked || model.state.nodes.isEmpty)
+        }
     }
 }
 struct XihangTrafficPanel: View {
@@ -180,7 +194,7 @@ struct XihangTrafficPanel: View {
                     Text(!connected ? "连接后，这里会显示实时流量轨迹" : paused ? "流量统计已暂停，请前往“连接”页面恢复刷新" : "实时速率暂时无法获取，请查看诊断").font(.caption).foregroundStyle(.secondary)
                 }.padding(.top,4)
             }
-        }.padding(20).liquidContentSurface()
+        }.padding(.horizontal,18).padding(.vertical,expanded ? 16 : 12).liquidContentSurface()
     }
     private var rates: some View {
         HStack(spacing:28) {
@@ -197,7 +211,7 @@ struct XihangTrafficPanel: View {
     private func metric(_ title:String,value:String,icon:String,color:Color)->some View {
         VStack(alignment:.leading,spacing:7) {
             Label(title,systemImage:icon).font(.system(size:10,weight:.medium)).foregroundStyle(color)
-            Text(value).font(.system(size:expanded ? 21 : 16,weight:.semibold,design:.rounded)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.8)
+            Text(value).font(.system(size:expanded ? 20 : 15,weight:.semibold,design:.rounded)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.8)
         }
     }
 }
@@ -213,7 +227,7 @@ struct XihangSubscriptionSummary: View {
             } else { Text("导入订阅，即可管理和更新线路").font(.caption).foregroundStyle(.secondary) }
             if model.state.subscriptions.contains(where: \.pendingReview) { XihangStatusPill(title:"更新需要确认",color:Theme.amberAccent) }
             else if model.state.subscriptions.contains(where: { $0.lastError != nil }) { XihangStatusPill(title:"更新异常，原线路已保留",color:Theme.amberAccent) }
-        }.padding(20).frame(maxWidth:.infinity,minHeight:140,alignment:.topLeading).liquidContentSurface()
+        }.padding(18).frame(maxWidth:.infinity,minHeight:140,alignment:.topLeading).liquidContentSurface()
     }
 }
 struct XihangAboutView: View {
@@ -244,22 +258,5 @@ struct XihangSubscriptionUsage: View {
                 }
             }
         }
-    }
-}
-
-struct XihangModeMenu: View {
-    @ObservedObject var model: AppModel
-    var body: some View {
-        Menu {
-            ForEach(ProxyMode.allCases,id:\.self) { mode in
-                Button {Task {await model.setMode(mode)}} label: {
-                    if mode == model.state.mode {Label(mode.label,systemImage:"checkmark")} else {Text(mode.label)}
-                }
-            }
-        } label: {
-            Text(model.state.mode.label).font(.callout).foregroundStyle(Color.primary)
-        }.menuStyle(.borderlessButton).fixedSize().padding(.horizontal,12).padding(.vertical,7)
-            .background(Theme.cardBackground,in:RoundedRectangle(cornerRadius:10))
-            .disabled(model.locked).accessibilityLabel("代理模式："+model.state.mode.label)
     }
 }

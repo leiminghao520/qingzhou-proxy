@@ -24,40 +24,37 @@ struct DailyLinesView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
+            // 标题行：数量、检测与添加；检测进度直接替换说明文字，减少一行占用。
+            HStack(spacing: 8) {
                 Text("线路").font(.headline)
                 Text("\(nodes.count) / \(model.state.nodes.count)").font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Button("添加", action: onImport).disabled(model.locked)
+                Text(model.measuring ? model.measurementProgress : "HTTPS 延迟 · 非下载速度")
+                    .font(.caption).foregroundStyle(.tertiary).lineLimit(1)
+                Spacer(minLength: 8)
+                Button {
+                    if model.measuring { model.cancelMeasurement() }
+                    else { frozenOrder = nodes.map(\.id); model.measure(nodes.map(\.id)) }
+                } label: {
+                    Label(model.measurementCancelling ? "正在取消…" : model.measuring ? "取消检测" : "检测延迟", systemImage: "bolt")
+                }
+                .controlSize(.small)
+                .disabled(model.measurementCancelling || (!model.measuring && (model.locked || nodes.isEmpty)))
+                .accessibilityIdentifier("dailyMeasureButton")
+                Button(action: onImport) { Label("添加", systemImage: "plus") }
+                    .controlSize(.small).disabled(model.locked)
             }
             HStack(spacing: 8) {
-                TextField("搜索线路或备注", text: $page.query)
+                TextField("搜索线路或备注（⌘F）", text: $page.query)
                     .textFieldStyle(.roundedBorder).focused($searchFocused)
                     .accessibilityIdentifier("dailyLineSearch")
-                Toggle("收藏", isOn: $page.favoriteOnly).toggleStyle(.button)
+                Toggle(isOn: $page.favoriteOnly) { Label("收藏", systemImage: page.favoriteOnly ? "star.fill" : "star") }
+                    .toggleStyle(.button)
                 Menu {
                     ForEach(["最近使用", "HTTPS 延迟", "节点名称"],id:\.self) { value in
                         Button {sort=value} label: {if value == sort {Label(value,systemImage:"checkmark")} else {Text(value)}}
                     }
                 } label: { Label(sort,systemImage:"arrow.up.arrow.down").font(.caption).foregroundStyle(Color.primary) }
                 .menuStyle(.borderlessButton).frame(width:110).disabled(model.measuring)
-
-            }
-            HStack {
-                Button {
-                    if model.measuring { model.cancelMeasurement() }
-                    else { frozenOrder = nodes.map(\.id); model.measure(nodes.map(\.id)) }
-                } label: {
-                    Label(model.measurementCancelling ? "正在取消…" : model.measuring ? "取消检测" : "检测当前列表", systemImage: "bolt")
-                }
-                .disabled(model.measurementCancelling || (!model.measuring && (model.locked || nodes.isEmpty)))
-                .accessibilityIdentifier("dailyMeasureButton")
-                if model.measuring {
-                    Text(model.measurementProgress).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                } else {
-                    Text("HTTPS 延迟 · 非下载速度").font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 0)
             }
             SelectionFeedbackView(model: model)
             Button { Task { await model.selectPolicy(.automatic) } } label: {
@@ -74,7 +71,8 @@ struct DailyLinesView: View {
                 }.padding(10).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .liquidControl(in: RoundedRectangle(cornerRadius: 10), tint: Theme.accentBlue.opacity(0.08))
+            .background(model.state.activePolicy == .automatic ? Theme.accentBlue.opacity(0.10) : Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .foregroundStyle(model.state.activePolicy == .automatic ? Theme.accentBlue : Color.primary)
             .disabled(model.locked || model.state.nodes.isEmpty)
             if case .group = model.state.activePolicy {
                 HStack {
@@ -169,7 +167,7 @@ struct DailyLinesView: View {
                 .menuStyle(.borderlessButton).fixedSize().accessibilityLabel("线路操作：" + node.name)
         }
         .padding(.horizontal, 12).padding(.vertical, 10)
-        .background(selected ? Theme.accentBlue.opacity(0.07) : Color.secondary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
+        .background(selected ? Theme.accentBlue.opacity(0.10) : Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     private func delayLabel(_ node: Node) -> String {
