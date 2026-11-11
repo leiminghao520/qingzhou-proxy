@@ -8,16 +8,7 @@ struct OverviewView: View {
 
     var body: some View {
         ScrollView(showsIndicators:false) {
-            LazyVStack(alignment:.leading,spacing:20) {
-                HStack {
-                    VStack(alignment:.leading,spacing:4) {
-                        Text("概览").font(.title2.bold())
-                        Text("连接、线路与流量，一目了然").font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    UsageGuideButton(model:model)
-                    XihangModeMenu(model:model)
-                }
+            LazyVStack(alignment:.leading,spacing:16) {
                 FirstConnectionGuide(model:model,onImport:{model.office.importRequested=true})
                 XihangConnectionHeader(model:model,onImport:{model.office.importRequested=true},onLines:onLines)
                 XihangTrafficPanel(display:model.trafficDisplay,connected:model.connection == .connected,available:model.monitor.traffic == .available && !model.monitorPaused,paused:model.monitorPaused,total:model.downloadTotal + model.uploadTotal,connections:model.connections.count)
@@ -44,7 +35,7 @@ struct OverviewView: View {
                 Button { model.office.developerRequested=true } label: { Label("终端助手",systemImage:"terminal") }
             }.buttonStyle(.bordered).controlSize(.regular)
             if model.measuring {Text(model.measurementProgress).font(.caption).foregroundStyle(.secondary)}
-        }.padding(20).frame(maxWidth:.infinity,minHeight:140,alignment:.topLeading).liquidContentSurface()
+        }.padding(18).frame(maxWidth:.infinity,minHeight:140,alignment:.topLeading).liquidContentSurface()
     }
     private func ranking(_ title:String,items:[(String,Int64)])->some View {
         VStack(alignment:.leading,spacing:14) {
@@ -56,6 +47,6 @@ struct OverviewView: View {
                     ProgressView(value:Double(item.1),total:Double(max(1,items.first?.1 ?? 1))).tint(Theme.accentBlue)
                 }
             }
-        }.padding(20).frame(maxWidth:.infinity,minHeight:150,alignment:.topLeading).liquidContentSurface()
+        }.padding(18).frame(maxWidth:.infinity,minHeight:150,alignment:.topLeading).liquidContentSurface()
     }
 }

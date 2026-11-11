@@ -3,37 +3,34 @@ import AppKit
 import QingzhouKit
 
 // MARK: - 汐航主题与基础样式
+// 以 macOS 系统语义色为底，仅保留品牌青色作为强调色，深浅色与高对比度由系统自动适配。
 enum Theme {
-    static let cornerRadius: CGFloat = 16
-    static let cardCornerRadius: CGFloat = 16
-    static let controlRadius: CGFloat = 10
-    
+    static let cornerRadius: CGFloat = 12
+    static let cardCornerRadius: CGFloat = 12
+    static let controlRadius: CGFloat = 8
+
     // 状态色与品牌色
-    static let connectedGreen = Color(nsColor: NSColor(name:nil) { $0.bestMatch(from:[.darkAqua,.aqua]) == .darkAqua ? NSColor.systemGreen : NSColor(red:0.08,green:0.45,blue:0.25,alpha:1) })
+    static let connectedGreen = Color(nsColor: .systemGreen)
     static let connectingYellow = Color(nsColor: .systemOrange)
     static let disconnectedGray = Color.secondary
     static let dangerRed = Color(nsColor: .systemRed)
-    static let accentBlue = Color(nsColor: NSColor(name:nil) { $0.bestMatch(from:[.darkAqua,.aqua]) == .darkAqua ? NSColor(red:0.15,green:0.83,blue:0.85,alpha:1) : NSColor(red:0.02,green:0.45,blue:0.49,alpha:1) })
+    static let accentBlue = Color(nsColor: NSColor(name:nil) { $0.bestMatch(from:[.darkAqua,.aqua]) == .darkAqua ? NSColor(red:0.20,green:0.80,blue:0.84,alpha:1) : NSColor(red:0.02,green:0.48,blue:0.53,alpha:1) })
     static let brand = Color(red:22/255,green:184/255,blue:197/255)
-    static let purpleAccent = Color(red:88/255,green:101/255,blue:232/255)
+    static let purpleAccent = Color(nsColor: .systemIndigo)
     static let cyanAccent = accentBlue
-    static let amberAccent = Color(nsColor: NSColor(name:nil) { $0.bestMatch(from:[.darkAqua,.aqua]) == .darkAqua ? NSColor.systemOrange : NSColor(red:0.62,green:0.33,blue:0.04,alpha:1) })
-    
+    static let amberAccent = Color(nsColor: .systemOrange)
+
     static let trafficUpload = purpleAccent
     static let trafficDownload = accentBlue
 
-    // 背景颜色
+    // 背景颜色：参照系统设置，浅色为灰底白卡，深色为深底浅一级灰卡
     static var cardBackground: Color {
-        Color(nsColor: NSColor(name:nil) { $0.bestMatch(from:[.darkAqua,.aqua]) == .darkAqua ? NSColor(red:0.080,green:0.112,blue:0.163,alpha:1) : NSColor.white })
+        Color(nsColor: NSColor(name:nil) { $0.bestMatch(from:[.darkAqua,.aqua]) == .darkAqua ? NSColor(white:0.17,alpha:1) : NSColor.white })
     }
-    
     static var secondaryBackground: Color {
-        Color(nsColor: NSColor(name:nil) { $0.bestMatch(from:[.darkAqua,.aqua]) == .darkAqua ? NSColor(red:0.045,green:0.065,blue:0.103,alpha:1) : NSColor(red:0.955,green:0.970,blue:0.980,alpha:1) })
+        Color(nsColor: NSColor(name:nil) { $0.bestMatch(from:[.darkAqua,.aqua]) == .darkAqua ? NSColor(white:0.115,alpha:1) : NSColor(white:0.955,alpha:1) })
     }
-    
-    static var subtleBorder: Color {
-        Color.primary.opacity(0.10)
-    }
+    static var subtleBorder: Color { Color(nsColor: .separatorColor) }
 }
 
 // MARK: - 协议标签
@@ -272,60 +269,6 @@ struct UsageProgressBar: View {
                 }
             }
             .frame(height: 6)
-        }
-    }
-}
-
-// MARK: - 侧栏导航与玻璃选中态
-struct SidebarNavItemRow: View {
-    let name: String
-    let icon: String
-    let isSelected: Bool
-    var badgeText: String? = nil
-    var badgeColor: Color? = nil
-    var selectionNamespace: Namespace.ID? = nil
-    let action: () -> Void
-    
-    @State private var isHovered = false
-    
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: icon)
-                    .font(.system(size: 14, weight: isSelected ? .semibold : .regular))
-                    .frame(width: 20, alignment: .center)
-                    .foregroundStyle(isSelected ? Theme.accentBlue : (isHovered ? Color.primary : .secondary))
-                
-                Text(name)
-                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
-                    .foregroundStyle(isSelected ? Color.primary : (isHovered ? Color.primary : .secondary))
-                
-                Spacer(minLength: 8)
-                
-                if let badgeText {
-                    Text(badgeText)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(badgeColor ?? .secondary)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 1.5)
-                        .background((badgeColor ?? Color.secondary).opacity(0.12))
-                        .clipShape(Capsule())
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
-            .background {
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(!isSelected && isHovered ? Color.primary.opacity(0.06) : .clear)
-            }
-            .modifier(LiquidSelectionSurface(selected: isSelected, namespace: selectionNamespace, id: "sidebar-selection", cornerRadius: 12))
-            .contentShape(RoundedRectangle(cornerRadius: Theme.controlRadius))
-        }
-        .buttonStyle(.plain)
-        .contentShape(RoundedRectangle(cornerRadius: Theme.controlRadius))
-        .onHover { hovering in
-            isHovered = hovering
         }
     }
 }

@@ -72,34 +72,25 @@ struct SimpleConnectionView: View {
     var onEdit: (Node) -> Void = { _ in }
     var onProfessional: () -> Void = {}
 
+    // 首页一屏完成：状态卡负责连接，下方线路列表负责选线，其余工具统一收进工具栏“更多”。
     var body: some View {
-        ScrollView(showsIndicators:false) {
-        VStack(alignment:.leading,spacing:14) {
-            HStack {
-                Text("连接").font(.title2.bold())
-                Spacer()
-                UsageGuideButton(model:model)
-                XihangModeMenu(model:model)
-            }
-            FirstConnectionGuide(model:model,onImport:onImport)
+        VStack(alignment:.leading,spacing:12) {
             XihangConnectionHeader(model:model,onImport:onImport,onLines:onLines)
-            XihangTrafficPanel(display:model.trafficDisplay,connected:model.connection == .connected,available:model.monitor.traffic == .available && !model.monitorPaused,paused:model.monitorPaused,total:model.downloadTotal + model.uploadTotal,connections:model.connections.count,expanded:false)
+            if model.connection == .connected || model.monitorPaused {
+                XihangTrafficPanel(display:model.trafficDisplay,connected:model.connection == .connected,available:model.monitor.traffic == .available && !model.monitorPaused,paused:model.monitorPaused,total:model.downloadTotal + model.uploadTotal,connections:model.connections.count,expanded:false)
+            }
             if model.state.subscriptions.contains(where:\.pendingReview) {
                 HStack {
-                    Label("订阅更新需要确认",systemImage:"exclamationmark.bubble").font(.caption).foregroundStyle(Theme.amberAccent)
+                    Label("订阅更新需要确认",systemImage:"exclamationmark.bubble").font(.callout).foregroundStyle(Theme.amberAccent)
                     Spacer(); Button("查看订阅",action:onSubscriptions)
-                }
+                }.padding(.horizontal,14).padding(.vertical,10).liquidContentSurface()
             }
             DailyLinesView(model:model,onImport:onImport,onEdit:onEdit,onProfessional:onProfessional)
-                .frame(height:360)
-            HStack {
-                Button("网络诊断",action:onDiagnose)
-                Spacer()
-                Button("订阅 · \(model.state.subscriptions.count)",action:onSubscriptions)
-                if !model.recoveryPending { Button("恢复网络") {Task {await model.recover()}}.disabled(model.loadingFailed || model.recovering) }
-            }.buttonStyle(.borderless).font(.caption)
-        }.padding(2)
+                .padding(14)
+                .frame(minHeight:220,maxHeight:.infinity,alignment:.top)
+                .liquidContentSurface()
         }
+        .frame(maxWidth:.infinity,maxHeight:.infinity,alignment:.top)
     }
 }
 
@@ -120,12 +111,11 @@ struct SimpleSubscriptionsView: View {
         ScrollView(showsIndicators:false) {
             VStack(alignment: .leading, spacing: 18) {
                 HStack {
-                    Text("订阅").font(.largeTitle.bold())
+                    Text("粘贴服务商提供的订阅链接，更新后即可选择线路。")
+                        .font(.callout).foregroundStyle(.secondary)
                     Spacer()
-                    Button("添加订阅", action: onImport).liquidAction(prominent: true).disabled(model.locked)
+                    Button("添加订阅", action: onImport).buttonStyle(.borderedProminent).disabled(model.locked)
                 }
-                Text("粘贴服务商提供的订阅链接，更新后即可选择线路。")
-                    .font(.callout).foregroundStyle(.secondary)
                 if model.state.subscriptions.isEmpty {
                     ContentUnavailableView("还没有订阅", systemImage: "link", description: Text("点击右上角添加订阅。已有单条节点也可以直接使用。"))
                 }
@@ -167,8 +157,7 @@ struct SimpleSettingsView: View {
     var onDiagnose: () -> Void
     @AppStorage("interfaceMode") private var interfaceMode = InterfaceMode.simple
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("设置").font(.largeTitle.bold())
+        VStack(alignment: .leading, spacing: 0) {
             Form {
                 OptimizationSettings(model:model)
                 Section("启动") {

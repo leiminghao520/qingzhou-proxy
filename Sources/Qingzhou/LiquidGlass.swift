@@ -1,7 +1,7 @@
 import SwiftUI
 import AppKit
 
-// 玻璃仅用于导航和操作层；正文使用不透明卡片，保持文字清晰。
+// 玻璃仅用于操作控件；正文使用系统底色卡片，保持文字清晰。
 struct LiquidCanvas: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
@@ -29,9 +29,8 @@ struct LiquidContentSurface: ViewModifier {
         content
             .background(shape.fill(Theme.cardBackground))
             .overlay {
-                shape.strokeBorder(contrast == .increased ? Color.primary.opacity(0.5) : Theme.subtleBorder, lineWidth: 1).allowsHitTesting(false)
+                shape.strokeBorder(contrast == .increased ? Color.primary.opacity(0.5) : Theme.subtleBorder, lineWidth: contrast == .increased ? 1 : 0.5).allowsHitTesting(false)
             }
-            .shadow(color: .black.opacity(scheme == .dark ? 0.14 : 0.04), radius: 12, x: 0, y: 5)
     }
 }
 
@@ -109,48 +108,8 @@ struct LiquidSelectionSurface: ViewModifier {
     }
 }
 
-struct LiquidModePicker: View {
-    @Binding var selection: InterfaceMode
-    @Namespace private var namespace
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    var body: some View {
-        LiquidGlassGroup(spacing: 8) {
-            HStack(spacing: 4) {
-                mode(.simple, title: "简洁", icon: "sparkles")
-                mode(.professional, title: "专业", icon: "slider.horizontal.3")
-            }
-            .padding(4)
-            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 16))
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("界面模式")
-        .accessibilityIdentifier("interfaceModePicker")
-    }
-
-    private func mode(_ value: InterfaceMode, title: String, icon: String) -> some View {
-        Button {
-            withAnimation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.86)) {
-                selection = value
-            }
-        } label: {
-            Label(title, systemImage: icon)
-                .font(.system(size: 12, weight: selection == value ? .semibold : .regular))
-                .foregroundStyle(selection == value ? Color.primary : Color.secondary)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
-                .modifier(LiquidSelectionSurface(selected: selection == value, namespace: namespace, id: "interface-mode", cornerRadius: 12))
-                .contentShape(RoundedRectangle(cornerRadius: 12))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(title)
-        .accessibilityValue(selection == value ? "已选中" : "未选中")
-        .accessibilityAddTraits(selection == value ? .isSelected : [])
-    }
-}
-
 extension View {
-    func liquidContentSurface(cornerRadius: CGFloat = 20) -> some View {
+    func liquidContentSurface(cornerRadius: CGFloat = Theme.cardCornerRadius) -> some View {
         modifier(LiquidContentSurface(cornerRadius: cornerRadius))
     }
     func liquidControl<S: InsettableShape>(in shape: S, tint: Color = .clear, interactive: Bool = true) -> some View {
