@@ -16,6 +16,10 @@ extension AppModel {
         telemetryTask=Task{[weak self] in
             while !Task.isCancelled {
                 guard let self,self.epoch==token else{return}
+                if self.busy {
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                    continue
+                }
                 if self.capture.activeMode?.usesTunnel == true || self.capture.helperRunning {
                     do {
                         let status=try await self.capture.helperStatus()
@@ -23,6 +27,10 @@ extension AppModel {
                         self.updateHelperNetworkStatus(status)
                         if !self.networkReconnecting && (!status.running || status.phase == "networkProtectionFailed") {self.recordEvent(.network,.failed,.helperFailed);self.log(status.message);self.helperFailureReason=status.message;self.coreFailed=true;self.drainPendingDisconnect();return}
                     }catch {
+                        if !(error is HelperRequestBusy) {
+                            self.claudeSafetyProtection = nil
+                            self.claudeSafetyHelperRunning = false
+                        }
                         self.office.set("routes",title:"内网保护路由",status:.unverified,detail:"辅助服务状态暂不可读，未认定保护正常",now:self.dependencies.now())
                     }
                 }

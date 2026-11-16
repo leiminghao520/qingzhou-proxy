@@ -102,7 +102,7 @@ with tempfile.TemporaryDirectory(prefix='qz-helper-scripts-') as folder:
     result=run('install-helper.sh',TEST_RECOVER_CLEAR='1')
     assert result.returncode==0,(result.stdout,result.stderr)
     assert not (root/'recovery.json').exists() and log.read_text().splitlines()==['bootout','bootstrap']
-    assert (root/'recovery.calls').read_text().strip()=='--recover-preserving-external'
+    assert (root/'recovery.calls').read_text().strip()=='--recover-preserving-protection'
     assert any((p/'recovery.json').read_text()=='{"intent":"old"}' for p in stage.glob('recovery.*') if (p/'recovery.json').exists())
     passed('pendingRecoveryUsesNewHelperThenInstalls')
     reset();plist.write_text('old-plist');(root/'recovery.json').write_text('{"intent":"retained"}');(root/'QingzhouHelper').write_text('old-helper')
@@ -117,5 +117,6 @@ with tempfile.TemporaryDirectory(prefix='qz-helper-scripts-') as folder:
     reset();plist.write_text('old-plist');(root/'recovery.json').write_text('{}')
     result=run('recover-helper.sh',TEST_RECOVER_CLEAR='1')
     assert result.returncode==0 and log.read_text().splitlines()==['bootout','bootstrap']
+    assert (root/'recovery.calls').read_text().strip()=='--recover-preserving-external'
     passed('standaloneSafeRecoveryRestartsAfterRelease')
 print('RESULT helper_script_scenarios='+str(scenarios)+' failures=0')

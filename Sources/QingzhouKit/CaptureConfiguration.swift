@@ -2,6 +2,28 @@ import Foundation
 
 public enum CaptureConfiguration {
     public static func apply(_ object:inout [String:Any],state:AppState,plan:CapturePlan,dnsForwardPort:Int,nodeInterfaces:[String:String]=[:]) {
+        if state.claudeSafetyMode == true {
+            // 安全模式不生成任何企业或局域网直连路由，也不使用原 DNS 转发器。
+            var outbounds = object["outbounds"] as! [[String: Any]]
+            for index in outbounds.indices where outbounds[index]["server"] != nil {
+                outbounds[index]["domain_resolver"] = ["server": "remote", "strategy": state.effectiveAddressFamilyPolicy.strategy]
+                outbounds[index]["bind_interface"] = (outbounds[index]["server"] as? String).flatMap { nodeInterfaces[$0] } ?? plan.snapshot.primaryInterface
+            }
+            outbounds.removeAll { $0["type"] as? String == "direct" }
+            object["outbounds"] = outbounds
+            var dns = object["dns"] as! [String: Any]
+            dns["servers"] = (dns["servers"] as! [[String: Any]]).filter { $0["tag"] as? String == "remote" }
+            dns["rules"] = [] as [[String: Any]]
+            dns["final"] = "remote"
+            object["dns"] = dns
+            var route = object["route"] as! [String: Any]
+            route["rules"] = (route["rules"] as! [[String: Any]]).filter {
+                ["sniff", "hijack-dns"].contains($0["action"] as? String ?? "")
+            }
+            route["default_domain_resolver"] = ["server": "remote", "strategy": state.effectiveAddressFamilyPolicy.strategy]
+            object["route"] = route
+            return
+        }
         var dns=object["dns"] as! [String:Any]
         var servers=dns["servers"] as! [[String:Any]]
         servers.removeAll{$0["tag"] as? String == "local"}

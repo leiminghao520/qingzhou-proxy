@@ -77,6 +77,7 @@ public struct RemoteRuleSource:Codable,Identifiable,Sendable {
     public init(name:String,sourceRef:String=UUID().uuidString,target:PolicyReference = .selected){self.name=name;self.sourceRef=sourceRef;self.target=target}
 }
 public struct AppState: Codable, Sendable {
+    public var claudeSafetyMode: Bool?
     public var disconnectProtection:Bool?
     public var protectsDisconnect:Bool {disconnectProtection == true}
     public var strictDNS:Bool?
@@ -93,9 +94,10 @@ public struct AppState: Codable, Sendable {
     public var rulesEnabled:Bool {get {mode == .rule} set {mode = newValue ? .rule : .global}}
     public var activePolicy:PolicyReference? {selectedPolicy ?? selectedID.map(PolicyReference.node)}
     public init() {}
-    enum CodingKeys:String,CodingKey {case disconnectProtection,strictDNS,trustedCorporateDNS,savedDiagnosticTargets,networkBypasses,httpCompatibilityEnabled,protectedDomains,addressFamilyPolicy,shadowrocket,shortcutEnabled,shortcutKey,shortcutModifiers,tunExcludedCIDRs,captureMode,dnsPreference,notes,recentUse,compactNodes,schemaVersion,nodes,subscriptions,rules,mode,listenPort,selectedID,selectedPolicy,groups,remoteRules,favorites,latency,ruleFinal,autoConnect,loginAtStartup}
+    enum CodingKeys:String,CodingKey {case claudeSafetyMode,disconnectProtection,strictDNS,trustedCorporateDNS,savedDiagnosticTargets,networkBypasses,httpCompatibilityEnabled,protectedDomains,addressFamilyPolicy,shadowrocket,shortcutEnabled,shortcutKey,shortcutModifiers,tunExcludedCIDRs,captureMode,dnsPreference,notes,recentUse,compactNodes,schemaVersion,nodes,subscriptions,rules,mode,listenPort,selectedID,selectedPolicy,groups,remoteRules,favorites,latency,ruleFinal,autoConnect,loginAtStartup}
     enum LegacyKeys:String,CodingKey {case rulesEnabled}
     public init(from decoder:Decoder) throws {
+        claudeSafetyMode = try decoder.container(keyedBy: CodingKeys.self).decodeIfPresent(Bool.self, forKey: .claudeSafetyMode)
         let c=try decoder.container(keyedBy:CodingKeys.self);disconnectProtection=try c.decodeIfPresent(Bool.self,forKey:.disconnectProtection);strictDNS=try c.decodeIfPresent(Bool.self,forKey:.strictDNS);savedDiagnosticTargets=try c.decodeIfPresent([SavedDiagnosticTarget].self,forKey:.savedDiagnosticTargets);try SavedDiagnosticTarget.validate(savedDiagnosticTargets ?? []);httpCompatibilityEnabled=try c.decodeIfPresent(Bool.self,forKey:.httpCompatibilityEnabled) ?? false;shadowrocket=try c.decodeIfPresent(ShadowrocketConfiguration.self,forKey:.shadowrocket);schemaVersion=try c.decodeIfPresent(Int.self,forKey:.schemaVersion) ?? 1
         nodes=try c.decodeIfPresent([Node].self,forKey:.nodes) ?? [];subscriptions=try c.decodeIfPresent([Subscription].self,forKey:.subscriptions) ?? [];rules=try c.decodeIfPresent([RoutingRule].self,forKey:.rules) ?? []
         let old=try decoder.container(keyedBy:LegacyKeys.self);mode=try c.decodeIfPresent(ProxyMode.self,forKey:.mode) ?? ((try old.decodeIfPresent(Bool.self,forKey:.rulesEnabled) ?? true) ? .rule : .global)

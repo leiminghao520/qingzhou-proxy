@@ -50,7 +50,7 @@ struct MainToolbar: ToolbarContent {
             } label: {
                 Label(model.state.mode.label, systemImage: "arrow.triangle.branch")
             }
-            .disabled(model.locked)
+            .disabled(model.locked || model.claudeSafetyEnabled)
             .help("代理模式：" + model.state.mode.label)
             .accessibilityLabel("代理模式：" + model.state.mode.label)
 

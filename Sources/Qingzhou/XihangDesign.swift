@@ -105,7 +105,7 @@ struct XihangConnectionHeader: View {
                     ForEach(ProxyMode.allCases,id:\.self) { Text($0.label).tag($0) }
                 }
                 .pickerStyle(.segmented).labelsHidden().fixedSize()
-                .disabled(model.locked)
+                .disabled(model.locked || model.claudeSafetyEnabled)
                 Spacer(minLength:8)
                 Text(model.captureSwitchTarget == nil ? model.effectiveState.captureMode.label : "正在切换…")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -114,11 +114,13 @@ struct XihangConnectionHeader: View {
                     set: { enabled in Task { await model.setCaptureMode(enabled ? .compatible : .systemProxy) } }
                 ))
                 .toggleStyle(.switch).controlSize(.small).fixedSize()
-                .disabled(model.locked || model.recoveryPending)
+                .disabled(model.locked || model.recoveryPending || model.claudeSafetyEnabled)
                 .accessibilityIdentifier("fullCaptureToggle")
                 .help("开启 TUN 与系统代理；切换后自动保存并重连，关闭后使用系统代理。")
             }
             .padding(.horizontal,18).padding(.vertical,10)
+            Divider()
+            ClaudeSafetyControl(model: model).padding(.horizontal,18).padding(.vertical,10)
         }
         .liquidContentSurface()
         .overlay(RoundedRectangle(cornerRadius:Theme.cardCornerRadius,style:.continuous).strokeBorder(statusColor.opacity(model.connectionAvailable ? (contrast == .increased ? 0.8 : 0.35) : 0),lineWidth:1).allowsHitTesting(false))

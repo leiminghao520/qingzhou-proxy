@@ -29,7 +29,7 @@ struct OverviewView: View {
         VStack(alignment:.leading,spacing:16) {
             Label("常用操作",systemImage:"sparkles").font(.headline)
             LazyVGrid(columns:[GridItem(.flexible(),alignment:.leading),GridItem(.flexible(),alignment:.leading)],alignment:.leading,spacing:12) {
-                Button { Task { await model.selectPolicy(.automatic) } } label: { Label("自动选择",systemImage:"bolt.badge.automatic") }.disabled(model.locked || model.state.nodes.isEmpty)
+                Button { Task { await model.selectPolicy(.automatic) } } label: { Label("自动选择",systemImage:"bolt.badge.automatic") }.disabled(model.locked || model.state.nodes.isEmpty || model.claudeSafetyEnabled)
                 Button { if model.measuring {model.cancelMeasurement()} else {model.measure()} } label: { Label(model.measuring ? "取消测速":"检测延迟",systemImage:"waveform.path.ecg") }.disabled(model.busy || model.state.nodes.isEmpty)
                 Button { Task { await model.refreshAll() } } label: { Label("更新资源",systemImage:"arrow.clockwise") }.disabled(model.locked)
                 Button { model.office.developerRequested=true } label: { Label("终端助手",systemImage:"terminal") }

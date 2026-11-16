@@ -8,6 +8,15 @@ import SystemConfiguration
 import QingzhouKit
 
 @MainActor final class AppModel:ObservableObject {
+    @Published var claudeSafetyPreferences = ClaudeSafetyPreferences()
+    @Published var claudeSafetyChanging = false
+    @Published var claudeSafetyTarget: Bool?
+    @Published var claudeSafetyChoosingNode = false
+    @Published var claudeSafetyLoadFailed = false
+    @Published var claudeSafetyProtection: Bool?
+    var claudeSafetyVerifiedAt: Date?
+    @Published var claudeSafetyHelperRunning = false
+    var claudeSafetyMonitor: Task<Void, Never>?
     enum Connection:String {case disconnected="未连接",connecting="连接中",connected="已连接",disconnecting="断开中",error="错误"}
     @Published var activeBypasses:[NetworkBypass]?
     @Published var bypassApplyFailure:String?
@@ -98,7 +107,7 @@ import QingzhouKit
     private let healthScheduler=HealthRefreshScheduler()
     var healthRefreshKey:String?
     private var pendingRecovery=false
-    var canStop:Bool {!loadingFailed && !recovering && !stopRequested && connection != .disconnecting}
+    var canStop:Bool {!claudeSafetyChanging && !loadingFailed && !recovering && !stopRequested && connection != .disconnecting}
     var stopDisabled:Bool {hasConnectionActivity ? !canStop:locked}
     @Published var measuring=false {didSet{if !measuring{drainPendingDisconnect()}}}
     @Published var measurementProgress=""
@@ -154,7 +163,21 @@ import QingzhouKit
     let core:CoreController
     let proxy:SystemProxyController
     let directory:URL
-    lazy var capture=CaptureController(core:core,proxy:proxy)
+    lazy var capture: CaptureController = {
+        let controller = CaptureController(core: core, proxy: proxy, helperRequest: dependencies.safetyHelperRequest)
+        controller.claudeSafetyEndpoint = { [weak self] in
+            guard let self, let session = self.claudeSafetyPreferences.session,
+                  (try? ClaudeSafetyPolicy.validateActive(self.state, session: session)) != nil else { return nil }
+            return self.state.nodes.first { $0.id == session.nodeID }?.server
+        }
+        controller.claudePFEndpoint = { [weak self] in
+            guard let self, let session = self.claudeSafetyPreferences.session,
+                  let node = self.state.nodes.first(where: { $0.id == session.nodeID }) else { return nil }
+            return try? ClaudePFPolicy.endpoint(node)
+        }
+        controller.onHelperReply = { [weak self] operation, reply in self?.receiveClaudeSafetyStatus(operation: operation, reply: reply) }
+        return controller
+    }()
     @Published var helperStatus="未检测"
     @Published var protectionSummary:[String]=[]
     var api:CoreAPIClient?
@@ -206,6 +229,8 @@ import QingzhouKit
             guard sessionLockFD>=0,flock(sessionLockFD,LOCK_EX|LOCK_NB)==0 else {throw ProxyError("应用已经运行")}
             store=try dependencies.makeStore(directory.appendingPathComponent("state.json"),credentials);state=store!.state
         } catch {loadingFailed=true;errorMessage="配置无法读取或应用已运行，未覆盖原文件。";return}
+        do { claudeSafetyPreferences = try ClaudeSafetyStore.load(from: claudeSafetyRecordURL) }
+        catch { claudeSafetyLoadFailed = true; errorMessage = "Claude 安全模式恢复记录无法读取，未覆盖原记录：" + error.localizedDescription }
         helperAuthorizationAttempted=FileManager.default.fileExists(atPath:directory.appendingPathComponent("helper-authorization-requested").path)
         timeline.activate()
         if let store {store.history=profileHistory;do{try CredentialAuthorization.$allowsInteraction.withValue(false) {try profileHistory.initialize(store.catalog)}}catch{historyStatus=profileHistory.lastError}}
@@ -234,13 +259,14 @@ import QingzhouKit
         synchronizeShortcut()
         // 只有持有实例锁的应用才清理自己上次遗留的敏感运行文件。
         if let files=try? FileManager.default.contentsOfDirectory(at:directory,includingPropertiesForKeys:nil) {for file in files where file.lastPathComponent.hasPrefix("runtime-") || file.lastPathComponent.hasPrefix("check-") {try? FileManager.default.removeItem(at:file)}}
+        startClaudeSafetyMonitoring()
     }
     // 测速或配置更新期间的退出和网络变更延后串行恢复，避免被操作锁跳过。
     func drainPendingDisconnect() {
         guard !busy,!measuring,!loadingFailed else{return}
         if (wakeRecovery.active || wakeIntent != nil) && !stopRequested && !pendingRecovery && !networkChanged {return}
         if pendingRecovery {pendingRecovery=false;Task{await self.performRecovery()};return}
-        if stopRequested {busy=true;Task{defer{stopRequested=false;busy=false};do{try await disconnectInternal();try await capture.releaseDisconnectProtection()}catch{report(error)}};return}
+        if stopRequested {busy=true;Task{defer{stopRequested=false;busy=false};do{try await disconnectInternal();if !claudeSafetyRetainsProtection {try await capture.releaseDisconnectProtection()}}catch{report(error)}};return}
         guard connection == .connected,!recovering else{return}
         if !coreFailed && !networkChanged {
             if healthRefreshPending {healthRefreshPending=false;scheduleHealthRefresh(reason:"操作结束后补做")}
@@ -280,6 +306,7 @@ import QingzhouKit
 
     func persist(_ next:AppState) throws {
         guard let store else {throw ProxyError("配置未加载")}
+        try checkClaudeSafetyConfigurationChange()
         defer {historyStatus=profileHistory.lastError}
         try store.commit(next);state=store.state;errorMessage=nil
     }
@@ -412,6 +439,8 @@ import QingzhouKit
     // 元数据和凭据仅在新配置实际应用成功后提交；失败时恢复原运行配置。
     func apply(_ tx:StoreTransaction,reconfigure:Bool=true,source:String="配置修改",affectedProfileID:UUID?=nil) async throws {
         guard let store else {throw ProxyError("配置未加载")}
+        do { try checkClaudeSafetyConfigurationChange() }
+        catch { store.abort(tx); throw error }
         cancelWakeRecovery();invalidateDiagnostic();invalidateOfficeResults();tx.historySource=source
         defer {activeHistoryTransactionID=nil;historyStatus=profileHistory.lastError}
         do {
@@ -450,6 +479,10 @@ import QingzhouKit
     }
     private func connectWithCredentialSession() async {
         guard !locked,state.activePolicy != nil || state.mode == .direct else{return}
+        do {
+            guard !claudeSafetyLoadFailed else { throw ProxyError("请先核对 Claude 安全模式恢复记录") }
+            if let session = claudeSafetyPreferences.session { try ClaudeSafetyPolicy.validateActive(state, session: session) }
+        } catch { report(error); return }
         cancelWakeRecovery();cancelConnectionWait();userWantsConnection=true;networkReleased=false
         busy=true;connection = .connecting;reachability="尚未检测";connectivityResults=ConnectivityResult.pending;defer{busy=false}
         do {guard !recoveryPending,!proxy.hasRecovery else {throw ProxyError("请先恢复原代理")}
@@ -464,6 +497,12 @@ import QingzhouKit
                 try await HelperInstaller.install(app:Bundle.main.bundleURL)
                 let installed=try await HelperReadiness.wait{try await self.capture.helperStatus()}
                 guard installed.supportsManagedSystemProxy==true else{throw ProxyError("安装后的辅助服务不支持系统代理授权复用")}
+            }
+            if claudeSafetyEnabled {
+                var preferences = claudeSafetyPreferences
+                preferences.proxyPaused = false
+                try ClaudeSafetyStore.save(preferences, to: claudeSafetyRecordURL)
+                claudeSafetyPreferences = preferences
             }
             try await startService(state);guard capture.running,!networkChanged else {throw ProxyError("连接期间核心退出或网络变化")};log(reachability)}catch {
             let original=error
@@ -491,7 +530,7 @@ import QingzhouKit
         drainPendingDisconnect()
     }
     func recover() async {
-        guard !loadingFailed,!recovering else{return}
+        guard !claudeSafetyChanging,!loadingFailed,!recovering else{return}
         userWantsConnection=false;cancelConnectionWait();cancelWakeRecovery()
         stableRecoveryTask?.cancel();stableRecoveryTask=nil;startupGeneration=UUID();startupStage=nil;startupProbeTask?.cancel()
         if let startupClient {Task {await startupClient.shutdown()}}
@@ -504,7 +543,7 @@ import QingzhouKit
         epoch=UUID();connectivityEpoch=UUID()
         log("应急恢复开始：核对本地代理及已安装辅助服务，与当前模式无关")
         do {
-            try await capture.emergencyRecover(preserveExternal:true);try await capture.releaseDisconnectProtection();stopTelemetry();protectionSummary=[];recoveryPending=false;connection = .disconnected
+            try await capture.emergencyRecover(preserveExternal:true);if !claudeSafetyRetainsProtection {try await capture.releaseDisconnectProtection()};stopTelemetry();protectionSummary=[];recoveryPending=false;connection = .disconnected
             connectivityResults=[];helperStatus="汐航接管已清理，外部网络已保留并核对";reachability="尚未检测";errorMessage=nil;log(helperStatus);recordEvent(.recovery,.succeeded,.recoverySucceeded)
         }catch {stopTelemetry();recoveryPending=true;connection = .error;helperStatus="恢复未完成，请查看错误及恢复记录";recordEvent(.recovery,.failed,.recoveryConflict);report(error)}
     }
@@ -524,7 +563,7 @@ import QingzhouKit
             }
         }else if evidence.journalPresent || !evidence.available {recoveryPending=true;helperStatus="辅助服务不可用，仍有恢复记录待处理"}
         // 用户开启自动连接后仅尝试一次；恢复记录和无效策略阻止自动接管。
-        if state.autoConnect,!recoveryPending,state.activePolicy != nil || state.mode == .direct {await CredentialAuthorization.$allowsInteraction.withValue(false) {await connect()}}
+        if state.autoConnect,claudeSafetyPreferences.proxyPaused != true,!claudeSafetyLoadFailed,!recoveryPending,state.activePolicy != nil || state.mode == .direct {await CredentialAuthorization.$allowsInteraction.withValue(false) {await connect()}}
         maintenanceTask=Task{[weak self] in while !Task.isCancelled {await self?.maintenance();try? await Task.sleep(nanoseconds:60_000_000_000)}}
     }
     func measure(_ ids:[UUID]?=nil) {
@@ -828,9 +867,9 @@ import QingzhouKit
         do {
             try await QuitRecoveryTransaction.run(recover:{
                 try await self.capture.emergencyRecover(preserveExternal:true)
-                try await self.capture.releaseDisconnectProtection()
+                if !self.claudeSafetyRetainsProtection {try await self.capture.releaseDisconnectProtection()}
             },verifyReleased:{
-                try await self.capture.verifyReleasedForQuit()
+                try await self.capture.verifyReleasedForQuit(allowDisconnectProtection: self.claudeSafetyRetainsProtection)
             },deferredRecovery:{error in
                 self.recoveryPending=true
                 self.log("退出时已确认汐航不再接管；恢复记录留待下次处理："+Redactor.redact(error.localizedDescription))

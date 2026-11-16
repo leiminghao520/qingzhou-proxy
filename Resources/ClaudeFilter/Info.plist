@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>cn.qingzhou.proxy.claude-filter</string>
+<key>CFBundleExecutable</key><string>ClaudeFilterPrototype</string>
+<key>CFBundleName</key><string>Claude 网络过滤原型</string>
+<key>CFBundlePackageType</key><string>SYSX</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>NetworkExtension</key><dict>
+<key>NEMachServiceName</key><string>$(TeamIdentifierPrefix)cn.qingzhou.proxy.claude-filter</string>
+<key>NEProviderClasses</key><dict>
+<key>com.apple.networkextension.filter-data</key><string>ClaudeFilterDataProvider</string>
+</dict>
+</dict>
+</dict></plist>

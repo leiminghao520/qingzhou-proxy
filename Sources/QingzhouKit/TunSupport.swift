@@ -3,6 +3,8 @@ import Darwin
 import SystemConfiguration
 
 public struct TunRequest:Codable,Sendable {
+    public var claudeSafetyEndpoint: String?
+    public var claudePFEndpoint: ClaudeNetworkEndpoint?
     public var proxyExceptions:[String]?
     public var proxyProtectedDomains:[String]?
     public var deferToNetworkResume:Bool?
@@ -19,12 +21,15 @@ public struct TunRequest:Codable,Sendable {
     public init(operation:String,state:AppState?=nil,credentials:[String:String]?=nil,control:CoreControlContext?=nil,verifyNetwork:Bool=false,httpCompatibilityPort:Int?=nil,systemProxyPort:Int?=nil,preserveExternal:Bool=false){self.preserveExternal=preserveExternal;self.systemProxyPort=systemProxyPort;self.httpCompatibilityPort=httpCompatibilityPort;self.verifyNetwork=verifyNetwork;self.operation=operation;self.state=state;self.credentials=credentials;self.control=control}
 }
 public struct TunReply: Codable, Sendable {
+    public var claudeSafetyProtectionVerified: Bool?
+    public var claudePFPolicyVersion: Int?
     // 企业解析暂停时的原因；旧辅助服务不返回，按未暂停处理。
     public var corporateDNSSuspension:String?
     public var failurePhase:String?
     public var recoveryPhase:String?
     public var failureKind:ConnectionFailureKind?
     public var supportsDisconnectProtection:Bool?
+    public var supportsClaudeSafetyMode: Bool?
     public var disconnectProtectionArmed:Bool?
     public var supportsManagedSystemProxy:Bool?
     public var wakeRecoveryReason:WakeRecoveryReason?
@@ -158,6 +163,7 @@ public actor PrivilegedServiceClient {
         guard !requestInFlight else {throw HelperRequestBusy()}
         requestInFlight=true;defer{requestInFlight=false}
         if channel==nil {let descriptor=socket(AF_UNIX,SOCK_STREAM,0);guard descriptor>=0 else{throw ProxyError("无法创建辅助服务控制通道")};var option:Int32=1;_ = setsockopt(descriptor,SOL_SOCKET,SO_NOSIGPIPE,&option,socklen_t(MemoryLayout<Int32>.size));var timeout=timeval(tv_sec:60,tv_usec:0);_ = setsockopt(descriptor,SOL_SOCKET,SO_RCVTIMEO,&timeout,socklen_t(MemoryLayout<timeval>.size));_ = setsockopt(descriptor,SOL_SOCKET,SO_SNDTIMEO,&timeout,socklen_t(MemoryLayout<timeval>.size));var address=try UnixChannel.address(HelperPaths.socket);let connected=withUnsafePointer(to:&address){$0.withMemoryRebound(to:sockaddr.self,capacity:1){Darwin.connect(descriptor,$0,socklen_t(MemoryLayout<sockaddr_un>.size))==0}};guard connected else{let code=errno;close(descriptor);throw HelperConnectionError(code:code)};channel=HelperRequestChannel(descriptor:descriptor)}
+        var preserveRejectedRead = false
         do {
         var outgoing=request
         if ["prepare","activate"].contains(request.operation) {outgoing.progressUpdates=true}
@@ -168,7 +174,9 @@ public actor PrivilegedServiceClient {
         guard self.channel === channel else {throw CancellationError()}
         if ["prepare","activate","pinBypasses"].contains(request.operation),reply.protocolVersion != 5 {throw ProxyError("辅助服务协议过旧，请更新后再开启组合接管")}
         if let timings=reply.stageTimings,!timings.isEmpty {onStageTimings?(timings)}
-        try reply.validateSuccess();return reply}catch{channel?.cancel();channel=nil;throw error}
+        // 只读预检被拒绝不代表传输失效，不能关闭正在拥有代理会话的控制通道。
+        preserveRejectedRead = ["checkDisconnectProtection", "status"].contains(request.operation) && !reply.ok
+        try reply.validateSuccess();return reply}catch{if !preserveRejectedRead {channel?.cancel();channel=nil};throw error}
     }
     public func closeChannel(){channel?.cancel();channel=nil}
 }

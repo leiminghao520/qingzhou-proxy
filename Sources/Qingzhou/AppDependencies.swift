@@ -3,6 +3,10 @@ import QingzhouKit
 
 // 应用入口统一装配依赖；测试可以替换下载、时钟和存储而不触碰日常数据。
 struct AppDependencies {
+    var safetyHelperRequest: ((TunRequest) async throws -> TunReply)?
+    var safetyStart: ((AppState) async throws -> Void)?
+    var safetyStop: (() async throws -> Void)?
+    var safetyMonitoringEnabled = true
     var recoveryRuntimeHealthyOverride:(()->Bool)?
     var recoveryEnvironmentOverride:(()->String)?
     var recoveryReleasedOverride:(() async throws -> Void)?

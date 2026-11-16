@@ -4,6 +4,9 @@ import Foundation
     public private(set) var activeMode:CaptureMode?
     public private(set) var helperRunning=false
     public private(set) var disconnectProtectionArmed=false
+    public var onHelperReply: ((String, TunReply) -> Void)?
+    public var claudeSafetyEndpoint: (() -> String?)?
+    public var claudePFEndpoint: (() -> ClaudeNetworkEndpoint?)?
     public let helper=PrivilegedServiceClient()
     private let core:CoreController
     private var ownedTunDNS:String?
@@ -12,10 +15,27 @@ import Foundation
     private let proxy:SystemProxyController
     private let helperRequestOverride:((TunRequest) async throws -> TunReply)?
     public init(core:CoreController,proxy:SystemProxyController,helperRequest:((TunRequest) async throws -> TunReply)?=nil){self.core=core;self.proxy=proxy;self.helperRequestOverride=helperRequest}
-    private func requestHelper(_ request:TunRequest) async throws -> TunReply {
+    private func requestHelper(_ originalRequest:TunRequest) async throws -> TunReply {
+        var request = originalRequest
+        if request.operation == "status" { request.claudeSafetyEndpoint = claudeSafetyEndpoint?(); request.claudePFEndpoint = claudePFEndpoint?() }
         let reply:TunReply
-        if let helperRequestOverride {reply=try await helperRequestOverride(request)}else{reply=try await helper.request(request)}
+        do {
+            // 配置写操作等待已开始的只读核验完成，不把通道忙当作恢复失败。
+            let deadline=ProcessInfo.processInfo.systemUptime+5
+            while true {
+                do {
+                    if let helperRequestOverride {reply=try await helperRequestOverride(request)}
+                    else {reply=try await helper.request(request)}
+                    break
+                }
+                catch is HelperRequestBusy {
+                    guard request.operation != "status", ProcessInfo.processInfo.systemUptime < deadline else {throw HelperRequestBusy()}
+                    try await Task.sleep(nanoseconds: 20_000_000)
+                }
+            }
+        }
         if let armed=reply.disconnectProtectionArmed {disconnectProtectionArmed=armed}
+        onHelperReply?(request.operation, reply)
         return reply
     }
     public static func validateCorporateDNSCapability(state:AppState,status:TunReply) throws {
@@ -23,8 +43,11 @@ import Foundation
             throw ProxyError("公司网络 DNS 需要更新辅助服务，当前版本不能安全应用此配置")
         }
     }
-    public func checkDisconnectProtection() async throws {
+    public func checkDisconnectProtection(requireClaudeSafetyMode: Bool = false) async throws {
         let status=try await requestHelper(TunRequest(operation:"status"))
+        guard !requireClaudeSafetyMode || status.supportsClaudeSafetyMode == true && status.claudePFPolicyVersion == ClaudePFPolicy.version else {
+            throw ProxyError("Claude 安全模式需要先安装 / 更新辅助服务，旧版本不能核验严格公网出口限制")
+        }
         guard status.supportsDisconnectProtection==true else {throw ProxyError("断线保护需要安装 / 更新辅助服务")}
         _=try await requestHelper(TunRequest(operation:"checkDisconnectProtection"))
     }
@@ -37,7 +60,7 @@ import Foundation
     public var running:Bool{(activeMode == .systemProxy ? core.isRunning:(helperRunning || core.isRunning)) && (httpCompatibility == nil || httpCompatibility!.isRunning)}
     public func start(_ state:AppState,credentials:CredentialStore,control:CoreControlContext) async throws {
         guard activeMode==nil else{throw ProxyError("必须先恢复上一种接管方式")}
-        if state.protectsDisconnect {try await checkDisconnectProtection()}
+        if state.protectsDisconnect {try await checkDisconnectProtection(requireClaudeSafetyMode: state.claudeSafetyMode == true)}
         if state.captureMode.usesTunnel {
             guard !proxy.hasRecovery else{throw ProxyError("请先恢复系统代理后启用 TUN")}
             var values:[String:String]=[:];for ref in CredentialReferences.all(state) where !state.subscriptions.contains(where:{$0.sourceRef==ref}) && !state.remoteRules.contains(where:{$0.sourceRef==ref}){values[ref]=try credentials.get(ref)}
@@ -149,6 +172,13 @@ import Foundation
             let status=try await requestHelper(TunRequest(operation:"status",verifyNetwork:true))
             helperRunning=status.running
             guard !status.running,status.safeToQuit==true else{throw ProxyError("尚不能确认汐航的路由、DNS 和代理已释放；恢复记录已保留")}
+        }
+        if allowDisconnectProtection {
+            let status = try await requestHelper(TunRequest(operation: "status"))
+            guard status.ok, !status.running, status.disconnectProtectionArmed == true,
+                  status.claudeSafetyProtectionVerified == true, status.claudePFPolicyVersion == ClaudePFPolicy.version else {
+                throw ProxyError("退出前未确认严格断网屏障，保护记录已保留")
+            }
         }
         guard allowDisconnectProtection || !disconnectProtectionArmed else{throw ProxyError("断线保护仍在阻止公网直连，请先手动断开或应急恢复后退出")}
         ownedTunDNS=nil;activeMode=nil

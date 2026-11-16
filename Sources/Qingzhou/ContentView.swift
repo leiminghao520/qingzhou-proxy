@@ -153,6 +153,7 @@ struct ContentView: View {
         .onChange(of: interfaceMode) { _, mode in
             page = mode == .simple ? .home : .overview
         }
+        .sheet(isPresented: $model.claudeSafetyChoosingNode) { ClaudeSafetyNodePicker(model: model) }
         .sheet(item: $utility) { destination in
             VStack(spacing: 0) {
                 HStack {

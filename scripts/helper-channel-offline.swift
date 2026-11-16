@@ -17,6 +17,33 @@ final class Counter:@unchecked Sendable {
         return (HelperRequestChannel(descriptor:sockets[0]),sockets[1])
     }
     static func main() async throws {
+        let (preflightChannel,preflightServer)=try pair()
+        let preflightClient=PrivilegedServiceClient(channel:preflightChannel)
+        let rejectedAndAlive=Counter()
+        DispatchQueue.global().async {
+            defer{close(preflightServer)}
+            do {
+                _=try UnixChannel.receive(fd:preflightServer)
+                try UnixChannel.send(JSONEncoder().encode(TunReply(ok:false,message:"模拟防火墙预检拒绝",running:true)),fd:preflightServer)
+                let data=try UnixChannel.receive(fd:preflightServer)
+                let request=try JSONDecoder().decode(TunRequest.self,from:data)
+                if request.operation=="status" {rejectedAndAlive.increment()}
+                try UnixChannel.send(JSONEncoder().encode(TunReply(ok:true,message:"原会话仍在运行",running:true)),fd:preflightServer)
+                _=try UnixChannel.receive(fd:preflightServer)
+                try UnixChannel.send(JSONEncoder().encode(TunReply(ok:false,message:"模拟只读状态核验拒绝",running:true)),fd:preflightServer)
+                _=try UnixChannel.receive(fd:preflightServer)
+                try UnixChannel.send(JSONEncoder().encode(TunReply(ok:true,message:"原会话继续运行",running:true)),fd:preflightServer)
+            }catch{}
+        }
+        do {_=try await preflightClient.request(TunRequest(operation:"checkDisconnectProtection"));check(false,"预检拒绝必须传递错误")}
+        catch{check(true,"预检拒绝传递给调用方")}
+        let stillRunning=try await preflightClient.request(TunRequest(operation:"status"))
+        check(stillRunning.running && rejectedAndAlive.value==1,"预检失败后复用原通道，不能断开普通代理")
+        do {_=try await preflightClient.request(TunRequest(operation:"status"));check(false,"状态拒绝必须传递错误")}
+        catch{check(true,"状态核验拒绝传递给调用方")}
+        let afterStatusFailure=try await preflightClient.request(TunRequest(operation:"status"))
+        check(afterStatusFailure.running,"只读状态核验失败不能关闭会话控制通道")
+        await preflightClient.closeChannel()
         // 仅使用进程内 Unix socketpair，既不连接辅助服务，也不发送任何路由消息。
         let counter=Counter(),(channel,server)=try pair()
         let serverDone=Counter()

@@ -58,7 +58,7 @@ extension AppModel {
     func changeSelection(_ ref: PolicyReference, in group: PolicyGroup?) async {
         guard !locked, PolicyValidator.exists(ref, in: state), ref != .selected, ref != .reject,
               let store else { return }
-        if state.protectsDisconnect {
+        if state.protectsDisconnect || claudeSafetyEnabled || claudeSafetyLoadFailed {
             report(ProxyError("断线保护已固定当前节点；更换线路前请先关闭断线保护"));return
         }
         let currentGroup = group.flatMap { item in state.groups.first { $0.id == item.id } }

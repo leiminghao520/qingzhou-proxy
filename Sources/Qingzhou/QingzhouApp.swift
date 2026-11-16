@@ -74,6 +74,7 @@ struct StableMenuContent: View {
     @ObservedObject var presentation: MenuPresentation
     @AppStorage("interfaceMode") private var interfaceMode = InterfaceMode.simple
     private var model: AppModel { presentation.model }
+    @State private var confirmsClaudeRelease = false
     var body: some View {
             Text("\(model.connectionSummary) · \(model.state.mode.label)")
             Text(model.actualName + " · " + model.effectiveState.captureMode.label)
@@ -84,10 +85,25 @@ struct StableMenuContent: View {
             }
             if let title=model.issueTitle {Text(title)}
             Text(presentation.healthLabel)
+            Toggle("Claude 安全模式", isOn: Binding(
+                get: { model.claudeSafetyProxyEnabled },
+                set: { enabled in Task { await model.setClaudeSafetyEnabled(enabled) } }
+            )).disabled(model.claudeSafetyControlDisabled)
+            Text(model.claudeSafetyStatus)
+            if model.claudeSafetyEnabled {
+                Button("解除保护并恢复直连…") { confirmsClaudeRelease = true }
+                    .disabled(model.claudeSafetyControlDisabled)
+                    .alert("解除保护后 Claude 也将允许直连", isPresented: $confirmsClaudeRelease) {
+                        Button("取消", role: .cancel) {}
+                        Button("解除保护", role: .destructive) {
+                            Task { await model.setClaudeSafetyEnabled(false, releaseProtection: true) }
+                        }
+                    }
+            }
             Toggle("完整接管", isOn: Binding(
                 get: { (model.captureSwitchTarget ?? model.effectiveState.captureMode) == .compatible },
                 set: { enabled in Task { await model.setCaptureMode(enabled ? .compatible : .systemProxy) } }
-            )).disabled(model.locked || model.recoveryPending)
+            )).disabled(model.locked || model.recoveryPending || model.claudeSafetyEnabled)
             if !(model.state.savedDiagnosticTargets ?? []).isEmpty {
                 Menu("常用目标路径检查") {
                     ForEach(Array((model.state.savedDiagnosticTargets ?? []).prefix(5))) {target in
@@ -140,7 +156,7 @@ struct StableMenuContent: View {
                 }
             }
         }
-        .disabled(model.locked)
+        .disabled(model.locked || model.claudeSafetyEnabled)
 
         Button("暂停代理") { Task { await model.disconnect() } }
             .disabled(!model.canStop || model.connection != .connected)
@@ -155,7 +171,7 @@ struct StableMenuContent: View {
                 }
             }
         }
-        .disabled(model.locked)
+        .disabled(model.locked || model.claudeSafetyEnabled)
 
         Menu("节点与策略") {
             Button("自动选择") { Task { await model.selectPolicy(.automatic) } }

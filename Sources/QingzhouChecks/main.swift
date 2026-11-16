@@ -5,7 +5,7 @@ import SystemConfiguration
 
 let args = CommandLine.arguments
 if args.count==2 && args[1]=="disconnect-protection-checks" {
-    do {let tests=DisconnectProtectionTests();try tests.testPolicy();try tests.testLifecycle();try tests.testFailureAndRestart()}
+    do {let tests=DisconnectProtectionTests();try tests.testPolicy();try tests.testLifecycle();try tests.testFailureAndRestart();try tests.testClaudeSafetyProof();try tests.testCorporateCoexistence();try tests.testStrictPF()}
     catch {CheckHarness.failure("断线保护检查异常："+error.localizedDescription,file:#filePath,line:#line)}
     print("RESULT disconnect_protection_assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures) kernelWrites=0")
     exit(CheckHarness.failures==0 ? 0:1)

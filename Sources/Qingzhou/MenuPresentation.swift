@@ -27,7 +27,9 @@ import QingzhouKit
                     String(model.hasConnectionActivity), String(model.locked), String(model.stopDisabled),
                     String(model.recoveryPending), String(model.canStop), String(model.loadingFailed),
                     model.captureSwitchTarget?.rawValue ?? "", state.captureMode.rawValue, String(model.recovering), String(model.measuring), String(model.busy), state.mode.rawValue,
-                    String(state.activePolicy == nil), String(state.nodes.isEmpty)]
+                    String(state.activePolicy == nil), String(state.nodes.isEmpty),
+                    String(model.claudeSafetyEnabled), model.claudeSafetyStatus,
+                    String(model.claudeSafetyControlDisabled)]
         next += model.profiles.flatMap { [$0.id.uuidString, $0.name, String($0.id == model.currentProfileID)] }
         next += (state.savedDiagnosticTargets ?? []).prefix(5).flatMap { [$0.id.uuidString, $0.name] }
         next += state.groups.flatMap { [$0.id.uuidString, $0.name] }

@@ -300,7 +300,7 @@ return};var issues:[String]=[]
         self.dynamicRules=dynamicRules
         phase="coreValidation"
         var object=try measured("configGeneration") {try TunConfigBuilder.object(state:state,credentials:memory,control:control,address4:address4,address6:address6,originalDNS:dns,bypass:bypass.map{$0+($0.contains(":") ? "/128":"/32")},httpCompatibilityPort:request.httpCompatibilityPort,plan:plan,dnsForwardPort:forwarder.port,nodeInterfaces:captureNodeInterfaces)}
-        dynamicRules.apply(to:&object,plan:plan)
+        if state.claudeSafetyMode != true { dynamicRules.apply(to:&object,plan:plan) }
         let config=try JSONSerialization.data(withJSONObject:object)
         let file=root.appendingPathComponent("runtime.json");try SecureFile.write(config,to:file)
         try measured("coreConfigCheck") {
@@ -313,7 +313,14 @@ return};var issues:[String]=[]
             try installBypassFirewall(state)
             if state.protectsDisconnect {
                 let allowed=try DisconnectProtectionPolicy.allowedDestinations(state:state,plan:plan)
-                try disconnectFirewall.arm(allowed:allowed)
+                if state.claudeSafetyMode == true {
+                    guard case .node(let id) = state.activePolicy, let node = state.nodes.first(where: { $0.id == id }) else {
+                        throw ProxyError("缺少固定安全节点")
+                    }
+                    try disconnectFirewall.armStrict(endpoint: ClaudePFPolicy.endpoint(node))
+                } else {
+                    try disconnectFirewall.arm(allowed: allowed)
+                }
             }
             phase="coreStartup"
             let readiness=try NativeInterfaceReadiness()
@@ -420,7 +427,11 @@ return};var issues:[String]=[]
         defer {connectionTiming=nil;routeMetrics=nil;progressReply=nil;(routeBackend as? NativeRouteBackend)?.metrics=nil;routeAudit.metrics=nil}
         do {
             var reply=try handleOperation(request,fd:fd)
+            if request.operation == "status", request.claudePFEndpoint != nil {
+                reply.claudeSafetyProtectionVerified = try request.claudePFEndpoint.map { try disconnectFirewall.verifyStrict(endpoint: $0) } ?? false
+            }
             reply.tunnelInterface=journal?.interface
+            reply.supportsClaudeSafetyMode=true;reply.claudePFPolicyVersion=ClaudePFPolicy.version
             reply.supportsDisconnectProtection=true;reply.disconnectProtectionArmed=disconnectFirewall.armed
             reply.supportsManagedSystemProxy=true;reply.supportsTrustedCorporateDNS=true;reply.supportsWakeRecovery=true;reply.supportsExternalRecovery=true;reply.recoveryPending=journal != nil
             if request.operation=="status",request.verifyNetwork==true {reply.safeToQuit=verifyReleasedForQuit()}
@@ -433,6 +444,7 @@ return};var issues:[String]=[]
             var reply=TunReply(ok:false,message:"接管阶段 "+(failurePhase ?? phase)+"："+Redactor.redact(error.localizedDescription),coreDiagnostics:["prepare","activate"].contains(request.operation) ? coreDiagnostics.recent:nil,running:helperIsRunning,phase:phase,networkNotReady:error is NetworkEnvironmentNotReady,stageTimings:timing.samples+(routeMetrics?.samples ?? []))
             reply.failurePhase=failurePhase ?? phase;reply.failureKind=phase=="recovery" ? .recovery:(failureKind ?? ConnectionFailureKind.classify(error));reply.recoveryPhase=phase
             reply.tunnelInterface=journal?.interface
+            reply.supportsClaudeSafetyMode=true;reply.claudePFPolicyVersion=ClaudePFPolicy.version
             reply.supportsDisconnectProtection=true;reply.disconnectProtectionArmed=disconnectFirewall.armed
             reply.supportsManagedSystemProxy=true;reply.supportsTrustedCorporateDNS=true;reply.supportsWakeRecovery=true;reply.supportsExternalRecovery=true;reply.recoveryPending=journal != nil
             return reply
@@ -480,9 +492,20 @@ return};var issues:[String]=[]
     }
 }
 func run() throws {
-    let preserving=CommandLine.arguments.dropFirst()==["--recover-preserving-external"]
+    let retainingProtection = CommandLine.arguments.dropFirst() == ["--recover-preserving-protection"]
+    let preserving = retainingProtection || CommandLine.arguments.dropFirst() == ["--recover-preserving-external"]
     let service=try Service(recoveryOnly:preserving)
-    if preserving {try service.recoverStartup(preserveExternal:true);try service.disconnectFirewall.release();print("外部网络保留完成；汐航仍拥有的残留已清理");return}
+    if preserving {
+        try service.recoverStartup(preserveExternal: true)
+        if retainingProtection {
+            try service.disconnectFirewall.restoreAfterRestart()
+            print("接管已清理，断网保护保留")
+        } else {
+            try service.disconnectFirewall.release()
+            print("外部网络保留完成；汐航仍拥有的残留已清理，断网保护已明确解除")
+        }
+        return
+    }
     if CommandLine.arguments.dropFirst()==["--recover"]{try service.recoverStartup();try service.disconnectFirewall.release();print("原网络恢复完成");return}
     guard CommandLine.arguments.count==1 else{throw ProxyError("辅助服务参数无效")}
     try service.disconnectFirewall.restoreAfterRestart()

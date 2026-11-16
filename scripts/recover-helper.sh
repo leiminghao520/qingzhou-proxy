@@ -13,7 +13,7 @@ test -f "$helper"; test ! -L "$helper"; test -x "$helper"
 # 保留根目录中的审计证据和原组件，失败时可追溯，不删除或改写原恢复记录。
 backup=$(/usr/bin/mktemp -d /Library/PrivilegedHelperTools/qingzhou-recovery.XXXXXX)
 /bin/chmod 700 "$backup"
-for file in recovery.json manifest.json QingzhouHelper sing-box route-operations.jsonl route-operations.previous.jsonl; do
+for file in disconnect-protection.json disconnect-protection.conf disconnect-protection-root.conf recovery.json manifest.json QingzhouHelper sing-box route-operations.jsonl route-operations.previous.jsonl; do
     if [ -f "$root/$file" ]; then /bin/cp -p "$root/$file" "$backup/$file"; fi
 done
 if [ -f "$plist" ]; then /bin/cp -p "$plist" "$backup/helper.plist"; fi
@@ -44,6 +44,12 @@ if [ -f "$plist" ]; then
 fi
 # 旧服务退出可能更新恢复记录；另存停止后的最终意图，供故障复核。
 if [ -f "$root/recovery.json" ]; then /bin/cp -p "$root/recovery.json" "$backup/recovery-after-stop.json"; fi
-"$backup/recovery-helper" --recover-preserving-external
+if [ "$mode" = --for-update ]; then
+    # 升级只清理接管，不得借维护流程隐式解除用户持有的断网屏障。
+    "$backup/recovery-helper" --recover-preserving-protection
+else
+    echo '正在明确解除汐航断网保护，之后 Claude 可能直连。'
+    "$backup/recovery-helper" --recover-preserving-external
+fi
 if [ -f "$root/recovery.json" ]; then echo '恢复核验仍有未完成记录，取消更新。' >&2; exit 1; fi
 echo '汐航接管已清理，其他 VPN 与系统代理已保留。'
