@@ -183,6 +183,29 @@ public actor CoreAPIClient {
     }
     public func closeConnection(_ id:String) async throws {guard UUID(uuidString:id) != nil else {throw ProxyError("连接 ID 无效")};_=try await send(request("/connections/"+id,method:"DELETE"))}
     public func closeAllConnections() async throws {_=try await send(request("/connections",method:"DELETE"))}
+    // 仅筛选属于指定节点出站的连接 ID，避免误关其他节点或直连会话。
+    public static func connectionIDs(forNode nodeID:UUID,in connections:[CoreConnection]) -> [String] {
+        let tag=PolicyReference.node(nodeID).tag
+        return connections.filter{$0.chains.contains(tag)}.map(\.id)
+    }
+    // 仅关闭指定节点上的残留连接，用于释放拥塞或半开的 Hysteria2/QUIC 会话而不影响其他节点。
+    @discardableResult
+    public func closeConnections(forNode nodeID:UUID) async throws -> Int {
+        let snapshot=try await connections()
+        let ids=Self.connectionIDs(forNode:nodeID,in:snapshot.connections)
+        var closed=0
+        for id in ids {
+            do {
+                try await closeConnection(id)
+                closed+=1
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // 单条连接在关闭前可能已自然结束，继续清理剩余残留连接。
+            }
+        }
+        return closed
+    }
     public func traffic() throws -> AsyncThrowingStream<TransferRate,Error> {
         guard !closed else {throw CoreAPIError("控制通道已关闭")}
         var request=try request("/traffic");var components=URLComponents(url:request.url!,resolvingAgainstBaseURL:false)!;components.scheme="ws";request.url=components.url
@@ -221,5 +244,23 @@ public actor CoreAPIClient {
             next=selected
         }
         return []
+    }
+}
+
+public enum NodeConnectionResetPolicy {
+    // 切离处于异常或测速失败状态的 Hysteria2 节点时，清理其残留连接以便单 QUIC 会话尽快释放重建。
+    public static func staleHysteria2NodeToReset(
+        previous: PolicyReference?,
+        next: PolicyReference,
+        nodes: [Node],
+        previousHealth: ConnectivityHealth,
+        previousNodeFailed: Bool
+    ) -> UUID? {
+        guard previous != next,
+              case .node(let previousID) = previous,
+              let node = nodes.first(where: { $0.id == previousID }),
+              node.kind == .hysteria2,
+              previousHealth == .unhealthy || previousNodeFailed else { return nil }
+        return previousID
     }
 }

@@ -129,4 +129,29 @@ final class EnhancementTests:CheckCase {
         expectEqual(p.terminationStatus,0,Redactor.redact(message,secrets:[context.secret]))
         expectThrows(try ConfigBuilder.build(state:state,credentials:credentials,control:CoreControlContext(port:state.listenPort,secret:context.secret)))
     }
+    func testNodeConnectionResetPolicyAndFiltering() throws {
+        let hy2=Node(name:"clash",kind:.hysteria2,server:"proxy.lmh1103.icu",port:443)
+        let vless=Node(name:"clash-tcp",kind:.vless,server:"43.163.70.144",port:443)
+        let hy2Tag=PolicyReference.node(hy2.id).tag
+        let vlessTag=PolicyReference.node(vless.id).tag
+        let payload="""
+        {"downloadTotal":0,"uploadTotal":0,"connections":[
+          {"id":"11111111-1111-1111-1111-111111111111","metadata":{"host":"chatgpt.com","destinationPort":"443"},"upload":10,"download":20,"start":"2026-11-20T09:27:00+08:00","chains":["\(hy2Tag)","proxy"]},
+          {"id":"22222222-2222-2222-2222-222222222222","metadata":{"host":"claude.ai","destinationPort":"443"},"upload":10,"download":20,"start":"2026-11-20T09:35:00+08:00","chains":["\(vlessTag)","proxy"]},
+          {"id":"33333333-3333-3333-3333-333333333333","metadata":{"host":"direct.local","destinationPort":"443"},"upload":10,"download":20,"start":"2026-11-20T09:35:00+08:00","chains":["direct"]}
+        ]}
+        """
+        let snapshot=try JSONDecoder().decode(ConnectionSnapshot.self,from:Data(payload.utf8))
+        expectEqual(CoreAPIClient.connectionIDs(forNode:hy2.id,in:snapshot.connections),["11111111-1111-1111-1111-111111111111"])
+        expectEqual(CoreAPIClient.connectionIDs(forNode:vless.id,in:snapshot.connections),["22222222-2222-2222-2222-222222222222"])
+        // 健康或检测中状态下正常切离 HY2 不应清理现有连接。
+        expectNil(NodeConnectionResetPolicy.staleHysteria2NodeToReset(previous:.node(hy2.id),next:.node(vless.id),nodes:[hy2,vless],previousHealth:.healthy,previousNodeFailed:false))
+        expectNil(NodeConnectionResetPolicy.staleHysteria2NodeToReset(previous:.node(hy2.id),next:.node(vless.id),nodes:[hy2,vless],previousHealth:.checking,previousNodeFailed:false))
+        // 切离异常或测速失败的 HY2 节点时应返回旧 HY2 节点 ID。
+        expectEqual(NodeConnectionResetPolicy.staleHysteria2NodeToReset(previous:.node(hy2.id),next:.node(vless.id),nodes:[hy2,vless],previousHealth:.unhealthy,previousNodeFailed:false),hy2.id)
+        expectEqual(NodeConnectionResetPolicy.staleHysteria2NodeToReset(previous:.node(hy2.id),next:.node(vless.id),nodes:[hy2,vless],previousHealth:.healthy,previousNodeFailed:true),hy2.id)
+        // 非 HY2 节点或未发生节点切换时不应触发自动清理。
+        expectNil(NodeConnectionResetPolicy.staleHysteria2NodeToReset(previous:.node(vless.id),next:.node(hy2.id),nodes:[hy2,vless],previousHealth:.unhealthy,previousNodeFailed:true))
+        expectNil(NodeConnectionResetPolicy.staleHysteria2NodeToReset(previous:.node(hy2.id),next:.node(hy2.id),nodes:[hy2,vless],previousHealth:.unhealthy,previousNodeFailed:true))
+    }
 }

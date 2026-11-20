@@ -67,6 +67,12 @@ extension AppModel {
         }
         let old = currentGroup.map { $0.selected ?? $0.members.first } ?? state.activePolicy
         guard ref != old || selectionNetworkUncertain else { return }
+        // 在切换前记录原线路健康状态与原节点最近测速失败状态，供切换成功后决定是否清理异常 HY2 残留连接。
+        let previousHealth = connectivityHealth
+        let previousNodeFailed: Bool = {
+            guard case .node(let oldID) = old, let result = state.latency[oldID.uuidString] else { return false }
+            return result.milliseconds == nil && result.failure != nil
+        }()
         cancelWakeRecovery()
         cancelConnectionWait()
         busy = true
@@ -132,6 +138,23 @@ extension AppModel {
             selectionStatus?.message = !wasConnected ? "已选择 \(name)，点击连接即可使用" : verification == .verified ? "已切换到 \(name)；已有连接继续使用原路径，失败请求可能需要重试" : "已选择 \(name)，网络尚未确认，正在后台复查"
             recordEvent(.node, .changed, .nodeSelected)
             log(selectionStatus?.message ?? "线路已选择")
+            // 仅当切离的旧节点是异常/测速失败的 Hysteria2 时，自动清理其残留连接以便单 QUIC 会话尽快释放重建。
+            if wasConnected, verification == .verified, let client,
+               let staleID = NodeConnectionResetPolicy.staleHysteria2NodeToReset(
+                   previous: old,
+                   next: ref,
+                   nodes: state.nodes,
+                   previousHealth: previousHealth,
+                   previousNodeFailed: previousNodeFailed
+               ) {
+                let staleName = state.nodes.first { $0.id == staleID }?.name ?? "旧 HY2 节点"
+                let closed = (try? await client.closeConnections(forNode: staleID)) ?? 0
+                if closed > 0 {
+                    telemetryRefreshRequested = true
+                    connectionRefreshSignal.wake()
+                    log("已自动清理异常 HY2 节点 \(staleName) 的 \(closed) 条残留连接，便于会话重建")
+                }
+            }
         } catch {
             store.abort(tx)
             verifiedSelectionTag = nil

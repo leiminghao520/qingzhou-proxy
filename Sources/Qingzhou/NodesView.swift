@@ -327,6 +327,10 @@ struct NodesView: View {
                 }
                 Button {model.measure([node.id])} label: {Image(systemName:"bolt")}.buttonStyle(.borderless).disabled(model.locked).help("检测此节点 HTTPS 延迟").accessibilityLabel("测速："+node.name)
                 Menu {
+                    if model.connection == .connected {
+                        Button("重置节点连接并复测") {Task {await model.resetNodeConnections(node.id)}}
+                        Divider()
+                    }
                     Button("分享节点") {sharing=ShareRequest(node:node)}
                     Button("修改备注") {note=model.state.notes[node.id.uuidString] ?? "";noteNode=node}
                     if node.subscriptionID == nil {Button("编辑节点") {onEdit(node)}}

@@ -142,6 +142,22 @@ extension AppModel {
     func stopTelemetry() {corporateDNSSuspension=CorporateDNSSuspensionTracker();corporateDNSNotice=nil;trafficDisplay.menu.reset();verifiedSelectionTag=nil;history.finish();networkReconnecting=false;cancelHealthRefresh();epoch=UUID();connectivityEpoch=UUID();healthRefreshPending=false;healthTask?.cancel();healthTask=nil;telemetryTask?.cancel();connectionListTask?.cancel();policyTask?.cancel();trafficTask?.cancel();telemetryTask=nil;connectionListTask=nil;policyTask=nil;trafficTask=nil;if let old=api{Task{await old.shutdown()}};api=nil;connections=[];proxyInfo=[:];uploadRate=0;downloadRate=0;uploadTotal=0;downloadTotal=0;monitor=RuntimeMonitorState()}
 
     func closeConnection(_ id:String?) async {guard !locked,let api else{return};do{if let id{try await api.closeConnection(id)}else{try await api.closeAllConnections()}}catch{report(error)}}
+    // 仅清理挂在指定节点上的残留连接，不中断其他节点与直连，并可选等待短间隔后复测延迟。
+    func resetNodeConnections(_ nodeID:UUID,retest:Bool=true) async {
+        guard !locked,connection == .connected,let api else{return}
+        let name=state.nodes.first{$0.id==nodeID}?.name ?? "目标节点"
+        do {
+            let closed=try await api.closeConnections(forNode:nodeID)
+            telemetryRefreshRequested=true;connectionRefreshSignal.wake()
+            if closed>0 {log("已清理节点 \(name) 的 \(closed) 条残留连接"+(retest ? "，正在重新测速":""))}
+            else {log("节点 \(name) 当前无残留连接"+(retest ? "，直接重新测速":""))}
+            if retest {
+                try? await Task.sleep(nanoseconds:1_000_000_000)
+                guard !locked,connection == .connected else{return}
+                measure([nodeID])
+            }
+        } catch {report(error)}
+    }
     func aggregate(_ rows:[CoreConnection]) {
         for row in rows{let total=max(0,row.upload)+max(0,row.download);let delta=max(0,total-(observedConnections[row.id] ?? 0));observedConnections[row.id]=total
             let node=row.chains.first{ $0.hasPrefix("node-") } ?? "未提供";if trafficByNode.count<2000 || trafficByNode[node] != nil{trafficByNode[node,default:0]+=delta}

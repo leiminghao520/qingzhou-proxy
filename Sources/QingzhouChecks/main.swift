@@ -390,6 +390,7 @@ do {let instance=EnhancementTests();run("EnhancementTests.testGroupValidationAnd
 do {let instance=EnhancementTests();run("EnhancementTests.testRemoteRuleFormatsAndRejections",instance){try instance.testRemoteRuleFormatsAndRejections()}}
 do {let instance=EnhancementTests();run("EnhancementTests.testScheduleAndUsage",instance){try instance.testScheduleAndUsage()}}
 do {let instance=EnhancementTests();run("EnhancementTests.testMultiConfigCoreValidationAndTokenSeparation",instance){try instance.testMultiConfigCoreValidationAndTokenSeparation()}}
+do {let instance=EnhancementTests();run("EnhancementTests.testNodeConnectionResetPolicyAndFiltering",instance){try instance.testNodeConnectionResetPolicyAndFiltering()}}
 do {let instance=DailyTests();run("DailyTests.testProfilesIsolationAndSharedCredentials",instance){try instance.testProfilesIsolationAndSharedCredentials()}}
 do {let instance=DailyTests();run("DailyTests.testMigrationBackupAndFailure",instance){try instance.testMigrationBackupAndFailure()}}
 do {let instance=DailyTests();run("DailyTests.testEncryptedBackupIntegrityAndAtomicRestore",instance){try instance.testEncryptedBackupIntegrityAndAtomicRestore()}}
