@@ -61,8 +61,9 @@ struct MainToolbar: ToolbarContent {
                 Button("网络诊断…", action: onDiagnose)
                 Button("开发工具代理助手…") { model.office.developerRequested = true }
                 Divider()
-                Button("恢复网络设置") { Task { await model.recover() } }
-                    .disabled(model.loadingFailed || model.recovering)
+                Button("恢复网络") { Task { await model.recover() } }
+                .help("停止汐航并解除断网保护，恢复普通网络；Claude 将允许直连。")
+                    .disabled(model.recovering || model.claudeSafetyChanging)
             } label: {
                 Label("更多", systemImage: "ellipsis.circle")
             }

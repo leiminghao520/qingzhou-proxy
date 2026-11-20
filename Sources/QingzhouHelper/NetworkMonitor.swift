@@ -88,7 +88,10 @@ extension Service {
             if !issues.isEmpty {
                 failNetworkChange("网络保护核验未通过："+issues.prefix(8).joined(separator:"；"));return
             }
-        } catch {retrySnapshot(error);return}
+        } catch {
+            if request.state?.usesClaudeBypasses == true { beginNetworkResume(request, fd: fd); return }
+            retrySnapshot(error);return
+        }
         // 指定出口掉线时保留内核拒绝保护，不进入会撤销防火墙的通用重建流程。
         if let state=request.state,!state.pinnedBypasses.isEmpty {
             let services=bypassServicesRead()
@@ -105,12 +108,20 @@ extension Service {
             // 每轮仍读取真实路由和 DNS；只有完整快照一致才复用派生计划。
             fresh = snapshot == previous.snapshot ? previous : try CapturePlan.make(snapshot:snapshot,state:request.state ?? AppState(),pinned:try PinnedBypassPolicy.routes(request.state?.pinnedBypasses ?? [],services:bypassServicesRead()))
         } catch let error as NetworkCaptureConflict {failNetworkChange(error.localizedDescription);return}
-        catch {suspendCorporateQueries();retrySnapshot(error);return}
+        catch {
+            if request.state?.usesClaudeBypasses == true { beginNetworkResume(request, fd: fd); return }
+            suspendCorporateQueries();retrySnapshot(error);return
+        }
+        fresh.yunshuControlDomains = previous.yunshuControlDomains
+        fresh.requiresScopedDNSDomains = previous.requiresScopedDNSDomains
         snapshotRetry.reset();phase="active"
         do {
             let issues=try reconciledNetworkIssues(fresh,sample:sample)
             if !issues.isEmpty {failNetworkChange("网络保护核验未通过："+issues.joined(separator:"；"));return}
-        } catch {retrySnapshot(error);return}
+        } catch {
+            if request.state?.usesClaudeBypasses == true { beginNetworkResume(request, fd: fd); return }
+            retrySnapshot(error);return
+        }
         if fresh == previous {
             pendingNetworkChange=nil;changeWindow.reset()
             if protectedQueriesSuspended {capturePlan=fresh;protectedQueriesSuspended=false;dnsForwarder?.updatePlan(fresh)}
@@ -133,6 +144,9 @@ extension Service {
                 capturePlan=fresh;protectedQueriesSuspended=false;dnsForwarder?.updatePlan(fresh)
             }
             return
+        }
+        if request.state?.usesClaudeBypasses == true {
+            do { try disconnectFirewall.revokeBypassExceptions() } catch { failNetworkChange(error.localizedDescription); return }
         }
         do {try stageCorporateQueries(fresh)} catch {lastFailure="企业域名更新暂不可用："+error.localizedDescription;return}
         guard changeWindow.observe(fresh,now:networkUptime()) else {

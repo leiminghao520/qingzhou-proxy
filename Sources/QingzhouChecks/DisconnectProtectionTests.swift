@@ -5,6 +5,10 @@ final class DisconnectFirewallFixture {
     var root="anchor \"com.apple/*\" all\n"
     var children=""
     var rules=""
+    var discardLoads = 0
+    var ownedChildren = ""
+    var missingDiagnostic = false
+    var inventory = ""
     var enabled=false
     var token="1234"
     var fail:[String]?
@@ -13,16 +17,29 @@ final class DisconnectFirewallFixture {
         commands.append(args)
         if args==fail {throw ProxyError("模拟防火墙命令失败")}
         if args==["-sr"] {return root}
+        if args == ["-s", "Anchors"] { return inventory }
         if args==["-a","com.apple","-s","Anchors"] {return children}
+        if args.count == 4, args[0] == "-a", args[2] == "-s", args[3] == "Anchors" { return ownedChildren }
         if args==["-si"] {return enabled ? "Status: Enabled":"Status: Disabled"}
+        if args==["-s", "References"] { return "Token : " + token }
         if args==["-E"] {enabled=true;return "Token : "+token}
         if args.first=="-X" {enabled=false;return ""}
         if args.first=="-k" {return ""}
         if args.first=="-n" {return ""}
         if args.count==3,args[0]=="-R",args[1]=="-f" {root=try String(contentsOfFile:args[2],encoding:.utf8);return ""}
-        if args.count==3,args.last=="-sr" {return rules}
-        if args.count==4,args[2]=="-f" {rules=try String(contentsOfFile:args[3],encoding:.utf8);return ""}
-        if args.count==4,args[2]=="-F" {rules="";return ""}
+        if args.count==3,args.last=="-sr" {return missingDiagnostic && rules.isEmpty ? "pfctl: DIOCGETRULES: Invalid argument" : rules}
+        if args.count==4,args[2]=="-f" {
+            if discardLoads > 0 { discardLoads -= 1; rules = ""; return "" }
+            rules=try String(contentsOfFile:args[3],encoding:.utf8)
+            inventory = args[1].split(separator: "/").first.map(String.init) ?? ""
+            if args[1].contains("/") { children = args[1].split(separator: "/").last.map(String.init) ?? "" }
+            return ""
+        }
+        if args.count==4,args[2]=="-F" {
+            rules=""
+            if args[1].contains("/") { children="" } else { inventory="" }
+            return ""
+        }
         throw ProxyError("未预期的管理员命令，夹具禁止执行真实命令")
     }
 }
@@ -295,5 +312,47 @@ final class DisconnectProtectionTests:CheckCase {
         try Data("{}".utf8).write(to:record);try FileManager.default.setAttributes([.posixPermissions:0o644],ofItemAtPath:record.path)
         let broken=DisconnectProtectionFirewall(directory:dir,command:f.execute);expectThrows(try broken.preflight());expectTrue(broken.armed)
         try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:record.path);expectThrows(try broken.preflight())
+    }
+}
+
+// 解除规则不依赖旧启用凭据有效，且不能删除外部子锚点。
+extension DisconnectProtectionTests {
+    func testRecoveryFallback() throws {
+        for mode in ["missing", "invalid", "unreadable", "legacy", "children", "disabled", "crossBoot", "unrecognized"] {
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let fixture = DisconnectFirewallFixture()
+            let command: ([String]) throws -> String = { args in
+                if args == ["-s", "References"], mode == "unrecognized" { return "pid: 1234; timestamp: 1234" }
+                if args == ["-s", "References"], mode == "missing" { return "" }
+                if args == ["-s", "References"], mode == "unreadable" { throw ProxyError("引用不可读") }
+                if args.first == "-X", mode == "invalid" { throw ProxyError("pfctl: pf: token invalid") }
+                return try fixture.execute(args)
+            }
+            let firewall = DisconnectProtectionFirewall(directory: dir, command: command)
+            try firewall.arm(allowed: ["43.163.70.144/32"])
+            if mode == "disabled" { fixture.enabled = false }
+            if mode == "legacy" || mode == "crossBoot" {
+                let file = dir.appendingPathComponent("disconnect-protection.json")
+                var record = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as! [String: Any]
+                record.removeValue(forKey: "tokenBoot")
+                if mode == "crossBoot" { record["tokenBoot"] = "previous boot" }
+                try JSONSerialization.data(withJSONObject: record).write(to: file)
+            }
+            if mode == "children" { fixture.ownedChildren = "foreign" }
+            let restarted = DisconnectProtectionFirewall(directory: dir, command: command)
+            if mode == "children" {
+                expectThrows(try restarted.release())
+                expectTrue(restarted.armed)
+            } else {
+                try restarted.release()
+                expectFalse(restarted.armed)
+                expectTrue(fixture.rules.isEmpty)
+                if mode == "unreadable" || mode == "legacy" || mode == "invalid" || mode == "crossBoot" || mode == "unrecognized" { expectTrue(restarted.releaseWarning != nil) }
+                if mode == "legacy" || mode == "missing" { expectFalse(fixture.commands.contains { $0.first == "-X" }) }
+                try restarted.release()
+            }
+        }
     }
 }

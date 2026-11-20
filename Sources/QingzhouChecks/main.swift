@@ -4,8 +4,14 @@ import Darwin
 import SystemConfiguration
 
 let args = CommandLine.arguments
+if args.count == 2 && args[1] == "claude-bypass-checks" {
+    do { try ClaudeBypassTests().run(); try YunshuConnectionTests().run() }
+    catch { CheckHarness.failure(error.localizedDescription, file: #filePath, line: #line) }
+    print("RESULT claude_bypass_assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures) kernelWrites=0")
+    exit(CheckHarness.failures == 0 ? 0 : 1)
+}
 if args.count==2 && args[1]=="disconnect-protection-checks" {
-    do {let tests=DisconnectProtectionTests();try tests.testPolicy();try tests.testLifecycle();try tests.testFailureAndRestart();try tests.testClaudeSafetyProof();try tests.testCorporateCoexistence();try tests.testStrictPF()}
+    do {let tests=DisconnectProtectionTests();try tests.testPolicy();try tests.testLifecycle();try tests.testFailureAndRestart();try tests.testClaudeSafetyProof();try tests.testCorporateCoexistence();try tests.testStrictPF();try tests.testRecoveryFallback()}
     catch {CheckHarness.failure("断线保护检查异常："+error.localizedDescription,file:#filePath,line:#line)}
     print("RESULT disconnect_protection_assertions=\(CheckHarness.assertions) failures=\(CheckHarness.failures) kernelWrites=0")
     exit(CheckHarness.failures==0 ? 0:1)

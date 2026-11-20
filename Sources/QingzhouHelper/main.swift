@@ -35,6 +35,16 @@ final class Service {
     var captureNodeInterfaces:[String:String]=[:]
     var knownProtectedDomains:Set<String>=[]
     var dynamicAnswerRoutes:[String:ProtectedRoute]=[:]
+    var claudeAnswerExceptions: [String: [ClaudeBypassException]] = [:]
+    var yunshuControlExceptions: [ClaudeBypassException] = []
+    var yunshuRuntimeState: AppState?
+    var yunshuMonitor: DispatchSourceTimer?
+    var yunshuRefreshInFlight = false
+    var yunshuBootstrapTransport: ((Data, String, String) -> Data?)?
+    var yunshuBootstrapResolve: ((String, UInt16, CapturePlan) throws -> [String])?
+    var yunshuPathValidate: ((ClaudeBypassException) -> Bool)?
+    var yunshuSnapshotRead: (() throws -> NetworkSnapshot)?
+    var yunshuEndpointsRead: () throws -> [ClaudeNetworkEndpoint] = YunshuConnections.endpoints
     var dnsForwarder:ScopedDNSForwarder?
     var activeRequest:TunRequest?
     var networkMonitorObservation: ((NetworkMonitorEvent) -> Void)?
@@ -108,9 +118,29 @@ final class Service {
         label=="gateway" ? NetworkInspection.routeGateway(text):NetworkInspection.routeField(label,text)
     }
     func prefix(_ info:String)->String? {NetworkInspection.routePrefix(destination:field("destination",info),mask:field("mask",info),host:info.contains("HOST"))}
+    var normalRecoveryFile: URL { root.appendingPathComponent("normal-network-recovery.json") }
+    var normalRecoveryActive: Bool { FileManager.default.fileExists(atPath: normalRecoveryFile.path) }
+
+    func saveNormalRecovery(_ phase: String) throws {
+        var state: NormalNetworkRecovery
+        if normalRecoveryActive {
+            let data = try Data(contentsOf: normalRecoveryFile)
+            do { state = try JSONDecoder().decode(NormalNetworkRecovery.self, from: data) }
+            catch {
+                // 恢复意图已存在但内容损坏时先留证据，再继续解除阻断，不能让恢复入口自锁。
+                let archive = root.appendingPathComponent("normal-network-recovery.corrupt-" + UUID().uuidString + ".json")
+                try SecureFile.write(data, to: archive, durable: true)
+                state = NormalNetworkRecovery(phase: phase, warning: "损坏的恢复意图已归档，已重新核验自有网络清理")
+            }
+        } else { state = NormalNetworkRecovery(phase: phase) }
+        state.phase = phase
+        state.warning = disconnectFirewall.releaseWarning ?? state.warning
+        try SecureFile.write(JSONEncoder().encode(state), to: normalRecoveryFile, durable: true)
+        self.phase = phase
+    }
+
     func stop(preserveExternal:Bool=false) throws {
         if journal?.proxyOnly==true {try stopManagedSystemProxy(preserveExternal:preserveExternal);return}
-        try disconnectFirewall.suspend()
         let previousPhase=phase
         phase="recovery"
         defer{phase=previousPhase}
@@ -125,10 +155,15 @@ final class Service {
             process=nil;owner=nil
         }
 
+        if !normalRecoveryActive {
+            try disconnectFirewall.revokeBypassExceptions()
+            try disconnectFirewall.suspend()
+        }
         if let backend=routeBackend as? NativeRouteBackend {backend.cancelled={false}}
         if !performingNetworkResume {cancelNetworkResume()}
         pinnedMonitor?.cancel();pinnedMonitor=nil;pinnedPaths=[]
         coreOutput?.fileHandleForReading.readabilityHandler=nil;coreOutput=nil
+        claudeAnswerExceptions = [:]
         captureGeneration=UUID();dynamicAnswerRoutes=[:];domainRouteSummary=[];activatePrepared=nil;activeRequest=nil;networkChecks?.cancel();networkChecks=nil;networkTimer?.cancel();networkTimer=nil;if let networkStore {SCDynamicStoreSetDispatchQueue(networkStore,nil)};networkStore=nil;routeEvents?.cancel();routeEvents=nil;pendingNetworkChange=nil;snapshotRetry.reset();dnsForwarder?.stop();dnsForwarder=nil;capturePlan=nil;proxyMismatchSince=nil;dynamicRules=nil;changeWindow.reset();protectedQueriesSuspended=false;captureNodeAddresses=[:];captureNodeInterfaces=[:];knownProtectedDomains=[]
         guard let record=journal else{        if let process,process.isRunning {process.terminate();for _ in 0..<40 {if !process.isRunning{break};usleep(50000)};if process.isRunning{kill(process.processIdentifier,SIGKILL)};process.waitUntilExit()};process=nil;owner=nil;try? FileManager.default.removeItem(at:root.appendingPathComponent("runtime.json"))
 return};var issues:[String]=[]
@@ -198,13 +233,18 @@ return};var issues:[String]=[]
         // 恢复记录无法解析时改名隔离并报错，避免 launchd 保活下每次启动都因同一份记录崩溃循环。
         do {journal=try JSONDecoder().decode(Journal.self,from:Data(contentsOf:file))} catch {
             let quarantine=root.appendingPathComponent("recovery.corrupt-\(Int(Date().timeIntervalSince1970)).json")
-            try? FileManager.default.moveItem(at:file,to:quarantine)
+            if !normalRecoveryActive { try? FileManager.default.moveItem(at:file,to:quarantine) }
             throw ProxyError("恢复记录损坏，已隔离为 "+quarantine.lastPathComponent+"，请手动核对路由、DNS 与系统代理")
         }
         routeTransaction=journal?.transactionID ?? UUID();if let pid=journal?.pid {var buffer=[CChar](repeating:0,count:4096);if proc_pidpath(pid,&buffer,UInt32(buffer.count))>0,String(cString:buffer)==root.appendingPathComponent("sing-box").path{kill(pid,SIGTERM);usleep(200000)}};try stop(preserveExternal:preserveExternal)}}
-    func start(_ request:TunRequest,fd:Int32) throws {
+    func start(_ originalRequest:TunRequest,fd:Int32) throws {
+        var request = originalRequest
         guard networkResumeSession == nil || performingNetworkResume else{throw ProxyError("正在恢复当前连接，请先断开或恢复网络")}
-        guard process==nil,journal==nil,let state=request.state,let values=request.credentials,let control=request.control,state.captureMode.usesTunnel,values.count<=6000 else{throw ProxyError("重复启动或 TUN 模型无效，请先恢复")}
+        guard process==nil,journal==nil,let incomingState=request.state,let values=request.credentials,let control=request.control,incomingState.captureMode.usesTunnel,values.count<=6000 else{throw ProxyError("重复启动或 TUN 模型无效，请先恢复")}
+        let yunshuEnabled = incomingState.usesClaudeBypasses && FileManager.default.fileExists(atPath: "/Applications/Yunshu.app")
+        let state = try YunshuConnectionPolicy.runtime(incomingState, installed: yunshuEnabled)
+        yunshuRuntimeState = yunshuEnabled ? state : nil
+        request.state = state
         guard control.secret.count==64,control.secret.allSatisfy({$0.isHexDigit}),(1024...65535).contains(control.port),control.port != state.listenPort else{throw ProxyError("控制通道模型无效")}
         guard request.protocolVersion==5 else{throw ProxyError("辅助服务协议不匹配，请更新应用及辅助服务")}
         if let port=request.httpCompatibilityPort {guard (1024...65535).contains(port),port != state.listenPort,port != control.port,state.shadowrocket?.requiresHTTPCompatibility==true else{throw ProxyError("兼容端口模型无效")}}
@@ -230,7 +270,11 @@ return};var issues:[String]=[]
             preparedSnapshot=try NetworkSnapshot.read(store:self.dynamic,primary:primary,routes:sample.table,structuredRoutes:sample.planningRoutes,lookup:{try self.routeInfo($0,ipv6:$1)})
         })
         guard let snapshot=preparedSnapshot else {throw NetworkEnvironmentNotReady("原网络快照准备未完成")}
-        let plan=try CapturePlan.make(snapshot:snapshot,state:state,pinned:try PinnedBypassPolicy.routes(state.pinnedBypasses,services:BypassNetworkService.read()))
+        var plan=try CapturePlan.make(snapshot:snapshot,state:state,pinned:try PinnedBypassPolicy.routes(state.pinnedBypasses,services:BypassNetworkService.read()))
+        if yunshuEnabled {
+            plan.yunshuControlDomains = YunshuConnectionPolicy.domains
+            plan.requiresScopedDNSDomains = incomingState.enabledBypasses.filter { $0.legacyProtection == true && $0.kind == .suffix }.map(\.value)
+        }
         let dns=snapshot.resolvers.flatMap(\.servers).map{$0.components(separatedBy:"%")[0]}
         capturePlan=plan
         let v4:String
@@ -263,13 +307,16 @@ return};var issues:[String]=[]
         let address4=addresses.address4,address6=addresses.address6
         phase="coreValidation"
         captureGeneration=UUID();let generation=captureGeneration
-        let forwarder=try ScopedDNSForwarder(plan:plan,protectSnapshotAnswers:{[weak self] queryPlan,revision,name,addresses,resolver,deadline in
+        let forwarder=try ScopedDNSForwarder(plan:plan,protectSnapshotResponse:{[weak self] queryPlan,revision,name,addresses,resolver,deadline,response in
             guard let self else {throw ProxyError("保护会话已结束")}
             try self.queue.sync {
                 guard self.captureGeneration==generation,self.dnsForwarder?.isCurrentRevision(revision)==true,Date()<deadline,!self.protectedQueriesSuspended,let plan=self.capturePlan,plan==queryPlan else {throw ProxyError("企业 DNS 保护会话过期")}
                 // 准备阶段尚未接管，先确认原路径；激活后才补充拥有的主机路由。
                 let existingProtection=self.activeRequest == nil ? [] : NetworkSnapshot.parseRoutes(try self.routeSample().table,includeTransient:true)
                 for address in addresses {
+                    if state.usesClaudeBypasses && !state.enabledBypasses.contains(where: { $0.kind != .cidr && $0.matches(host: name) }) {
+                        throw ProxyError("域名不在已启用绕过清单中")
+                    }
                     let route=try plan.domainRoute(address:address,resolver:resolver,host:name)
                     guard Date()<deadline else {throw ProxyError("企业路由保护超过 DNS 总预算")}
                     if self.activeRequest != nil {
@@ -279,18 +326,25 @@ return};var issues:[String]=[]
                             try self.addRoute(route.destination,route.gateway,route.interface,ipv6:route.ipv6,deadline:deadline)
                             self.dynamicAnswerRoutes[route.destination]=route
                         }
-                        let info=try self.routeInfo(address,ipv6:route.ipv6,deadline:deadline)
+                        let control = (plan.yunshuControlDomains ?? []).contains { name == $0 || name.hasSuffix("." + $0) }
+                        let info=try self.routeInfo(address,ipv6:route.ipv6,scope: control ? route.interface : nil,deadline:deadline)
                         guard self.field("interface",info)==route.interface else {throw ProxyError("企业动态路由接口核验失败")}
                     } else {
-                        let info=try self.routeInfo(address,ipv6:route.ipv6,deadline:deadline)
+                        let control = (plan.yunshuControlDomains ?? []).contains { name == $0 || name.hasSuffix("." + $0) }
+                        let info=try self.routeInfo(address,ipv6:route.ipv6,scope: control ? route.interface : nil,deadline:deadline)
                         guard self.field("interface",info)==route.interface else {throw ProxyError("准备阶段企业原路由无法确认")}
                     }
                     let summary=name+" → "+address+" → "+route.interface+"（共享该地址的流量也受保护）"
                     if !self.domainRouteSummary.contains(summary) {self.domainRouteSummary.append(summary)}
                     if self.domainRouteSummary.count>100 {self.domainRouteSummary.removeFirst()}
                 }
+                if state.usesClaudeBypasses && self.activeRequest != nil {
+                    try self.publishClaudeBypassAnswers(state: state, plan: plan, name: name, addresses: addresses, resolver: resolver, deadline: deadline, queryType: DNSPacket.queryType(response), nameExists: response[3]&15 != 3)
+                }
             }
         });dnsForwarder=forwarder;forwarder.start()
+        yunshuControlExceptions = try prepareYunshuConnections(state: state, plan: plan)
+        if yunshuEnabled { try saveYunshuContext(state); startYunshuMonitor() }
         phase="dnsBaseline"
         // 企业解析器可能拒绝根域查询；可选能力不再成为普通代理的启动门槛。
         knownProtectedDomains=Set(plan.domains)
@@ -300,6 +354,7 @@ return};var issues:[String]=[]
         self.dynamicRules=dynamicRules
         phase="coreValidation"
         var object=try measured("configGeneration") {try TunConfigBuilder.object(state:state,credentials:memory,control:control,address4:address4,address6:address6,originalDNS:dns,bypass:bypass.map{$0+($0.contains(":") ? "/128":"/32")},httpCompatibilityPort:request.httpCompatibilityPort,plan:plan,dnsForwardPort:forwarder.port,nodeInterfaces:captureNodeInterfaces)}
+        if yunshuEnabled { try configureYunshuControlRules(&object, exceptions: yunshuControlExceptions, interface: snapshot.primaryInterface) }
         if state.claudeSafetyMode != true { dynamicRules.apply(to:&object,plan:plan) }
         let config=try JSONSerialization.data(withJSONObject:object)
         let file=root.appendingPathComponent("runtime.json");try SecureFile.write(config,to:file)
@@ -317,7 +372,7 @@ return};var issues:[String]=[]
                     guard case .node(let id) = state.activePolicy, let node = state.nodes.first(where: { $0.id == id }) else {
                         throw ProxyError("缺少固定安全节点")
                     }
-                    try disconnectFirewall.armStrict(endpoint: ClaudePFPolicy.endpoint(node))
+                    try disconnectFirewall.armStrict(endpoint: ClaudePFPolicy.endpoint(node), exceptions: state.usesClaudeBypasses ? ClaudeBypassPolicy.initialExceptions(state: state, plan: plan) + yunshuControlExceptions : nil)
                 } else {
                     try disconnectFirewall.arm(allowed: allowed)
                 }
@@ -341,7 +396,8 @@ return};var issues:[String]=[]
                 let scoped4=["0.0.0.0/1","128.0.0.0/1"].map{ProtectedRoute(destination:$0,gateway:gw4,interface:primary,scope:primary)}
                 let scoped6=gw6.map{gateway in ["::/1","8000::/1"].map{ProtectedRoute(destination:$0,gateway:gateway,interface:primary,scope:primary)}} ?? []
                 let protections=plan.protectedRoutes.filter{$0.scope != nil || $0.source=="用户网络绕过"}.map{ProtectedRoute(destination:$0.destination,gateway:$0.gateway,interface:$0.interface)}
-                try measured("routeEncodingValidation") {try backend.validateWrites(protections+retainedBypasses+scoped4+scoped6+captures)}
+                try measured("routeEncodingValidation") {let controls = yunshuControlExceptions.filter { !$0.dnsOnly }.map { ProtectedRoute(destination: $0.destination, gateway: $0.controlGateway!, interface: $0.interface) }
+                try backend.validateWrites(protections+controls+retainedBypasses+scoped4+scoped6+captures)}
             }
             activatePrepared={ [unowned self] in
             try NetworkInspection.checkConflicts(ownedTunnel:tunnel,routes:try routeSample().table)
@@ -362,6 +418,7 @@ return};var issues:[String]=[]
                     add:{route,bypass in try self.addRoute(route.destination,route.gateway,route.interface,ipv6:route.ipv6,scope:route.scope,preparationBypass:bypass)},
                     metrics:self.routeMetrics)
             }
+            if yunshuEnabled { try installYunshuControlRoutes(yunshuControlExceptions) }
             // 出站绑定物理网卡后需要限定路由；否则全局 /1 接管使 macOS 返回网络不可达。
             for destination in ["0.0.0.0/1","128.0.0.0/1"] {try addRoute(destination,gw4,primary,ipv6:false,scope:primary)}
             if let gw6 {for destination in ["::/1","8000::/1"] {try addRoute(destination,gw6,primary,ipv6:true,scope:primary)}}
@@ -398,6 +455,7 @@ return};var issues:[String]=[]
             if let port=request.systemProxyPort {phase="proxyActivation";try applyProxy(port:port,plan:plan);try verifyProxyActivation()}
             activeRequest=request
             startNetworkMonitor()
+            if yunshuEnabled { try saveYunshuContext(state); startYunshuMonitor() }
             startPinnedMonitor(state)
             }
         }catch{let original=error;failurePhase=failurePhase ?? phase;failureKind=failureKind ?? ConnectionFailureKind.classify(error);do{try rollbackStartup()}catch{throw ConnectionFailure(.recovery,"启动失败："+original.localizedDescription+"；恢复失败："+error.localizedDescription)};throw original}
@@ -408,6 +466,65 @@ return};var issues:[String]=[]
         do {try stop();connectionTiming?.finish()}
         catch {connectionTiming?.finish(succeeded:false);throw error}
     }
+    func recoverResidentStartup() {
+        if normalRecoveryActive {
+            do { try restoreNormalNetwork() }
+            catch { lastFailure = error.localizedDescription; phase = "normalRecoveryFailed" }
+            return
+        }
+        var failures: [String] = []
+        // 常驻服务必须先提供维护入口；恢复失败不能令服务在套接字建立前反复退出。
+        do { try disconnectFirewall.restoreAfterRestart(validateVPN: validateYunshuControlPath) }
+        catch { failures.append("断线保护恢复未完成：" + error.localizedDescription) }
+        do { try recoverStartup() }
+        catch { failures.append("接管恢复未完成：" + error.localizedDescription) }
+        do { try restoreYunshuMonitor() }
+        catch { failures.append("云枢上下文恢复未完成：" + error.localizedDescription) }
+        if !failures.isEmpty {
+            lastFailure = failures.joined(separator: "；")
+            phase = "networkProtectionFailed"
+        }
+    }
+    func restoreNormalNetwork() throws {
+        try saveNormalRecovery("normalRecoveryStopping")
+        // 撤销后台写入来源，已排队的结果由代次检查拒绝。
+        captureGeneration = UUID()
+        yunshuMonitor?.cancel(); yunshuMonitor = nil; yunshuRuntimeState = nil
+        pinnedMonitor?.cancel(); pinnedMonitor = nil
+        cancelNetworkResume()
+        networkTimer?.cancel(); networkTimer = nil
+        phase = "normalRecoveryStopping"
+        var failures: [String] = []
+        // 接管与防火墙独立尝试清理；一项失败不能留下另一项本可解除的阻断。
+        do { try recoverStartup(preserveExternal: true) }
+        catch { failures.append("接管记录恢复失败：" + error.localizedDescription) }
+        do { try stop(preserveExternal: true) }
+        catch { failures.append("接管清理失败：" + error.localizedDescription) }
+        do { try saveNormalRecovery("normalRecoveryFirewall") }
+        catch { failures.append("恢复阶段记录失败：" + error.localizedDescription) }
+        do { try disconnectFirewall.release() }
+        catch { failures.append("断网保护解除失败：" + error.localizedDescription) }
+        guard failures.isEmpty else { throw ProxyError(failures.joined(separator: "；")) }
+        try? FileManager.default.removeItem(at: root.appendingPathComponent("yunshu-control-context.json"))
+        guard !helperIsRunning, journal == nil, !FileManager.default.fileExists(atPath: root.appendingPathComponent("recovery.json").path), verifyReleasedForQuit() else {
+            throw ProxyError("自有网络接管尚未确认清理，恢复事务已保留")
+        }
+        try saveNormalRecovery("normalRecoveryCompleted")
+    }
+
+    func acknowledgeNormalRecovery() throws {
+        guard !helperIsRunning, journal == nil, !disconnectFirewall.armed,
+              !FileManager.default.fileExists(atPath: root.appendingPathComponent("recovery.json").path) else {
+            throw ProxyError("自有接管或阻断仍存在，不能确认恢复")
+        }
+        if normalRecoveryActive {
+            let recovery = try JSONDecoder().decode(NormalNetworkRecovery.self, from: Data(contentsOf: normalRecoveryFile))
+            guard recovery.phase == "normalRecoveryCompleted" else { throw ProxyError("恢复事务未完成，不能确认") }
+            try FileManager.default.removeItem(at: normalRecoveryFile)
+        }
+        phase = "restored"
+    }
+
     func handle(_ request:TunRequest,fd:Int32)->TunReply {
         failurePhase=nil;failureKind=nil
         let timing=ConnectionTiming()
@@ -428,10 +545,16 @@ return};var issues:[String]=[]
         do {
             var reply=try handleOperation(request,fd:fd)
             if request.operation == "status", request.claudePFEndpoint != nil {
-                reply.claudeSafetyProtectionVerified = try request.claudePFEndpoint.map { try disconnectFirewall.verifyStrict(endpoint: $0) } ?? false
+                reply.claudeSafetyProtectionVerified = try request.claudePFEndpoint.map { try disconnectFirewall.verifyStrict(endpoint: $0, allowsBypasses: request.claudeAllowsBypasses == true) } ?? false
             }
+            reply.supportsNormalNetworkRecovery = true
+            reply.normalNetworkRecoveryPhase = normalRecoveryActive ? phase : nil
+            reply.recoveryWarning = disconnectFirewall.releaseWarning ?? (try? JSONDecoder().decode(NormalNetworkRecovery.self, from: Data(contentsOf: normalRecoveryFile)))?.warning
             reply.tunnelInterface=journal?.interface
             reply.supportsClaudeSafetyMode=true;reply.claudePFPolicyVersion=ClaudePFPolicy.version
+            reply.claudeBypassPolicyVersion=ClaudeBypassPolicy.version
+            reply.claudeBypassMode=disconnectFirewall.bypassMode
+            reply.claudeBypassExceptionCount=disconnectFirewall.bypassExceptionCount
             reply.supportsDisconnectProtection=true;reply.disconnectProtectionArmed=disconnectFirewall.armed
             reply.supportsManagedSystemProxy=true;reply.supportsTrustedCorporateDNS=true;reply.supportsWakeRecovery=true;reply.supportsExternalRecovery=true;reply.recoveryPending=journal != nil
             if request.operation=="status",request.verifyNetwork==true {reply.safeToQuit=verifyReleasedForQuit()}
@@ -443,8 +566,14 @@ return};var issues:[String]=[]
             timing.finish(succeeded:false)
             var reply=TunReply(ok:false,message:"接管阶段 "+(failurePhase ?? phase)+"："+Redactor.redact(error.localizedDescription),coreDiagnostics:["prepare","activate"].contains(request.operation) ? coreDiagnostics.recent:nil,running:helperIsRunning,phase:phase,networkNotReady:error is NetworkEnvironmentNotReady,stageTimings:timing.samples+(routeMetrics?.samples ?? []))
             reply.failurePhase=failurePhase ?? phase;reply.failureKind=phase=="recovery" ? .recovery:(failureKind ?? ConnectionFailureKind.classify(error));reply.recoveryPhase=phase
+            reply.supportsNormalNetworkRecovery = true
+            reply.normalNetworkRecoveryPhase = normalRecoveryActive ? phase : nil
+            reply.recoveryWarning = disconnectFirewall.releaseWarning ?? (try? JSONDecoder().decode(NormalNetworkRecovery.self, from: Data(contentsOf: normalRecoveryFile)))?.warning
             reply.tunnelInterface=journal?.interface
             reply.supportsClaudeSafetyMode=true;reply.claudePFPolicyVersion=ClaudePFPolicy.version
+            reply.claudeBypassPolicyVersion=ClaudeBypassPolicy.version
+            reply.claudeBypassMode=disconnectFirewall.bypassMode
+            reply.claudeBypassExceptionCount=disconnectFirewall.bypassExceptionCount
             reply.supportsDisconnectProtection=true;reply.disconnectProtectionArmed=disconnectFirewall.armed
             reply.supportsManagedSystemProxy=true;reply.supportsTrustedCorporateDNS=true;reply.supportsWakeRecovery=true;reply.supportsExternalRecovery=true;reply.recoveryPending=journal != nil
             return reply
@@ -452,7 +581,18 @@ return};var issues:[String]=[]
     }
     private func handleOperation(_ request:TunRequest,fd:Int32) throws -> TunReply {
         guard request.preserveExternal != true || request.operation=="recover" else{throw ProxyError("保留外部网络仅用于用户恢复操作")}
+        if normalRecoveryActive && ["prepare", "activate", "systemProxy", "pinBypasses", "checkDisconnectProtection"].contains(request.operation) {
+            throw ProxyError("恢复正常网络尚未完成配置确认，禁止重新接管")
+        }
         switch request.operation {
+        case "maintenanceStatus":
+            return TunReply(ok: true, message: "维护入口已就绪", running: helperIsRunning, phase: phase)
+        case "restoreNormalNetwork":
+            try restoreNormalNetwork()
+            return TunReply(ok: true, message: "自有接管和阻断已清理，等待应用还原配置", phase: phase)
+        case "acknowledgeNormalRecovery":
+            try acknowledgeNormalRecovery()
+            return TunReply(ok: true, message: "正常网络恢复事务已确认")
         case "checkDisconnectProtection":
             try disconnectFirewall.preflight()
             return TunReply(ok:true,message:"断线保护防火墙兼容性检查通过")
@@ -493,24 +633,25 @@ return};var issues:[String]=[]
 }
 func run() throws {
     let retainingProtection = CommandLine.arguments.dropFirst() == ["--recover-preserving-protection"]
-    let preserving = retainingProtection || CommandLine.arguments.dropFirst() == ["--recover-preserving-external"]
+    let acknowledging = CommandLine.arguments.dropFirst() == ["--acknowledge-normal-recovery"]
+    let preserving = acknowledging || retainingProtection || CommandLine.arguments.dropFirst() == ["--recover-preserving-external"]
     let service=try Service(recoveryOnly:preserving)
+    if acknowledging { try service.acknowledgeNormalRecovery(); print("普通网络配置恢复已确认，旧服务保持停用"); return }
     if preserving {
-        try service.recoverStartup(preserveExternal: true)
         if retainingProtection {
-            try service.disconnectFirewall.restoreAfterRestart()
+            guard !service.normalRecoveryActive else { throw ProxyError("正常网络恢复事务存在，不能通过升级重新施加保护") }
+            try service.recoverStartup(preserveExternal: true)
+            try service.disconnectFirewall.restoreAfterRestart(validateVPN: service.validateYunshuControlPath)
             print("接管已清理，断网保护保留")
         } else {
-            try service.disconnectFirewall.release()
+            try service.restoreNormalNetwork()
             print("外部网络保留完成；汐航仍拥有的残留已清理，断网保护已明确解除")
         }
         return
     }
-    if CommandLine.arguments.dropFirst()==["--recover"]{try service.recoverStartup();try service.disconnectFirewall.release();print("原网络恢复完成");return}
+    if CommandLine.arguments.dropFirst()==["--recover"]{try service.restoreNormalNetwork();print("自有接管已清理，等待应用确认原配置");return}
     guard CommandLine.arguments.count==1 else{throw ProxyError("辅助服务参数无效")}
-    try service.disconnectFirewall.restoreAfterRestart()
-    // 常驻模式下启动恢复失败只记录并继续服务，让应用能读取原因，而不是退出后被 launchd 反复拉起。
-    do {try service.recoverStartup()} catch {service.lastFailure="启动恢复未完成："+error.localizedDescription}
+    service.recoverResidentStartup()
     umask(0o077)
     let path=HelperPaths.socket;try? FileManager.default.removeItem(atPath:path);let server=socket(AF_UNIX,SOCK_STREAM,0);guard server>=0 else{throw ProxyError("辅助服务套接字失败")};var address=try UnixChannel.address(path);let bound=withUnsafePointer(to:&address){$0.withMemoryRebound(to:sockaddr.self,capacity:1){bind(server,$0,socklen_t(MemoryLayout<sockaddr_un>.size))==0}};guard bound,listen(server,8)==0 else{throw ProxyError("辅助服务监听失败")};chown(path,uid_t(service.manifest.uid),0);chmod(path,0o600)
     signal(SIGTERM,SIG_IGN);signal(SIGINT,SIG_IGN);let termination=DispatchSource.makeSignalSource(signal:SIGTERM,queue:service.queue);termination.setEventHandler{try? service.stop();exit(0)};termination.resume()

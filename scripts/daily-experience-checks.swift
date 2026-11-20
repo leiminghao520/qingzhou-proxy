@@ -171,10 +171,18 @@ final class DailyControlProtocol: URLProtocol {
         await model.refreshAutomaticIfNeeded(model.api!,token:autoToken)
         try check(model.state.activePolicy == .automatic && model.actualName==model.state.label(target),"后台 A 转 B 后页面选择仍为自动选择，实际出口更新")
         try check(DailyControlProtocol.calls().isEmpty && DailyControlProtocol.automaticRefreshes==1,"自动优选不向选择器写入固定节点")
+        model.healthDisplayAwake = { true }
+        DailyControlProtocol.automaticNode = old.tag
+        await model.healthCheck(model.api!, token:autoToken)
+        try check(DailyControlProtocol.automaticRefreshes==1,"冷却期内的健康检查不重复触发全组测速")
+        model.lastAutomaticRefresh = .distantPast
+        await model.healthCheck(model.api!, token:autoToken)
+        try check(DailyControlProtocol.automaticRefreshes==2 && model.actualName==model.state.label(old),"当前出口健康时，后台周期检查仍能复测并选择更优出口")
+        try check(model.state.activePolicy == .automatic && DailyControlProtocol.calls().isEmpty,"周期复测保留自动策略")
         model.state.selectedPolicy=old;model.state.ruleFinal = .selected
         model.lastAutomaticRefresh = .distantPast
-        await model.refreshAutomaticIfNeeded(model.api!,token:autoToken)
-        try check(DailyControlProtocol.automaticRefreshes==1,"手动节点故障路径不会刷新或切换自动组")
+        await model.healthCheck(model.api!,token:autoToken)
+        try check(DailyControlProtocol.automaticRefreshes==2,"手动模式的周期检查不会刷新或切换自动组")
         model.state.ruleFinal=target
         try check(model.defaultExitNodeID()==two,"规则模式默认出口独立于当前通用选择")
         model.state.ruleFinal = .selected

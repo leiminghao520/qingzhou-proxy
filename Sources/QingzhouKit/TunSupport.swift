@@ -5,6 +5,7 @@ import SystemConfiguration
 public struct TunRequest:Codable,Sendable {
     public var claudeSafetyEndpoint: String?
     public var claudePFEndpoint: ClaudeNetworkEndpoint?
+    public var claudeAllowsBypasses: Bool?
     public var proxyExceptions:[String]?
     public var proxyProtectedDomains:[String]?
     public var deferToNetworkResume:Bool?
@@ -23,6 +24,9 @@ public struct TunRequest:Codable,Sendable {
 public struct TunReply: Codable, Sendable {
     public var claudeSafetyProtectionVerified: Bool?
     public var claudePFPolicyVersion: Int?
+    public var claudeBypassPolicyVersion: Int?
+    public var claudeBypassMode: Bool?
+    public var claudeBypassExceptionCount: Int?
     // 企业解析暂停时的原因；旧辅助服务不返回，按未暂停处理。
     public var corporateDNSSuspension:String?
     public var failurePhase:String?
@@ -39,6 +43,9 @@ public struct TunReply: Codable, Sendable {
     public var tunnelInterface:String?
     public var supportsExternalRecovery: Bool?
     public var recoveryPending: Bool?
+    public var supportsNormalNetworkRecovery: Bool?
+    public var normalNetworkRecoveryPhase: String?
+    public var recoveryWarning: String?
     public var safeToQuit: Bool?
     public var networkNotReady: Bool?
     public var coreDiagnostics: [String]?
@@ -182,6 +189,9 @@ public actor PrivilegedServiceClient {
 }
 public enum NetworkInspection {
     public static func command(_ path:String,_ arguments:[String],deadline:Date?=nil) throws -> String {
+        try command(path, arguments, deadline: deadline, acceptedExitCodes: [0])
+    }
+    public static func command(_ path:String,_ arguments:[String],deadline:Date?=nil,acceptedExitCodes:Set<Int32>) throws -> String {
         func uptime()->TimeInterval {TimeInterval(DispatchTime.now().uptimeNanoseconds)/1_000_000_000}
         let budget=NetworkCommandBudget(deadline:deadline,uptime:uptime())
         func remaining()->TimeInterval {budget.remaining(wallTime:Date(),uptime:uptime())}
@@ -196,7 +206,7 @@ public enum NetworkInspection {
         let data=output.fileHandleForReading.readDataToEndOfFile();process.waitUntilExit()
         guard remaining()>0 else {throw timeoutError()}
         let text=String(decoding:data,as:UTF8.self)
-        guard process.terminationStatus==0 else {throw ProxyError("网络命令 "+URL(fileURLWithPath:path).lastPathComponent+" 失败（退出码 "+String(process.terminationStatus)+"）："+Redactor.redact(String(text.prefix(512))))};return text
+        guard acceptedExitCodes.contains(process.terminationStatus) else {throw ProxyError("网络命令 "+URL(fileURLWithPath:path).lastPathComponent+" 失败（退出码 "+String(process.terminationStatus)+"）："+Redactor.redact(String(text.prefix(512))))};return text
     }
     public static func conflicts(vpn:String,routes:String,proxies:[String:Any])->String? {
         let activeVPN=vpn.components(separatedBy:.newlines).contains(where:{$0.contains("(Connected)") || $0.contains("(Connecting)")})

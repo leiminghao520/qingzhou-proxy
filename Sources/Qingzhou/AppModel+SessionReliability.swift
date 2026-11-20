@@ -20,7 +20,6 @@ extension AppModel {
         dependencies.downloader.networkEnvironmentChanged();latencyInvalidatedAt=dependencies.now()
         rescheduleTransientUpdates()
         // 等待期间仅唤醒同一个协调器，避免网络事件风暴创建第二条重连链路。
-        automaticRefreshRequested=true
         wakeRecovery.networkChanged()
         scheduleHealthRefresh(reason:"网络环境变化")
     }
@@ -74,18 +73,17 @@ extension AppModel {
     }
     func refreshAutomaticIfNeeded(_ client:CoreAPIClient,token:UUID) async {
         guard usesAutomaticExit(),dependencies.now().timeIntervalSince(lastAutomaticRefresh)>=30 else{return}
-        lastAutomaticRefresh=dependencies.now();automaticRefreshRequested=false
+        lastAutomaticRefresh=dependencies.now()
         do {
             try await client.refreshAutomatic()
             let info=try await client.proxies()
             guard epoch==token,!Task.isCancelled,!stopRequested else{return}
             publishPolicyInfo(info)
         }catch is CancellationError {
-            // 重连或停止时请求被取消属于正常收尾，不记为失败；仍是当前会话则留待下一轮补做。
-            if epoch==token {automaticRefreshRequested=true}
+            // 重连或停止时取消复测属于正常收尾。
         }catch{
-            guard epoch==token,!stopRequested else{return}
-            automaticRefreshRequested=true;log("自动选择复查尚未完成："+Redactor.redact(error.localizedDescription))
+            guard epoch==token,!Task.isCancelled,!stopRequested else{return}
+            log("自动选择复查尚未完成："+Redactor.redact(error.localizedDescription))
         }
     }
 }

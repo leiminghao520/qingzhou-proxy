@@ -62,7 +62,8 @@ struct XihangConnectionHeader: View {
                 HStack {
                     Label("网络设置尚未恢复",systemImage:"exclamationmark.triangle.fill").foregroundStyle(Theme.amberAccent)
                     Spacer()
-                    Button("恢复网络") { Task { await model.recover() } }.disabled(model.loadingFailed || model.recovering)
+                    Button("恢复网络") { Task { await model.recover() } }.disabled(model.recovering)
+                    .help("停止汐航并解除断网保护，恢复普通网络；Claude 将允许直连。")
                 }.font(.callout).padding(12).liquidContentSurface()
             }
             if model.connection == .connecting, let stage=model.startupStage {
@@ -119,8 +120,10 @@ struct XihangConnectionHeader: View {
                 .help("开启 TUN 与系统代理；切换后自动保存并重连，关闭后使用系统代理。")
             }
             .padding(.horizontal,18).padding(.vertical,10)
-            Divider()
-            ClaudeSafetyControl(model: model).padding(.horizontal,18).padding(.vertical,10)
+            if model.claudeSafetyRetainsProtection {
+                Divider()
+                ClaudeSafetyControl(model: model).padding(.horizontal,18).padding(.vertical,10)
+            }
         }
         .liquidContentSurface()
         .overlay(RoundedRectangle(cornerRadius:Theme.cardCornerRadius,style:.continuous).strokeBorder(statusColor.opacity(model.connectionAvailable ? (contrast == .increased ? 0.8 : 0.35) : 0),lineWidth:1).allowsHitTesting(false))

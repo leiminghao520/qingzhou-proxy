@@ -28,10 +28,11 @@ cp Vendor/age.LICENSE "$app/Contents/Resources/age.LICENSE"
 cp Resources/shadowrocket-default.json "$app/Contents/Resources/shadowrocket-default.json"
 cp Resources/domestic-rules.json Resources/domestic-rules-lock.json Resources/domestic-domain.LICENSE "$app/Contents/Resources/"
 cp .build/release/QingzhouHelper "$app/Contents/Resources/QingzhouHelper"
-cp scripts/install-helper.sh scripts/uninstall-helper.sh scripts/recover-helper.sh "$app/Contents/Resources/"
+cp scripts/claude-safe.sh scripts/install-helper.sh scripts/uninstall-helper.sh scripts/recover-helper.sh "$app/Contents/Resources/"
 cp .build/release/QingzhouRunner "$app/Contents/Resources/QingzhouRunner"
 cp Vendor/Yams/LICENSE "$app/Contents/Resources/Yams.LICENSE"
 cp Vendor/yams-lock.json "$app/Contents/Resources/"
+cp Vendor/sing-box "$app/Contents/Resources/QingzhouClaudeCore"
 cp Vendor/sing-box Vendor/sing-box.LICENSE Vendor/core-lock.json "$app/Contents/Resources/"
 if [ -f Vendor/GPL-3.0.txt ]; then cp Vendor/GPL-3.0.txt "$app/Contents/Resources/"; fi
 cat > "$app/Contents/Info.plist" <<PLIST
@@ -67,6 +68,7 @@ for resource in .build/release/Pow_Pow.bundle; do
     if [ -d "$resource" ]; then cp -R "$resource" "$app/Contents/Resources/"; fi
 done
 codesign --force --sign "${QZ_SIGNING_IDENTITY:--}" "$app/Contents/Resources/qzhttp"
+codesign --force --sign "${QZ_SIGNING_IDENTITY:--}" --identifier cn.qingzhou.proxy.claude-core "$app/Contents/Resources/QingzhouClaudeCore"
 codesign --force --sign "${QZ_SIGNING_IDENTITY:--}" "$app/Contents/Resources/sing-box"
 codesign --force --sign "${QZ_SIGNING_IDENTITY:--}" "$app/Contents/Resources/QingzhouRunner"
 codesign --force --sign "${QZ_SIGNING_IDENTITY:--}" "$app/Contents/Resources/age"
@@ -77,7 +79,7 @@ codesign --verify --deep --strict "$app"
 /usr/bin/python3 - "$app" "$version" <<'PYTHON'
 import pathlib,hashlib,json,sys,subprocess
 app=pathlib.Path(sys.argv[1]);files=['Contents/Resources/age','Contents/Resources/age-keygen','Contents/Resources/age.LICENSE','Contents/MacOS/Qingzhou','Contents/Resources/sing-box','Contents/Resources/QingzhouRunner','Contents/Resources/QingzhouHelper','Contents/Resources/qzhttp','Contents/Resources/shadowrocket-default.json','Contents/Resources/domestic-rules.json','Contents/Resources/domestic-rules-lock.json','Contents/Resources/domestic-domain.LICENSE','Contents/Resources/AppIcon.icns','Contents/Resources/Pow.LICENSE','Contents/Resources/pow-lock.json']
-files += ['Contents/Info.plist'] + [str(p.relative_to(app)) for p in sorted((app/'Contents/Resources/Pow_Pow.bundle').rglob('*')) if p.is_file()]
+files += ['Contents/Resources/claude-safe.sh', 'Contents/Resources/QingzhouClaudeCore', 'Contents/Info.plist', 'Contents/Resources/install-helper.sh', 'Contents/Resources/recover-helper.sh', 'Contents/Resources/uninstall-helper.sh'] + [str(p.relative_to(app)) for p in sorted((app/'Contents/Resources/Pow_Pow.bundle').rglob('*')) if p.is_file()]
 source=pathlib.Path.cwd()
 revision=subprocess.run(['git','rev-parse','HEAD'],capture_output=True,text=True)
 provenance=json.loads((source/'source-provenance.json').read_text()) if (source/'source-provenance.json').is_file() else {}

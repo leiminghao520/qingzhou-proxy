@@ -8,11 +8,14 @@ public final class DisconnectProtectionFirewall {
         var tunnel:String?
         var expected:String?
         var token:String?
+        var tokenBoot:String?
         var rootBefore:String?
         var rootExpected:String?
         var yunshuAddresses:[String]?
         var strictEndpoint: ClaudeNetworkEndpoint?
         var policyVersion: Int?
+        var bypassVersion: Int?
+        var bypassExceptions: [ClaudeBypassException]?
     }
     private let directory:URL
     private let command:([String]) throws -> String
@@ -40,11 +43,42 @@ public final class DisconnectProtectionFirewall {
         } else if value.rootExpected != nil || !value.anchor.hasPrefix("com.apple/") {
             throw ProxyError("断线保护根规则恢复记录不完整")
         }
+        guard value.bypassVersion == nil || value.bypassVersion == 1 || value.bypassVersion == ClaudeBypassPolicy.version,
+              value.bypassExceptions == nil || value.bypassVersion != nil else { throw ProxyError("网络绕过恢复记录版本无效") }
         if let endpoint = value.strictEndpoint {
             guard value.policyVersion == nil || value.policyVersion == ClaudePFPolicy.version else { throw ProxyError("整机保护规则版本无效") }
-            _ = try ClaudePFPolicy.rules(endpoint: endpoint, tunnel: value.tunnel)
+            _ = try ClaudePFPolicy.rules(endpoint: endpoint, tunnel: value.tunnel, exceptions: value.bypassExceptions ?? [])
         } else { _=try DisconnectProtectionPolicy.rules(allowed:value.allowed,tunnel:value.tunnel) }
         lease=value
+    }
+    private func anchorPresent(_ anchor: String) throws -> Bool {
+        var parent = ""
+        for component in anchor.split(separator: "/").map(String.init) {
+            let arguments = parent.isEmpty ? ["-s", "Anchors"] : ["-a", parent, "-s", "Anchors"]
+            let output = try command(arguments)
+            guard !output.contains("pfctl:") else { throw ProxyError("防火墙锚点清单读取失败") }
+            let names = output.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            guard names.contains(component) || names.contains(parent + "/" + component) else { return false }
+            parent = parent.isEmpty ? component : parent + "/" + component
+        }
+        return true
+    }
+    private func ownedRules(_ anchor: String) throws -> String {
+        let output = try command(["-a", anchor, "-sr"])
+        if output.contains("pfctl:") {
+            let lines = output.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            guard lines == ["pfctl: DIOCGETRULES: Invalid argument"], try !anchorPresent(anchor) else {
+                throw ProxyError("防火墙规则读取失败，不能把诊断文字当成规则证明")
+            }
+            return ""
+        }
+        return output
+    }
+    private func ownedChildren(_ anchor: String) throws -> String {
+        guard try anchorPresent(anchor) else { return "" }
+        let output = try command(["-a", anchor, "-s", "Anchors"])
+        guard !output.contains("pfctl:") else { throw ProxyError("防火墙子锚点读取失败") }
+        return output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
     private func save() throws {if let lease {try SecureFile.write(JSONEncoder().encode(lease),to:record,durable:true)}}
     private static func normalizedRoot(_ text:String) -> String {
@@ -91,7 +125,23 @@ public final class DisconnectProtectionFirewall {
         if let expected=lease.rootExpected {
             guard Self.normalizedRoot(try command(["-sr"])) == expected else {throw ProxyError("断线保护根引用未生效，无法确认公网阻断")}
         }
-        guard try command(["-si"]).contains("Status: Enabled"),let expected=lease.expected,try command(["-a",lease.anchor,"-sr"])==expected else{throw ProxyError("断线保护规则已被外部修改或状态不明，保留记录并拒绝解除")}
+        guard try command(["-si"]).contains("Status: Enabled"),let expected=lease.expected,try ownedRules(lease.anchor)==expected else{throw ProxyError("断线保护规则已被外部修改或状态不明，保留记录并拒绝解除")}
+    }
+    // 仅写操作可恢复本应用空锚点；只读状态核验不会修改防火墙。
+    private func prepareOwnedMutation() throws {
+        try load()
+        guard let lease else { return }
+        try preflight()
+        let actual = try ownedRules(lease.anchor)
+        guard actual.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { try verify(); return }
+        guard let expected = lease.expected, !expected.isEmpty else { throw ProxyError("空锚点缺少自有规则证据，拒绝重载") }
+        if let rootExpected = lease.rootExpected {
+            let root = Self.normalizedRoot(try command(["-sr"]))
+            guard root == rootExpected || root == lease.rootBefore.map(Self.normalizedRoot) else { throw ProxyError("自有根引用已变化，不能重载空锚点") }
+        }
+        let children = try ownedChildren(lease.anchor)
+        guard children.isEmpty else { throw ProxyError("自有空锚点包含其他子锚点，不能重载") }
+        try apply(tunnel: lease.tunnel, first: false)
     }
     public func verifyClaudeSafety(endpoint: String) throws -> Bool {
         try load()
@@ -100,16 +150,21 @@ public final class DisconnectProtectionFirewall {
         return lease.policyVersion == ClaudePFPolicy.version && lease.strictEndpoint?.address == endpoint
             && (lease.yunshuAddresses ?? []).isEmpty
     }
-    public func verifyStrict(endpoint: ClaudeNetworkEndpoint) throws -> Bool {
+    public func verifyStrict(endpoint: ClaudeNetworkEndpoint, allowsBypasses: Bool = false) throws -> Bool {
         guard try verifyClaudeSafety(endpoint: endpoint.address) else { return false }
-        return lease?.strictEndpoint == endpoint
+        return lease?.strictEndpoint == endpoint && (allowsBypasses ? lease?.bypassVersion == ClaudeBypassPolicy.version : lease?.bypassVersion == nil)
     }
-    public func armStrict(endpoint: ClaudeNetworkEndpoint) throws {
-        _ = try ClaudePFPolicy.rules(endpoint: endpoint, tunnel: nil)
+    public func armStrict(endpoint: ClaudeNetworkEndpoint, exceptions: [ClaudeBypassException]? = nil) throws {
+        let normalized = try exceptions.map { try ClaudeBypassPolicy.normalized($0) }
+        _ = try ClaudePFPolicy.rules(endpoint: endpoint, tunnel: nil, exceptions: normalized ?? [])
         try preflight()
         if let current = lease {
-            try verify()
+            try prepareOwnedMutation()
             if current.strictEndpoint == endpoint, current.policyVersion == ClaudePFPolicy.version {
+                guard (current.bypassVersion != nil) == (normalized != nil) else { throw ProxyError("请先解除保护，再更换网络绕过模式") }
+                lease?.bypassVersion = normalized == nil ? nil : ClaudeBypassPolicy.version
+                lease?.bypassExceptions = normalized
+                try save()
                 try apply(tunnel: nil, first: false)
                 return
             }
@@ -117,6 +172,8 @@ public final class DisconnectProtectionFirewall {
                 throw ProxyError("请先明确解除保护，再更换固定出口")
             }
             // 迁移只收紧规则；失败也不恢复旧的云枢或私网例外。
+            lease?.bypassVersion = normalized == nil ? nil : ClaudeBypassPolicy.version
+            lease?.bypassExceptions = normalized
             lease?.strictEndpoint = endpoint
             lease?.policyVersion = nil
             lease?.yunshuAddresses = []
@@ -128,7 +185,7 @@ public final class DisconnectProtectionFirewall {
             let anchor = (corporate ? "" : "com.apple/") + "qingzhou-lock-" + UUID().uuidString.lowercased()
             lease = Lease(anchor: anchor, allowed: [endpoint.address + (endpoint.address.contains(":") ? "/128" : "/32")],
                 rootBefore: corporate ? root : nil, rootExpected: corporate ? Self.rootReference(anchor) + root : nil,
-                yunshuAddresses: [], strictEndpoint: endpoint, policyVersion: nil)
+                yunshuAddresses: [], strictEndpoint: endpoint, policyVersion: nil, bypassVersion: normalized == nil ? nil : ClaudeBypassPolicy.version, bypassExceptions: normalized)
             try save()
             try apply(tunnel: nil, first: true)
         }
@@ -137,20 +194,34 @@ public final class DisconnectProtectionFirewall {
     private func apply(tunnel:String?,first:Bool) throws {
         guard var next=lease else{return}
         let needsStateReset = first || (next.strictEndpoint != nil && next.policyVersion != ClaudePFPolicy.version)
-        let rules = try next.strictEndpoint.map { try ClaudePFPolicy.rules(endpoint: $0, tunnel: tunnel) }
+        let rules = try next.strictEndpoint.map { try ClaudePFPolicy.rules(endpoint: $0, tunnel: tunnel, exceptions: next.bypassExceptions ?? []) }
             ?? DisconnectProtectionPolicy.rules(allowed: next.allowed, tunnel: tunnel)
         try SecureFile.write(Data(rules.utf8),to:configuration,durable:true)
         _=try command(["-n","-a",next.anchor,"-f",configuration.path])
         next.tunnel=tunnel;lease=next;try save()
+        // 先建立自有根引用，避免向不存在且无引用的锚点写入后无法核验其生命周期。
+        try attachRootIfNeeded()
         _=try command(["-a",next.anchor,"-f",configuration.path])
-        let actual=try command(["-a",next.anchor,"-sr"])
-        guard !actual.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else{throw ProxyError("断线保护规则加载后为空，拒绝继续接管")}
+        var actual = try ownedRules(next.anchor)
+        // 接口重建可能令企业组件同时重载 PF，只在自有空锚点和完整根引用证据下有限重试。
+        for _ in 0..<2 where actual.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            try preflight()
+            if let rootExpected = next.rootExpected {
+                let root = Self.normalizedRoot(try command(["-sr"]))
+                guard root == rootExpected || root == next.rootBefore.map(Self.normalizedRoot) else { throw ProxyError("根引用变化，停止重载自有规则") }
+            }
+            let children = try ownedChildren(next.anchor)
+            guard children.isEmpty else { throw ProxyError("空锚点存在其他子项，拒绝重载") }
+            _ = try command(["-a", next.anchor, "-f", configuration.path])
+            actual = try ownedRules(next.anchor)
+        }
+        guard !actual.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ProxyError("断线保护规则重载后仍为空，拒绝继续接管") }
         lease?.expected=actual;try save()
         let enabled=try command(["-si"]).contains("Status: Enabled")
         if !enabled || (first && next.token == nil) {
             let output=try command(["-E"])
             guard let line=output.components(separatedBy:.newlines).first(where:{$0.contains("Token")}),let token=line.split(whereSeparator:{$0.isWhitespace || $0==":"}).last,UInt64(token).map({$0>0})==true else{throw ProxyError("断线保护未取得防火墙启用凭据，保留记录")}
-            lease?.token=String(token);try save()
+            lease?.token=String(token);lease?.tokenBoot=Self.bootIdentity();try save()
         }
         try attachRootIfNeeded()
         if needsStateReset {
@@ -184,29 +255,104 @@ public final class DisconnectProtectionFirewall {
         try save()
         try apply(tunnel:nil,first:true)
     }
-    public func attach(tunnel:String) throws {try load();guard lease != nil else{return};try verify();try apply(tunnel:tunnel,first:false)}
-    public func suspend() throws {try load();guard lease != nil else{return};try verify();if lease?.tunnel != nil {try apply(tunnel:nil,first:false)}}
-    public func restoreAfterRestart() throws {
+    public var bypassExceptionCount: Int { lease?.bypassExceptions?.count ?? 0 }
+    public var bypassMode: Bool { lease?.bypassVersion == ClaudeBypassPolicy.version }
+    public func updateBypassExceptions(_ exceptions: [ClaudeBypassException]) throws {
+        try load()
+        guard lease?.bypassVersion == ClaudeBypassPolicy.version else { throw ProxyError("网络绕过保护未启用") }
+        try prepareOwnedMutation()
+        let normalized = try ClaudeBypassPolicy.normalized(exceptions)
+        let removed = (lease?.bypassExceptions ?? []).filter { !ClaudeBypassPolicy.covers($0, with: normalized) }
+        lease?.bypassExceptions = normalized
+        try save()
+        do {
+            try apply(tunnel: lease?.tunnel, first: false)
+            // PF 已有状态可绕过新拒绝规则，撤销目标必须同步清理其两端连接状态。
+            for item in removed {
+                let any = item.destination.contains(":") ? "::/0" : "0.0.0.0/0"
+                _ = try command(["-k", any, "-k", item.destination])
+                _ = try command(["-k", item.destination])
+            }
+        } catch {
+            lease?.policyVersion = nil
+            try save()
+            throw error
+        }
+    }
+    public func stageVPNResolvers(_ exceptions: [ClaudeBypassException]) throws {
+        try load()
+        guard let current = lease, current.strictEndpoint != nil, current.bypassVersion != nil,
+              exceptions.allSatisfy({ $0.dnsOnly && $0.vpnControl == true }) else { throw ProxyError("云枢引导 DNS 未获得绕过模式授权") }
+        try prepareOwnedMutation()
+        lease?.bypassVersion = ClaudeBypassPolicy.version
+        try updateBypassExceptions(vpnControlExceptions + exceptions)
+    }
+    public var vpnControlExceptions: [ClaudeBypassException] { (lease?.bypassExceptions ?? []).filter { $0.vpnControl == true } }
+    public func revokeBypassExceptions(preservingVPN: Bool = true) throws {
+        try load()
+        if lease?.bypassVersion != nil {
+            // 旧记录仅用于安全清理，不能直接作为新协议的有效证明。
+            lease?.bypassVersion = ClaudeBypassPolicy.version
+            try updateBypassExceptions(preservingVPN ? vpnControlExceptions : [])
+        }
+    }
+    public func attach(tunnel:String) throws {try load();guard lease != nil else{return};try prepareOwnedMutation();try apply(tunnel:tunnel,first:false)}
+    public func suspend() throws {try load();guard lease != nil else{return};try prepareOwnedMutation();if lease?.tunnel != nil {try apply(tunnel:nil,first:false)}}
+    public func restoreAfterRestart(validateVPN: (ClaudeBypassException) -> Bool = { _ in false }) throws {
         try load();guard let lease else{return}
         try preflight()
-        let current=try command(["-a",lease.anchor,"-sr"])
+        self.lease?.bypassExceptions = lease.bypassVersion == nil ? nil : (lease.bypassExceptions ?? []).filter { $0.vpnControl == true && validateVPN($0) }
+        try save()
+        let current=try ownedRules(lease.anchor)
         // 重启后规则可为空；存在不同规则时不能认领或覆盖。
         guard current.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty || current==lease.expected else{throw ProxyError("断线保护锚点已有外部修改，未覆盖")}
-        try apply(tunnel:nil,first:current.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty)
+        try apply(tunnel:nil,first:current.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty || lease.bypassVersion != nil)
     }
+    private static func bootIdentity() -> String? {
+        try? NetworkInspection.command("/usr/sbin/sysctl", ["-n", "kern.boottime"]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    public private(set) var releaseWarning: String?
     public func release() throws {
         try load();guard let lease else{return}
         try preflight()
-        let current=try command(["-a",lease.anchor,"-sr"])
+        let current=try ownedRules(lease.anchor)
         let detached=try lease.rootBefore.map{Self.normalizedRoot(try command(["-sr"])) == Self.normalizedRoot($0)} ?? false
         if !current.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty {
             if detached {guard current == lease.expected else{throw ProxyError("未挂接的保护锚点已有外部修改，未清理")}}
-            else {try verify()}
+            else {guard current == lease.expected else {throw ProxyError("保护锚点已有外部修改，未清理")}}
         }
+        guard try ownedChildren(lease.anchor).isEmpty else { throw ProxyError("自有保护锚点存在未知子项，未清理") }
         if let before=lease.rootBefore,!detached {try loadRoot(Self.normalizedRoot(before))}
-        _=try command(["-a",lease.anchor,"-F","all"])
-        guard try command(["-a",lease.anchor,"-sr"]).trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else{throw ProxyError("断线保护清理核验失败，记录已保留")}
-        if let token=lease.token {guard UInt64(token).map({$0>0})==true else{throw ProxyError("防火墙启用凭据无效")};_=try command(["-X",token])}
+        _=try command(["-a",lease.anchor,"-F","rules"])
+        guard try ownedRules(lease.anchor).trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else{throw ProxyError("断线保护清理核验失败，记录已保留")}
+        releaseWarning = nil
+        if let token = lease.token {
+            // 旧版本或跨启动周期的凭据不能认领；规则释放不依赖凭据仍有效。
+            do {
+                guard UInt64(token).map({ $0 > 0 }) == true else { throw ProxyError("防火墙启用凭据无效") }
+                let references = try command(["-s", "References"])
+                let pattern = try NSRegularExpression(pattern: "(?i)\\btoken\\s*:\\s*([0-9]+)\\b")
+                let range = NSRange(references.startIndex..., in: references)
+                let tokens = pattern.matches(in: references, range: range).compactMap { match -> String? in
+                    guard let range = Range(match.range(at: 1), in: references) else { return nil }
+                    return String(references[range])
+                }
+                guard references.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !tokens.isEmpty else {
+                    throw ProxyError("PF 引用格式无法确认，未释放启用引用")
+                }
+                if tokens.contains(token) {
+                    guard let boot = lease.tokenBoot, boot == Self.bootIdentity() else {
+                        throw ProxyError("防火墙启用引用缺少当前启动周期证据，未释放引用")
+                    }
+                    _ = try command(["-X", token])
+                }
+            } catch { releaseWarning = "自有阻断已清理；PF 启用引用未确认释放：" + error.localizedDescription }
+        }
+        // 私有审计记录不能作为下次启动重新施加保护的依据。
+        try SecureFile.write(JSONEncoder().encode(lease), to: directory.appendingPathComponent("disconnect-protection-released.json"), durable: true)
+        if let releaseWarning {
+            try SecureFile.write(Data(releaseWarning.utf8), to: directory.appendingPathComponent("disconnect-protection-release-warning.txt"), durable: true)
+        }
         try FileManager.default.removeItem(at:record)
         self.lease=nil
         try? FileManager.default.removeItem(at:configuration)

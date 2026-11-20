@@ -213,8 +213,17 @@ private struct SettingsContent:View,Equatable {
             }
 
             Section {
-                Button("恢复原始系统网络与代理设置") { Task { await model.recover() } }
-                    .disabled(model.loadingFailed || model.recovering)
+                DisclosureGroup("旧版整机保护") {
+                    ClaudeLegacySafetySettings(model: model)
+                }
+            } header: {
+                Label("兼容旧版功能", systemImage: "lock.shield")
+            }
+
+            Section {
+                Button("恢复网络") { Task { await model.recover() } }
+                    .help("停止汐航并解除断网保护，恢复普通网络；Claude 将允许直连。")
+                    .disabled(model.recovering || model.claudeSafetyChanging)
             } header: {
                 HStack(spacing:4) {Label("应急恢复",systemImage:"arrow.counterclockwise");HelpTip(text:"关闭窗口后菜单栏仍常驻运行。正常退出时将自动清理系统代理。")}
             }

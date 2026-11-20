@@ -43,6 +43,7 @@ public final class ScopedDNSForwarder {
     private var planGeneration:UInt64=0
     private var suspended=false
     private let protectSnapshotAnswers:((CapturePlan,UInt64,String,[String],DNSResolverScope,Date)throws->Void)?
+    private let protectSnapshotResponse:((CapturePlan,UInt64,String,[String],DNSResolverScope,Date,Data)throws->Void)?
     private let protectAnswers:((String,[String],DNSResolverScope,Date)throws->Void)?
     private let transport:((Data,String,String)->Data?)?
     private let work=DNSWorkQueue()
@@ -59,8 +60,8 @@ public final class ScopedDNSForwarder {
     private let lock=NSLock()
     private var stopped=false
     private var started=false
-    public init(plan:CapturePlan,transport:((Data,String,String)->Data?)?=nil,protectAnswers:((String,[String],DNSResolverScope,Date)throws->Void)?=nil,protectSnapshotAnswers:((CapturePlan,UInt64,String,[String],DNSResolverScope,Date)throws->Void)?=nil) throws {
-        self.plan=plan;self.transport=transport;self.protectAnswers=protectAnswers;self.protectSnapshotAnswers=protectSnapshotAnswers
+    public init(plan:CapturePlan,transport:((Data,String,String)->Data?)?=nil,protectAnswers:((String,[String],DNSResolverScope,Date)throws->Void)?=nil,protectSnapshotAnswers:((CapturePlan,UInt64,String,[String],DNSResolverScope,Date)throws->Void)?=nil,protectSnapshotResponse:((CapturePlan,UInt64,String,[String],DNSResolverScope,Date,Data)throws->Void)?=nil) throws {
+        self.plan=plan;self.transport=transport;self.protectAnswers=protectAnswers;self.protectSnapshotAnswers=protectSnapshotAnswers;self.protectSnapshotResponse=protectSnapshotResponse
         let fd=socket(AF_INET,SOCK_DGRAM,0);guard fd>=0 else{throw ProxyError("DNS 转发监听创建失败")}
         var address=sockaddr_in();address.sin_len=UInt8(MemoryLayout<sockaddr_in>.size);address.sin_family=sa_family_t(AF_INET);address.sin_addr.s_addr=inet_addr("127.0.0.1")
         let result=withUnsafePointer(to:&address){$0.withMemoryRebound(to:sockaddr.self,capacity:1){Darwin.bind(fd,$0,socklen_t(MemoryLayout<sockaddr_in>.size))}}
@@ -148,6 +149,7 @@ public final class ScopedDNSForwarder {
             do {
                 let addresses=try DNSPacket.addresses(response)
                 if plan.protects(name) {
+                    try protectSnapshotResponse?(plan,generation,name,addresses,resolver,deadline,response)
                     try protectSnapshotAnswers?(plan,generation,name,addresses,resolver,deadline)
                     try protectAnswers?(name,addresses,resolver,deadline)
                 }

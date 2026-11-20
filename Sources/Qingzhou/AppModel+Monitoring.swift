@@ -6,7 +6,7 @@ import QingzhouKit
 
 extension AppModel {
     func startTelemetry(_ client:CoreAPIClient,profileID:UUID?) {
-        stopTelemetry();history.begin();healthFailures=HealthFailureCounter();exitHealth=ExitHealthTracker();lastAutomaticRefresh = .distantPast;automaticRefreshRequested=true;rateHistory=[];trafficByNode=[:];trafficByTarget=[:];observedConnections=[:];fallbackStates=[:];failedHealthCycles=0;api=client;let token=UUID();epoch=token;monitor=RuntimeMonitorState();monitor.active=true
+        stopTelemetry();history.begin();healthFailures=HealthFailureCounter();exitHealth=ExitHealthTracker();lastAutomaticRefresh = .distantPast;rateHistory=[];trafficByNode=[:];trafficByTarget=[:];observedConnections=[:];fallbackStates=[:];failedHealthCycles=0;api=client;let token=UUID();epoch=token;monitor=RuntimeMonitorState();monitor.active=true
         healthTask=Task{[weak self] in while !Task.isCancelled {
             if let self,self.epoch==token,!self.locked,!self.healthChecking {self.scheduleHealthRefresh(delay:0,reason:"周期检查")}
             try? await Task.sleep(nanoseconds:self?.usesAutomaticExit()==true ? 15_000_000_000:60_000_000_000)
@@ -135,7 +135,7 @@ extension AppModel {
             let healthy=status.running && status.phase != "networkProtectionFailed"
             recordEvent(.network,healthy ? .succeeded:.failed,healthy ? .reconnected:.helperFailed)
             networkReconnecting=false;failedHealthCycles=0;healthFailures=HealthFailureCounter()
-            if healthy {automaticRefreshRequested=true;networkReleased=false;log("网络自动重连完成，正在复查连通性");scheduleHealthRefresh(delay:0,reason:"网络重连")}
+            if healthy {networkReleased=false;log("网络自动重连完成，正在复查连通性");scheduleHealthRefresh(delay:0,reason:"网络重连")}
         }
     }
 

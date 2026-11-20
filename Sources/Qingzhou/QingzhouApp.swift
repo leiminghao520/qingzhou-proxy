@@ -74,7 +74,6 @@ struct StableMenuContent: View {
     @ObservedObject var presentation: MenuPresentation
     @AppStorage("interfaceMode") private var interfaceMode = InterfaceMode.simple
     private var model: AppModel { presentation.model }
-    @State private var confirmsClaudeRelease = false
     var body: some View {
             Text("\(model.connectionSummary) · \(model.state.mode.label)")
             Text(model.actualName + " · " + model.effectiveState.captureMode.label)
@@ -85,20 +84,8 @@ struct StableMenuContent: View {
             }
             if let title=model.issueTitle {Text(title)}
             Text(presentation.healthLabel)
-            Toggle("Claude 安全模式", isOn: Binding(
-                get: { model.claudeSafetyProxyEnabled },
-                set: { enabled in Task { await model.setClaudeSafetyEnabled(enabled) } }
-            )).disabled(model.claudeSafetyControlDisabled)
-            Text(model.claudeSafetyStatus)
-            if model.claudeSafetyEnabled {
-                Button("解除保护并恢复直连…") { confirmsClaudeRelease = true }
-                    .disabled(model.claudeSafetyControlDisabled)
-                    .alert("解除保护后 Claude 也将允许直连", isPresented: $confirmsClaudeRelease) {
-                        Button("取消", role: .cancel) {}
-                        Button("解除保护", role: .destructive) {
-                            Task { await model.setClaudeSafetyEnabled(false, releaseProtection: true) }
-                        }
-                    }
+            if model.claudeSafetyRetainsProtection {
+                ClaudeSafetyControl(model: model)
             }
             Toggle("完整接管", isOn: Binding(
                 get: { (model.captureSwitchTarget ?? model.effectiveState.captureMode) == .compatible },
@@ -135,7 +122,8 @@ struct StableMenuContent: View {
                 }
                 .disabled(model.locked || model.state.nodes.isEmpty)
                 Button("恢复网络") { Task { await model.recover() } }
-                    .disabled(model.loadingFailed || model.recovering)
+                .help("停止汐航并解除断网保护，恢复普通网络；Claude 将允许直连。")
+                    .disabled(model.recovering || model.claudeSafetyChanging)
                 Menu("更多") { advancedMenuActions }
             } else {
                 advancedMenuActions
@@ -199,8 +187,9 @@ struct StableMenuContent: View {
             .disabled(model.locked)
 
         Button("开发工具代理助手") {model.office.developerRequested=true}
-        Button("恢复原代理") { Task { await model.recover() } }
-            .disabled(model.loadingFailed || model.recovering)
+        Button("恢复网络") { Task { await model.recover() } }
+        .help("停止汐航并解除断网保护，恢复普通网络；Claude 将允许直连。")
+            .disabled(model.recovering || model.claudeSafetyChanging)
     }
 }
 

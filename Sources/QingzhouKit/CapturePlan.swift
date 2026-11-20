@@ -117,6 +117,9 @@ public struct CapturePlan:Codable,Equatable,Sendable {
     public var userDomainSuffixes:[String]?
     public var trustedCorporateDNS:[TrustedCorporateDNS]?
     public var pinnedDomainRoutes:[ProtectedRoute]?
+    public var allowsOriginalDefaultDNS: Bool?
+    public var yunshuControlDomains: [String]?
+    public var requiresScopedDNSDomains: [String]?
     public var summary:[String] {protectedRoutes.map{$0.destination+" → "+$0.interface}+domains.map{$0+" → 原作用域 DNS"}+(trustedCorporateDNS ?? []).map {entry in
         let matched=entry.domains.allSatisfy{!trustedResolvers(for:$0).isEmpty}
         return entry.name+"："+(matched ? "公司网络 DNS 已匹配":"公司网络 DNS 未匹配，服务或 DNS 变化后请重新确认")
@@ -195,6 +198,12 @@ public struct CapturePlan:Codable,Equatable,Sendable {
             } else {plan.protectedRoutes.append(route)}
         }
         plan.protectedRoutes=try effectiveRoutes(plan.protectedRoutes,resolvers:snapshot.resolvers)
+        if state.usesClaudeBypasses {
+            plan.allowsOriginalDefaultDNS = true
+            plan.domains = state.bypassDomains
+            plan.exactDomains = state.bypassExactDomains
+            plan.userDomainSuffixes = state.bypassDomains
+        }
         return plan
     }
     public func protects(_ domain:String)->Bool {
@@ -204,7 +213,21 @@ public struct CapturePlan:Codable,Equatable,Sendable {
     public func originalRoute(for address:String)->ProtectedRoute? {
         snapshot.routes.filter{$0.scope==nil && RuleEvaluator.matches(RoutingRule(kind:.cidr,value:$0.destination,action:.direct),host:address,ip:address)==true}.max{(Int($0.destination.split(separator:"/").last ?? "0") ?? 0)<(Int($1.destination.split(separator:"/").last ?? "0") ?? 0)}
     }
+    public func originalPhysicalRoute(for address: String) throws -> ProtectedRoute {
+        let candidates = snapshot.routes.filter { $0.interface == snapshot.primaryInterface &&
+            RuleEvaluator.matches(RoutingRule(kind: .cidr, value: $0.destination, action: .direct), host: address, ip: address) == true }
+        guard !Self.isVPN(snapshot.primaryInterface),
+              let longest = candidates.compactMap({ IPPrefix($0.destination)?.bits }).max(),
+              let route = candidates.first(where: { IPPrefix($0.destination)?.bits == longest }) else { throw CorporateDNSRouteError.unavailable }
+        guard candidates.filter({ IPPrefix($0.destination)?.bits == longest }).allSatisfy({ $0.gateway == route.gateway }) else { throw CorporateDNSRouteError.conflict }
+        return route
+    }
     public func domainRoute(address:String,resolver:DNSResolverScope,host:String?=nil) throws -> ProtectedRoute {
+        if let host, (yunshuControlDomains ?? []).contains(where: { host == $0 || host.hasSuffix("." + $0) }) {
+            try YunshuConnectionPolicy.validate(ClaudeNetworkEndpoint(address: address, port: 443, transport: .tcp))
+            let route = try originalPhysicalRoute(for: address)
+            return ProtectedRoute(destination: address + (address.contains(":") ? "/128" : "/32"), gateway: route.gateway, interface: route.interface, source: "用户网络绕过")
+        }
         let loopback=["127.0.0.0/8","::1/128"].contains{RuleEvaluator.matches(RoutingRule(kind:.cidr,value:$0,action:.direct),host:address,ip:address)==true}
         func matches(_ route:ProtectedRoute)->Bool {RuleEvaluator.matches(RoutingRule(kind:.cidr,value:route.destination,action:.direct),host:address,ip:address)==true}
         // 指定出口优先；其余答案按原系统最长前缀选择，DNS 查询接口不决定业务出口。
@@ -248,6 +271,11 @@ public struct CapturePlan:Codable,Equatable,Sendable {
     }
     public func selectResolvers(for domain:String) throws -> [DNSResolverScope] {
         let name=domain.lowercased().trimmingCharacters(in:CharacterSet(charactersIn:"."))
+        if (yunshuControlDomains ?? []).contains(where: { name == $0 || name.hasSuffix("." + $0) }) {
+            let primary = snapshot.resolvers.filter { $0.interface == snapshot.primaryInterface && $0.defaultResolver && !Self.isVPN($0.interface) }
+            guard let first = primary.first, primary.allSatisfy({ $0.servers == first.servers }) else { throw CorporateDNSSelectionError.unavailable }
+            return [first]
+        }
         func length(_ resolver:DNSResolverScope)->Int {
             resolver.protectedDomains.filter{name==$0 || name.hasSuffix("."+$0)}.map(\.count).max() ?? 0
         }
@@ -276,6 +304,14 @@ public struct CapturePlan:Codable,Equatable,Sendable {
             }
             // 无明确域名作用域时，只允许唯一企业出口；不能按优先级猜测其他 VPN。
             let corporate=snapshot.resolvers.filter{Self.isVPN($0.interface) && !$0.servers.isEmpty}
+            if corporate.isEmpty && (requiresScopedDNSDomains ?? []).contains(where: { name == $0 || name.hasSuffix("." + $0) }) {
+                throw CorporateDNSSelectionError.unavailable
+            }
+            if corporate.isEmpty && allowsOriginalDefaultDNS == true {
+                let primary = snapshot.resolvers.filter { $0.interface == snapshot.primaryInterface && $0.defaultResolver }
+                guard let first = primary.first, primary.allSatisfy({ $0.servers == first.servers }) else { throw CorporateDNSSelectionError.unavailable }
+                return [first]
+            }
             guard let first=corporate.first else {throw CorporateDNSSelectionError.unavailable}
             guard corporate.allSatisfy({$0.interface==first.interface && $0.servers==first.servers}) else {throw CorporateDNSSelectionError.ambiguous}
             return [first]

@@ -5,7 +5,12 @@ import QingzhouKit
 // 此夹具链接正式 NetworkMonitor.swift，只替换管理员服务的外部输入和写操作。
 struct OwnedRoute { var destination: String; var gateway: String; var interface: String; var ipv6: Bool = false; var scope: String? = nil }
 struct Journal { var allDNSServices:[DNSServiceRecord] {[DNSServiceRecord(key:dnsKey,expected:expectedDNS,original:nil)]}; var captureRoutes:[String]?=nil; var address4="100.64.1.1/30"; var address6="fd71:717a::1/126"; var expectedDNS: Data; var dnsKey = "fixture"; var routes: [OwnedRoute]; var preservedRoutes: [ProtectedRoute]? = []; var interface: String? = "utun42" }
+final class MonitorBypassFirewall {
+    var revocations = 0
+    func revokeBypassExceptions() throws { revocations += 1 }
+}
 final class Service {
+    let disconnectFirewall = MonitorBypassFirewall()
     var routeBackend:RouteBackend=LegacyRouteBackend(command:{_,_,_ in throw ProxyError("夹具禁止真实命令")})
     func checkRouteOwner() throws {}
     func measured<T>(_ name:String,_ body:() throws -> T) rethrows -> T {try body()}
@@ -105,6 +110,23 @@ final class Service {
             service.capturePlan = try CapturePlan.make(snapshot: service.currentSnapshot(), extraCIDRs: [], extraDomains: [])
             return service
         }
+        let bypassStable = try fixture()
+        bypassStable.activeRequest?.state?.claudeSafetyMode = true
+        bypassStable.activeRequest?.state?.claudeAllowsBypasses = true
+        bypassStable.checkNetworkChange()
+        check(bypassStable.disconnectFirewall.revocations == 0, "无网络变化时保留已核验绕过")
+        let bypassChanged = try fixture()
+        bypassChanged.activeRequest?.state?.claudeSafetyMode = true
+        bypassChanged.activeRequest?.state?.claudeAllowsBypasses = true
+        bypassChanged.networkSnapshotRead = { sample in NetworkSnapshot(primaryInterface: "en1", routes: NetworkSnapshot.parseRoutes(sample.table), resolvers: [resolver]) }
+        bypassChanged.checkNetworkChange()
+        check(bypassChanged.disconnectFirewall.revocations == 1, "网络变化稳定等待之前先撤销旧例外")
+        let bypassUnknown = try fixture()
+        bypassUnknown.activeRequest?.state?.claudeSafetyMode = true
+        bypassUnknown.activeRequest?.state?.claudeAllowsBypasses = true
+        bypassUnknown.networkSnapshotRead = { _ in throw NetworkEnvironmentNotReady("注入快照不可读") }
+        bypassUnknown.checkNetworkChange()
+        check(bypassUnknown.stops == 1, "快照不可核验时立即进入收紧后的串行重建")
         let pinned=try fixture()
         var pinState=AppState()
         try pinState.setBypasses([NetworkBypass(kind:.cidr,value:"203.0.113.9",exit:.pinned,serviceID:"isolated",gateway:"192.0.2.1")])

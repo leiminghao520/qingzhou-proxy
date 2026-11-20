@@ -28,7 +28,8 @@ public enum DisconnectProtectionPolicy {
         }
         guard publicEndpoint(node.server) else {throw ProxyError("断线保护节点需要固定公网 IP；请选择 IP 节点，域名节点和私网转发节点不支持")}
         try ConfigBuilder.validate(RoutingRule(kind:.cidr,value:node.server,action:.proxy))
-        guard state.pinnedBypasses.isEmpty else {throw ProxyError("断线保护暂不能与指定网卡绕过同时开启")}
+        if state.usesClaudeBypasses { try ClaudeBypassPolicy.validate(state) }
+        guard state.usesClaudeBypasses || state.pinnedBypasses.isEmpty else {throw ProxyError("断线保护暂不能与指定网卡绕过同时开启")}
     }
     // 运行时仅保留固定节点，避免自动测速或控制接口切换到其他出口；用户原配置不变。
     public static func runtime(_ state:AppState) throws -> AppState {

@@ -9,9 +9,15 @@ import QingzhouKit
     var failPreflight = false
     var failStart = false
     var failRelease = false
+    var failRecoveryAcknowledgment = false
+    var allowRescue = false
+    var failRescueAcknowledgment = false
+    var supportsRecovery = true
     var supportsSafety = true
     var policyVersion: Int? = ClaudePFPolicy.version
     var strictProof = true
+    var bypassVersion: Int? = ClaudeBypassPolicy.version
+    var bypassMode = false
     var helperBusy = false
     var busyReleaseAttempts = 0
     var events: [String] = []
@@ -19,10 +25,11 @@ import QingzhouKit
     var pausePreflight = false
 
     func request(_ request: TunRequest) async throws -> TunReply {
-        if request.operation == "releaseDisconnectProtection", busyReleaseAttempts > 0 {
+        if ["releaseDisconnectProtection", "restoreNormalNetwork"].contains(request.operation), busyReleaseAttempts > 0 {
             busyReleaseAttempts -= 1
             throw HelperRequestBusy()
         }
+        if request.operation == "acknowledgeNormalRecovery", failRecoveryAcknowledgment { throw ProxyError("配置恢复确认响应丢失") }
         if helperBusy { throw HelperRequestBusy() }
         if unavailable { throw ProxyError("模拟辅助服务失联") }
         if request.operation == "checkDisconnectProtection" {
@@ -30,15 +37,20 @@ import QingzhouKit
             if pausePreflight { await withCheckedContinuation { gate = $0 } }
             if failPreflight { throw ProxyError("模拟企业防火墙不兼容") }
         }
-        if request.operation == "releaseDisconnectProtection" {
+        if ["releaseDisconnectProtection", "restoreNormalNetwork"].contains(request.operation) {
             events.append("release")
             if failRelease { throw ProxyError("模拟解除保护失败") }
             armed = false
+            running = false
         }
         var reply = TunReply(ok: true, message: "隔离辅助服务", running: running)
+        reply.supportsNormalNetworkRecovery = supportsRecovery
+        reply.normalNetworkRecoveryPhase = request.operation == "restoreNormalNetwork" ? "normalRecoveryCompleted" : nil
         reply.supportsDisconnectProtection = true
         reply.supportsClaudeSafetyMode = supportsSafety
         reply.claudePFPolicyVersion = policyVersion
+        reply.claudeBypassPolicyVersion = bypassVersion
+        reply.claudeBypassMode = bypassMode
         reply.disconnectProtectionArmed = armed
         if request.claudeSafetyEndpoint != nil { reply.claudeSafetyProtectionVerified = armed && strictProof }
         return reply
@@ -51,12 +63,20 @@ import QingzhouKit
             try! credentials.set(Data(repeating: 7, count: 32).base64EncodedString(), for: "qingzhou.profile-history.key.v1")
             return credentials
         }
+        dependencies.normalRecoveryTool = { acknowledge in
+            guard self.allowRescue else { throw ProxyError("模拟管理员恢复不可用") }
+            self.events.append(acknowledge ? "rescue-acknowledge" : "rescue")
+            if acknowledge && self.failRescueAcknowledgment { throw ProxyError("模拟管理员确认失败") }
+            self.armed = false
+            self.running = false
+        }
         dependencies.safetyMonitoringEnabled = false
         dependencies.safetyHelperRequest = { try await self.request($0) }
         dependencies.safetyStop = { self.events.append("stop"); self.running = false }
         dependencies.safetyStart = { state in
             self.events.append(state.protectsDisconnect ? "start-protected" : "start-original")
             self.armed = state.protectsDisconnect
+            self.bypassMode = state.usesClaudeBypasses
             if self.failStart { throw ProxyError("模拟代理连接失败") }
             self.running = true
         }
@@ -104,6 +124,35 @@ import QingzhouKit
         let menu = MenuPresentation(model: model)
 
         switch scenario {
+        case "bypass-old-helper":
+            fixture.bypassVersion = nil
+            model.setClaudeBypassesAllowed(true)
+            model.connection = .connected
+            fixture.running = true
+            await model.setClaudeSafetyEnabled(true)
+            check(!model.claudeSafetyEnabled, "旧服务不能启动绕过兼容会话")
+            check(fixture.events.isEmpty && fixture.running, "能力检查失败不停止原连接")
+            check(model.errorMessage?.contains("更新辅助服务") == true, "指出需要更新服务")
+        case "bypass-happy":
+            check(model.claudeSafetyPreferences.allowNetworkBypasses != true, "新选项默认关闭")
+            model.setClaudeBypassesAllowed(true)
+            check(try ClaudeSafetyStore.load(from: model.claudeSafetyRecordURL).allowNetworkBypasses == true, "偏好独立持久化")
+            await model.setClaudeSafetyEnabled(true)
+            check(model.state.usesClaudeBypasses && fixture.bypassMode, "新会话显式启用绕过")
+            model.setClaudeBypassesAllowed(false)
+            check(model.claudeSafetyPreferences.allowNetworkBypasses == true, "活动会话不能更换保护范围")
+            _ = await model.refreshClaudeSafetyStatus()
+            check(model.claudeSafetyProtection == true, "状态要求兼容策略证明")
+            fixture.bypassMode = false
+            _ = await model.refreshClaudeSafetyStatus()
+            check(model.claudeSafetyProtection == nil, "模式不匹配不得确认保护")
+            fixture.bypassMode = true
+            await model.setClaudeSafetyEnabled(false)
+            check(model.claudeSafetyEnabled && model.claudeSafetyPreferences.proxyPaused == true, "暂停保留保护会话")
+            await model.setClaudeSafetyEnabled(true)
+            check(model.state.usesClaudeBypasses, "暂停后重连保留用户选择")
+            await model.setClaudeSafetyEnabled(false, releaseProtection: true)
+            check(!model.claudeSafetyEnabled && !model.state.usesClaudeBypasses, "明确解除后恢复原配置")
         case "filter-preflight":
             model.connection = .connected
             fixture.running = true
@@ -182,7 +231,7 @@ import QingzhouKit
             await model.setClaudeSafetyEnabled(false, releaseProtection: true)
             check(fixture.busyReleaseAttempts == 0, "关闭等待未完成的只读核验，不因通道忙留下阻断")
             check(!model.claudeSafetyEnabled && !fixture.armed, "一键关闭并解除防火墙")
-            check(model.connection == .connected && fixture.events.last == "start-original", "恢复原先已连接状态")
+            check(model.connection == .disconnected && !fixture.running && !model.state.autoConnect, "恢复后保持停止并关闭自动连接")
             let encoder = JSONEncoder()
             encoder.outputFormatting = .sortedKeys
             check(try encoder.encode(ClaudeSafetyNetworkSettings(model.state)) == encoder.encode(original), "逐项恢复原网络设置")
@@ -235,8 +284,52 @@ import QingzhouKit
             await model.setClaudeSafetyEnabled(false, releaseProtection: true)
             check(model.claudeSafetyEnabled, "状态不可读时不能宣称解除成功")
             fixture.unavailable = false
+            fixture.supportsRecovery = false
             await model.setClaudeSafetyEnabled(false, releaseProtection: true)
-            check(!model.claudeSafetyEnabled && model.connection == .disconnected, "恢复原先未连接状态")
+            check(model.claudeSafetyEnabled && fixture.armed, "旧维护能力不能冒充独立恢复")
+            fixture.supportsRecovery = true
+            fixture.failRecoveryAcknowledgment = true
+            await model.setClaudeSafetyEnabled(false, releaseProtection: true)
+            check(!fixture.armed && !fixture.running && !model.state.autoConnect, "确认失败仍保持普通网络和停止状态")
+            check(!model.claudeSafetyEnabled, "配置已提交后确认失败不重新进入保护")
+            fixture.failRecoveryAcknowledgment = false
+            try await model.finishNormalNetworkRecovery()
+            check(!model.claudeSafetyEnabled && model.connection == .disconnected, "配置确认可安全重试")
+
+        case "normal-recovery":
+            await model.setClaudeSafetyEnabled(true)
+            check(fixture.armed, "准备已启用保护的故障场景")
+            model.runtimeState = model.state
+            await model.recover()
+            while model.recovering { await Task.yield() }
+            check(!fixture.armed && !fixture.running, "恢复网络必须停止代理并解除公网阻断")
+            check(!model.claudeSafetyEnabled && !model.state.autoConnect, "恢复网络清除保护会话并关闭自动连接")
+            check(model.connection == .disconnected && !model.recoveryPending, "恢复核验通过后才完成")
+            check(!fixture.events.contains("start-original"), "恢复网络不能启动另一条代理连接")
+            check(model.runtimeState == nil && model.effectiveState.captureMode == .systemProxy, "恢复后清除旧运行配置，不再显示旧保护接管")
+
+        case "normal-recovery-fallback":
+            await model.setClaudeSafetyEnabled(true)
+            fixture.unavailable = true
+            fixture.allowRescue = true
+            fixture.failRescueAcknowledgment = true
+            await model.recover()
+            while model.recovering { await Task.yield() }
+            check(!fixture.armed && !fixture.running, "辅助服务失联仍可通过独立恢复器解除阻断")
+            check(!model.claudeSafetyEnabled && !model.state.autoConnect, "独立恢复确认失败也不能再次接管网络")
+            check(model.recoveryPending, "确认失败保留待处理状态")
+            fixture.failRescueAcknowledgment = false
+            await model.recover()
+            while model.recovering { await Task.yield() }
+            check(!model.recoveryPending && model.connection == .disconnected, "独立恢复与确认可重试")
+            check(fixture.events.filter { $0 == "rescue" }.count == 2 && fixture.events.contains("rescue-acknowledge"), "失联恢复不依赖原通道")
+            check(model.helperStatus.contains("停用"), "保留辅助服务停用的实际结果")
+
+        case "normal-recovery-loading-failed":
+            model.loadingFailed = true
+            await model.recover()
+            while model.recovering { await Task.yield() }
+            check(model.connection == .disconnected && !model.recoveryPending, "配置界面故障不能阻塞网络清理入口")
 
         case "picker":
             var state = model.state
@@ -284,6 +377,11 @@ import QingzhouKit
             rejects({ try model.persist(model.state) }, "损坏记录时禁止修改网络配置")
             await model.connect()
             check(fixture.events.isEmpty && model.connection == .disconnected, "损坏记录时不建立普通连接")
+            await model.recover()
+            while model.recovering { await Task.yield() }
+            check(!model.claudeSafetyLoadFailed && !model.claudeSafetyEnabled, "损坏保护记录不阻塞明确恢复网络")
+            let files = try FileManager.default.contentsOfDirectory(atPath: model.directory.path)
+            check(files.contains { $0.hasPrefix("claude-safety.corrupt-") }, "损坏保护记录在清理前归档")
 
         default: fatalError("未知隔离场景")
         }

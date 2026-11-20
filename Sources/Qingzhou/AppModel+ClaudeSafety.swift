@@ -19,7 +19,7 @@ extension AppModel {
             return "保护未确认 · 核验证据已过期"
         }
         if connection == .connected && claudeSafetyHelperRunning && !coreFailed && !networkWaiting && !wakeRecovery.active {
-            return connectivityHealth == .healthy ? "保护已生效 · 整机仅经固定 VPS 联网" : "整机屏障已核验 · 代理链路待确认"
+            return connectivityHealth == .healthy ? (state.usesClaudeBypasses ? "公网固定代理，已允许网络绕过（\(state.enabledBypasses.count) 项）" : "保护已生效 · 整机仅经固定 VPS 联网") : "整机屏障已核验 · 代理链路待确认"
         }
         return claudeSafetyPreferences.proxyPaused == true ? "代理已关闭，整机保护保留" : "代理断线，已阻断公网"
     }
@@ -33,11 +33,12 @@ extension AppModel {
     func receiveClaudeSafetyStatus(operation: String, reply: TunReply) {
         if operation == "status" {
             let supported = reply.supportsDisconnectProtection == true && (!claudeSafetyEnabled || reply.supportsClaudeSafetyMode == true && reply.claudePFPolicyVersion == ClaudePFPolicy.version)
-            let strictVerified = !claudeSafetyEnabled || reply.disconnectProtectionArmed == false || reply.claudeSafetyProtectionVerified == true
+            let bypassVerified = !state.usesClaudeBypasses || reply.claudeBypassPolicyVersion == ClaudeBypassPolicy.version && reply.claudeBypassMode == true
+            let strictVerified = bypassVerified && (!claudeSafetyEnabled || reply.disconnectProtectionArmed == false || reply.claudeSafetyProtectionVerified == true)
             claudeSafetyProtection = reply.ok && supported && strictVerified ? reply.disconnectProtectionArmed : nil
             claudeSafetyVerifiedAt = claudeSafetyProtection == nil ? nil : dependencies.now()
             claudeSafetyHelperRunning = reply.ok && reply.running
-        } else if operation == "releaseDisconnectProtection", reply.ok, reply.disconnectProtectionArmed == false {
+        } else if ["releaseDisconnectProtection", "restoreNormalNetwork", "acknowledgeNormalRecovery"].contains(operation), reply.ok, reply.disconnectProtectionArmed == false {
             claudeSafetyProtection = false
             claudeSafetyHelperRunning = false
         } else {
@@ -62,6 +63,7 @@ extension AppModel {
     }
 
     func startClaudeSafetyMonitoring() {
+        capture.claudeAllowsBypasses = { [weak self] in self?.state.usesClaudeBypasses == true }
         guard dependencies.safetyMonitoringEnabled, claudeSafetyEnabled || claudeSafetyLoadFailed else { return }
         claudeSafetyMonitor?.cancel()
         claudeSafetyMonitor = Task { [weak self] in
@@ -72,6 +74,13 @@ extension AppModel {
                 do { try await Task.sleep(nanoseconds: 2_000_000_000) } catch { return }
             }
         }
+    }
+
+    func setClaudeBypassesAllowed(_ allowed: Bool) {
+        guard !claudeSafetyRetainsProtection, !claudeSafetyControlDisabled else { return }
+        var preferences = claudeSafetyPreferences
+        preferences.allowNetworkBypasses = allowed
+        do { try saveClaudeSafetyPreferences(preferences) } catch { report(error) }
     }
 
     private func saveClaudeSafetyPreferences(_ value: ClaudeSafetyPreferences) throws {
@@ -122,8 +131,44 @@ extension AppModel {
         }
     }
 
+    func finishNormalNetworkRecovery(restored configuration: AppState? = nil) async throws {
+        guard let store else { throw ProxyError("配置存储尚未就绪") }
+        if let session = claudeSafetyPreferences.session, session.profileID != currentProfileID {
+            throw ProxyError("恢复点所属配置不同，未覆盖当前配置")
+        }
+        var restored = configuration ?? claudeSafetyPreferences.session?.previous.restoring(state) ?? state
+        restored.autoConnect = false
+        if restored.claudeSafetyMode == true { restored.claudeSafetyMode = false }
+        if restored.disconnectProtection == true { restored.disconnectProtection = false }
+        try PolicyValidator.validate(restored)
+        try store.commit(restored)
+        state = store.state
+        var preferences = claudeSafetyPreferences
+        preferences.session = nil
+        preferences.proxyPaused = nil
+        preferences.policyVersion = nil
+        if claudeSafetyLoadFailed, FileManager.default.fileExists(atPath: claudeSafetyRecordURL.path) {
+            // 恢复网络允许退出损坏的保护会话，但须保留原始记录供排查。
+            let archive = directory.appendingPathComponent("claude-safety.corrupt-" + UUID().uuidString + ".json")
+            try SecureFile.write(Data(contentsOf: claudeSafetyRecordURL), to: archive)
+        }
+        try saveClaudeSafetyPreferences(preferences)
+        claudeSafetyLoadFailed = false
+        claudeSafetyProtection = false
+        claudeSafetyHelperRunning = false
+        claudeSafetyMonitor?.cancel()
+        try await capture.acknowledgeNormalRecovery()
+        connection = .disconnected
+        recoveryPending = false
+        if let warning = capture.normalRecoveryWarning { log(warning); helperStatus = warning }
+    }
+
     func setClaudeSafetyEnabled(_ enabled: Bool, nodeID: UUID? = nil, releaseProtection: Bool = false) async {
         guard !claudeSafetyControlDisabled, let store else { return }
+        guard !enabled || !claudeApplicationRunning else {
+            errorMessage = "Claude 专用代理运行中，不能同时开启旧版整机保护"
+            return
+        }
         if !releaseProtection {
             if !enabled, claudeSafetyEnabled {
                 claudeSafetyChanging = true
@@ -145,8 +190,8 @@ extension AppModel {
                 busy = true
                 defer { claudeSafetyChanging = false; claudeSafetyTarget = nil; busy = false }
                 do {
-                    try await capture.checkDisconnectProtection(requireClaudeSafetyMode: true)
-                    let configured = try ClaudeSafetyPolicy.configuration(state, nodeID: session.nodeID)
+                    let configured = try ClaudeSafetyPolicy.configuration(state, nodeID: session.nodeID, allowNetworkBypasses: state.usesClaudeBypasses)
+                    try await capture.checkDisconnectProtection(requireClaudeSafetyMode: true, requireBypasses: configured.usesClaudeBypasses)
                     try await stopClaudeSafetyConnection()
                     try store.commit(configured)
                     state = store.state
@@ -190,8 +235,8 @@ extension AppModel {
         }
         do {
             if enabled, let selectedNode {
-                let configured = try ClaudeSafetyPolicy.configuration(state, nodeID: selectedNode)
-                try await capture.checkDisconnectProtection(requireClaudeSafetyMode: true)
+                let configured = try ClaudeSafetyPolicy.configuration(state, nodeID: selectedNode, allowNetworkBypasses: claudeSafetyPreferences.allowNetworkBypasses == true)
+                try await capture.checkDisconnectProtection(requireClaudeSafetyMode: true, requireBypasses: configured.usesClaudeBypasses)
                 var preferences = claudeSafetyPreferences
                 let session = ClaudeSafetySession(state: state, profileID: currentProfileID,
                                                  wasConnected: connection == .connected, nodeID: selectedNode)
@@ -216,29 +261,15 @@ extension AppModel {
                 guard session.profileID == currentProfileID else {
                     throw ProxyError("当前配置与安全模式恢复点不同，未覆盖配置或解除保护")
                 }
-                let restored = session.previous.restoring(state)
+                var restored = session.previous.restoring(state)
+                restored.autoConnect = false
                 try PolicyValidator.validate(restored)
-                try await stopClaudeSafetyConnection()
-                let status = try await capture.helperStatus()
-                guard status.ok, status.supportsDisconnectProtection == true, status.disconnectProtectionArmed != nil else {
-                    throw ProxyError("辅助服务状态无法核验，未解除保护或删除恢复点")
-                }
-                try await capture.releaseDisconnectProtection()
-                let released = try await capture.helperStatus()
-                guard released.ok, released.disconnectProtectionArmed == false else {
-                    throw ProxyError("断线保护尚未确认解除，恢复点已保留")
-                }
-                try store.commit(restored)
-                state = store.state
-                var preferences = claudeSafetyPreferences
-                preferences.session = nil
-                preferences.proxyPaused = nil
-                preferences.policyVersion = nil
-                try saveClaudeSafetyPreferences(preferences)
+                cancelWakeRecovery(); cancelConnectionWait(); userWantsConnection = false
                 claudeSafetyMonitor?.cancel()
-                if session.wasConnected { try await startClaudeSafetyConnection(restored) }
+                try await capture.restoreNormalNetwork()
+                try await finishNormalNetworkRecovery(restored: restored)
                 errorMessage = nil
-                log("Claude 安全模式已关闭，原网络设置和连接状态已恢复")
+                log("Claude 安全模式已关闭，原网络设置已恢复；代理保持停止、自动连接已关闭")
             }
         } catch {
             recordClaudeSafetyFailure(error)

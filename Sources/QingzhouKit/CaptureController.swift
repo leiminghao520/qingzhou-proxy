@@ -3,10 +3,12 @@ import Foundation
 @MainActor public final class CaptureController {
     public private(set) var activeMode:CaptureMode?
     public private(set) var helperRunning=false
+    public private(set) var normalRecoveryWarning: String?
     public private(set) var disconnectProtectionArmed=false
     public var onHelperReply: ((String, TunReply) -> Void)?
     public var claudeSafetyEndpoint: (() -> String?)?
     public var claudePFEndpoint: (() -> ClaudeNetworkEndpoint?)?
+    public var claudeAllowsBypasses: (() -> Bool)?
     public let helper=PrivilegedServiceClient()
     private let core:CoreController
     private var ownedTunDNS:String?
@@ -14,10 +16,21 @@ import Foundation
     private var plainRelay=false
     private let proxy:SystemProxyController
     private let helperRequestOverride:((TunRequest) async throws -> TunReply)?
-    public init(core:CoreController,proxy:SystemProxyController,helperRequest:((TunRequest) async throws -> TunReply)?=nil){self.core=core;self.proxy=proxy;self.helperRequestOverride=helperRequest}
+    private let normalRecoveryTool: ((Bool) async throws -> Void)?
+    private var normalRecoveryViaTool = false
+    private var normalRecoveryNeedsAcknowledgment = true
+    public init(core:CoreController,proxy:SystemProxyController,helperRequest:((TunRequest) async throws -> TunReply)?=nil,normalRecoveryTool:((Bool) async throws -> Void)?=nil){self.core=core;self.proxy=proxy;self.helperRequestOverride=helperRequest;self.normalRecoveryTool=normalRecoveryTool}
+    private func runNormalRecoveryTool(acknowledge: Bool) async throws {
+        await helper.closeChannel()
+        if let normalRecoveryTool { try await normalRecoveryTool(acknowledge) }
+        else {
+            guard helperRequestOverride == nil else { throw ProxyError("隔离环境未配置管理员恢复器") }
+            try await HelperInstaller.recoverNormalNetwork(app: Bundle.main.bundleURL, acknowledge: acknowledge)
+        }
+    }
     private func requestHelper(_ originalRequest:TunRequest) async throws -> TunReply {
         var request = originalRequest
-        if request.operation == "status" { request.claudeSafetyEndpoint = claudeSafetyEndpoint?(); request.claudePFEndpoint = claudePFEndpoint?() }
+        if request.operation == "status" { request.claudeSafetyEndpoint = claudeSafetyEndpoint?(); request.claudePFEndpoint = claudePFEndpoint?(); request.claudeAllowsBypasses = claudeAllowsBypasses?() }
         let reply:TunReply
         do {
             // 配置写操作等待已开始的只读核验完成，不把通道忙当作恢复失败。
@@ -43,11 +56,12 @@ import Foundation
             throw ProxyError("公司网络 DNS 需要更新辅助服务，当前版本不能安全应用此配置")
         }
     }
-    public func checkDisconnectProtection(requireClaudeSafetyMode: Bool = false) async throws {
+    public func checkDisconnectProtection(requireClaudeSafetyMode: Bool = false, requireBypasses: Bool = false) async throws {
         let status=try await requestHelper(TunRequest(operation:"status"))
         guard !requireClaudeSafetyMode || status.supportsClaudeSafetyMode == true && status.claudePFPolicyVersion == ClaudePFPolicy.version else {
             throw ProxyError("Claude 安全模式需要先安装 / 更新辅助服务，旧版本不能核验严格公网出口限制")
         }
+        guard !requireBypasses || status.claudeBypassPolicyVersion == ClaudeBypassPolicy.version else { throw ProxyError("网络绕过兼容需要先安装 / 更新辅助服务") }
         guard status.supportsDisconnectProtection==true else {throw ProxyError("断线保护需要安装 / 更新辅助服务")}
         _=try await requestHelper(TunRequest(operation:"checkDisconnectProtection"))
     }
@@ -57,10 +71,53 @@ import Foundation
         guard status.supportsDisconnectProtection==true,status.disconnectProtectionArmed==true else{return}
         _=try await requestHelper(TunRequest(operation:"releaseDisconnectProtection"))
     }
+    public func restoreNormalNetwork() async throws {
+        // 本地核心停止不依赖 helper 可用或保护核验成功。
+        await httpCompatibility?.stop(); httpCompatibility = nil
+        await core.stop()
+        let localRestore = Result { try proxy.restore(preserveExternal: true) }
+        normalRecoveryWarning = nil
+        normalRecoveryViaTool = false
+        let evidence = HelperRecoveryPolicy.inspect()
+        let needsHelper = helperRequestOverride != nil || disconnectProtectionArmed || HelperRecoveryPolicy.requiresRecovery(activeTunnel: activeMode?.usesTunnel == true, running: helperRunning, journalPresent: evidence.journalPresent, inspectionAvailable: evidence.available)
+        normalRecoveryNeedsAcknowledgment = needsHelper
+        if needsHelper {
+            do {
+                let status = try await requestHelper(TunRequest(operation: "maintenanceStatus"))
+                guard status.ok, status.supportsNormalNetworkRecovery == true else { throw ProxyError("辅助服务不支持独立恢复") }
+                let reply = try await requestHelper(TunRequest(operation: "restoreNormalNetwork"))
+                guard reply.ok, reply.disconnectProtectionArmed == false, !reply.running,
+                      reply.normalNetworkRecoveryPhase == "normalRecoveryCompleted" else { throw ProxyError("正常网络恢复未完成") }
+                normalRecoveryWarning = reply.recoveryWarning
+            } catch {
+                let serviceFailure = error.localizedDescription
+                do { try await runNormalRecoveryTool(acknowledge: false) }
+                catch { throw ProxyError("辅助服务恢复失败：" + serviceFailure + "；独立恢复失败：" + error.localizedDescription) }
+                normalRecoveryViaTool = true
+                disconnectProtectionArmed = false
+                normalRecoveryWarning = "已通过管理员恢复器解除阻断，旧辅助服务保持停用；下次连接需安装或更新辅助服务"
+            }
+        }
+        try localRestore.get()
+        try proxy.verifyReleased()
+        ownedTunDNS = nil; activeMode = nil; helperRunning = false; plainRelay = false
+    }
+    public func acknowledgeNormalRecovery() async throws {
+        guard normalRecoveryNeedsAcknowledgment else { return }
+        if normalRecoveryViaTool { try await runNormalRecoveryTool(acknowledge: true) }
+        else {
+            let reply = try await requestHelper(TunRequest(operation: "acknowledgeNormalRecovery"))
+            guard reply.ok else { throw ProxyError(reply.message) }
+        }
+        normalRecoveryNeedsAcknowledgment = false
+    }
+    public func maintenanceStatus() async throws -> TunReply {
+        try await requestHelper(TunRequest(operation: "maintenanceStatus"))
+    }
     public var running:Bool{(activeMode == .systemProxy ? core.isRunning:(helperRunning || core.isRunning)) && (httpCompatibility == nil || httpCompatibility!.isRunning)}
     public func start(_ state:AppState,credentials:CredentialStore,control:CoreControlContext) async throws {
         guard activeMode==nil else{throw ProxyError("必须先恢复上一种接管方式")}
-        if state.protectsDisconnect {try await checkDisconnectProtection(requireClaudeSafetyMode: state.claudeSafetyMode == true)}
+        if state.protectsDisconnect {try await checkDisconnectProtection(requireClaudeSafetyMode: state.claudeSafetyMode == true, requireBypasses: state.usesClaudeBypasses)}
         if state.captureMode.usesTunnel {
             guard !proxy.hasRecovery else{throw ProxyError("请先恢复系统代理后启用 TUN")}
             var values:[String:String]=[:];for ref in CredentialReferences.all(state) where !state.subscriptions.contains(where:{$0.sourceRef==ref}) && !state.remoteRules.contains(where:{$0.sourceRef==ref}){values[ref]=try credentials.get(ref)}
@@ -190,7 +247,7 @@ import Foundation
             try await CaptureRecoveryTransaction.run(proxy:{try self.proxy.restore(preserveExternal:preserveExternal)},helper:{
                 if includeHelper {
                     if preserveExternal {
-                        let status=try await self.requestHelper(TunRequest(operation:"status"))
+                        let status=try await self.requestHelper(TunRequest(operation:"maintenanceStatus"))
                         guard status.supportsExternalRecovery==true else{throw ProxyError("辅助服务不支持保留外部网络恢复，请更新辅助服务")}
                     }
                     _=try await self.requestHelper(TunRequest(operation:"recover",preserveExternal:preserveExternal))

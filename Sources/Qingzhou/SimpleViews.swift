@@ -177,8 +177,9 @@ struct SimpleSettingsView: View {
                     Button("高级设置…", action: onAdvanced)
                     Button("网络诊断…", action: onDiagnose)
                     Button("开发工具代理助手…") {model.office.developerRequested=true}
-                    Button("恢复网络设置") { Task { await model.recover() } }
-                        .disabled(model.loadingFailed || model.recovering)
+                    Button("恢复网络") { Task { await model.recover() } }
+                    .help("停止汐航并解除断网保护，恢复普通网络；Claude 将允许直连。")
+                        .disabled(model.recovering || model.claudeSafetyChanging)
                 }
                 Section("帮助与使用指南") {
                     UsageGuideButton(model:model,title:"查看使用指南")

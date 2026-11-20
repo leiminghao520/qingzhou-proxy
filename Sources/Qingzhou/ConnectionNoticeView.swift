@@ -36,6 +36,7 @@ struct ConnectionNoticeView:View {
                         Button("安装或更新辅助服务"){Task{await model.installHelper()}}.disabled(model.locked)
                     } else if model.recoveryPending {
                         Button("恢复网络"){Task{await model.recover()}}.disabled(model.recovering)
+                        .help("停止汐航并解除断网保护，恢复普通网络；Claude 将允许直连。")
                     } else if model.connection != .connected {
                         Button("重试连接"){Task{await model.retryOriginal()}}.disabled(model.locked)
                     }

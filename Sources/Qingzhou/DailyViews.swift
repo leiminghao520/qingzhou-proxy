@@ -381,11 +381,12 @@ struct ComprehensiveDiagnosticsView: View {
                 
                 Button("停止诊断") {model.cancelDiagnostic()}.disabled(!model.diagnosing)
                 Button("导出 JSON") {exportDiagnostic(json:true)}.disabled(model.diagnosticSession==nil)
-                Button("恢复原网络设置") {
+                Button("恢复网络") {
                     Task { await model.recover() }
                 }
                 .buttonStyle(.bordered)
-                .disabled(model.loadingFailed || model.recovering)
+                .help("停止汐航并解除断网保护，恢复普通网络；Claude 将允许直连。")
+                .disabled(model.recovering || model.claudeSafetyChanging)
                 
                 Spacer()
                 

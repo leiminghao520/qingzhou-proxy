@@ -8,6 +8,11 @@ import SystemConfiguration
 import QingzhouKit
 
 @MainActor final class AppModel:ObservableObject {
+    @Published var claudeApplicationRunning = false
+    @Published var claudeApplicationChanging = false
+    @Published var claudeApplicationNodeID: UUID?
+    @Published var claudeApplicationStatus = "应用级代理未启动 · LuLu 规则需单独核验"
+    var claudeApplicationCore: CoreController?
     @Published var claudeSafetyPreferences = ClaudeSafetyPreferences()
     @Published var claudeSafetyChanging = false
     @Published var claudeSafetyTarget: Bool?
@@ -55,7 +60,6 @@ import QingzhouKit
     @Published var networkWaiting=false
     @Published var networkReleased=false
     var lastAutomaticRefresh=Date.distantPast
-    var automaticRefreshRequested=true
     @Published var corporateDNSNotice:String?
     var corporateDNSSuspension=CorporateDNSSuspensionTracker()
     // 连通性日志去重：结果与上次相同且未满 5 分钟时只计数，不重复刷屏。
@@ -164,7 +168,7 @@ import QingzhouKit
     let proxy:SystemProxyController
     let directory:URL
     lazy var capture: CaptureController = {
-        let controller = CaptureController(core: core, proxy: proxy, helperRequest: dependencies.safetyHelperRequest)
+        let controller = CaptureController(core: core, proxy: proxy, helperRequest: dependencies.safetyHelperRequest, normalRecoveryTool: dependencies.normalRecoveryTool)
         controller.claudeSafetyEndpoint = { [weak self] in
             guard let self, let session = self.claudeSafetyPreferences.session,
                   (try? ClaudeSafetyPolicy.validateActive(self.state, session: session)) != nil else { return nil }
@@ -263,9 +267,10 @@ import QingzhouKit
     }
     // 测速或配置更新期间的退出和网络变更延后串行恢复，避免被操作锁跳过。
     func drainPendingDisconnect() {
-        guard !busy,!measuring,!loadingFailed else{return}
+        guard !busy,!measuring else{return}
         if (wakeRecovery.active || wakeIntent != nil) && !stopRequested && !pendingRecovery && !networkChanged {return}
         if pendingRecovery {pendingRecovery=false;Task{await self.performRecovery()};return}
+        guard !loadingFailed else{return}
         if stopRequested {busy=true;Task{defer{stopRequested=false;busy=false};do{try await disconnectInternal();if !claudeSafetyRetainsProtection {try await capture.releaseDisconnectProtection()}}catch{report(error)}};return}
         guard connection == .connected,!recovering else{return}
         if !coreFailed && !networkChanged {
@@ -530,40 +535,63 @@ import QingzhouKit
         drainPendingDisconnect()
     }
     func recover() async {
-        guard !claudeSafetyChanging,!loadingFailed,!recovering else{return}
+        guard !claudeSafetyChanging,!recovering else{return}
         userWantsConnection=false;cancelConnectionWait();cancelWakeRecovery()
         stableRecoveryTask?.cancel();stableRecoveryTask=nil;startupGeneration=UUID();startupStage=nil;startupProbeTask?.cancel()
         if let startupClient {Task {await startupClient.shutdown()}}
         if connection == .connecting {await capture.helper.closeChannel()}
+        claudeSafetyMonitor?.cancel()
         recovering=true;pendingRecovery=true;stopRequested=false
         stopTelemetry();cancelMeasurement();drainPendingDisconnect()
     }
     private func performRecovery() async {
         busy=true;defer{recovering=false;busy=false};connection = .disconnecting
         epoch=UUID();connectivityEpoch=UUID()
+        runtimeState=nil;activeRecovery=nil;activeBypasses=nil
+        networkChanged=false;coreFailed=false;helperFailureReason=nil;networkReconnecting=false
+        invalidateDiagnostic()
         log("应急恢复开始：核对本地代理及已安装辅助服务，与当前模式无关")
         do {
-            try await capture.emergencyRecover(preserveExternal:true);if !claudeSafetyRetainsProtection {try await capture.releaseDisconnectProtection()};stopTelemetry();protectionSummary=[];recoveryPending=false;connection = .disconnected
-            connectivityResults=[];helperStatus="汐航接管已清理，外部网络已保留并核对";reachability="尚未检测";errorMessage=nil;log(helperStatus);recordEvent(.recovery,.succeeded,.recoverySucceeded)
+            // 用户明确选择恢复网络时解除自有阻断；普通断开仍保留 Claude 保护。
+            await stopClaudeApplicationProxy()
+            try await capture.restoreNormalNetwork()
+            try await finishNormalNetworkRecovery()
+            stopTelemetry();protectionSummary=[];recoveryPending=false;connection = .disconnected
+            connectivityResults=[];helperStatus=capture.normalRecoveryWarning ?? "汐航接管与断网保护已解除，自动连接已关闭";reachability="尚未检测";errorMessage=nil;log(helperStatus);recordEvent(.recovery,.succeeded,.recoverySucceeded)
         }catch {stopTelemetry();recoveryPending=true;connection = .error;helperStatus="恢复未完成，请查看错误及恢复记录";recordEvent(.recovery,.failed,.recoveryConflict);report(error)}
     }
     func startupRecovery() async {
         guard !started,!loadingFailed else{return};started=true
         let evidence=HelperRecoveryPolicy.inspect()
+        var normalRecoveryDetected = false
         if FileManager.default.fileExists(atPath:HelperPaths.socket) {
             do {
+                let maintenance = try await capture.maintenanceStatus()
+                if maintenance.normalNetworkRecoveryPhase != nil {
+                    normalRecoveryDetected = true
+                    recoveryPending = true
+                    userWantsConnection = false
+                    try await capture.restoreNormalNetwork()
+                    try await finishNormalNetworkRecovery()
+                }
                 let status=try await capture.helperStatus();helperStatus=status.message
                 if (status.recoveryPending ?? status.message.contains("待恢复")) || status.running || evidence.journalPresent {
                     recoveryPending=true;helperStatus="发现恢复记录，请手动恢复并核对结果"
                 }
             }catch {
-                helperStatus="首次连接将安装或更新辅助服务，后续连接复用授权"
+                if normalRecoveryDetected {
+                    helperStatus = "正常网络恢复尚未完成配置确认，自动连接已阻止"
+                    recoveryPending = true
+                    report(error)
+                    return
+                }
+                helperStatus="辅助服务当前不可用或已停用；不会自动安装或恢复接管"
                 recoveryPending=proxy.hasRecovery || HelperRecoveryPolicy.requiresRecovery(activeTunnel:false,running:false,journalPresent:evidence.journalPresent,inspectionAvailable:evidence.available)
                 log(recoveryPending ? "辅助服务不可用且存在待核对恢复记录，请安装/更新辅助服务":"辅助服务尚未完成授权；未发现恢复记录，首次连接时统一安装")
             }
         }else if evidence.journalPresent || !evidence.available {recoveryPending=true;helperStatus="辅助服务不可用，仍有恢复记录待处理"}
         // 用户开启自动连接后仅尝试一次；恢复记录和无效策略阻止自动接管。
-        if state.autoConnect,claudeSafetyPreferences.proxyPaused != true,!claudeSafetyLoadFailed,!recoveryPending,state.activePolicy != nil || state.mode == .direct {await CredentialAuthorization.$allowsInteraction.withValue(false) {await connect()}}
+        if state.autoConnect,!normalRecoveryDetected,claudeSafetyPreferences.proxyPaused != true,!claudeSafetyLoadFailed,!recoveryPending,state.activePolicy != nil || state.mode == .direct {await CredentialAuthorization.$allowsInteraction.withValue(false) {await connect()}}
         maintenanceTask=Task{[weak self] in while !Task.isCancelled {await self?.maintenance();try? await Task.sleep(nanoseconds:60_000_000_000)}}
     }
     func measure(_ ids:[UUID]?=nil) {
@@ -783,7 +811,8 @@ import QingzhouKit
     func healthCheck(_ client:CoreAPIClient,token:UUID) async {
         let powerGeneration=healthPower.generation
         guard !locked,epoch==token,connection == .connected,state.mode != .direct,healthResultIsCurrent(powerGeneration) else{return};healthChecking=true;defer{if epoch==token,healthPower.generation==powerGeneration{healthChecking=false}}
-        if automaticRefreshRequested {await refreshAutomaticIfNeeded(client,token:token)}
+        // 当前出口仍可用时，也需要定期复测候选节点才能发现更优线路。
+        await refreshAutomaticIfNeeded(client,token:token)
         guard epoch==token,!Task.isCancelled,!locked,healthResultIsCurrent(powerGeneration) else{return}
         let relevant=healthNodeIDs()
         let nodes=state.nodes.filter{relevant.contains($0.id)};var results:[UUID:Bool]=[:];var statuses:[ProbeStatus]=[];var nodeStatuses:[UUID:ProbeStatus]=[:]
@@ -792,8 +821,16 @@ import QingzhouKit
         // 控制通道和节点健康独立评估，未知节点不阻断其他回退组的判定。
         do {_ = try await client.proxies();guard epoch==token,!Task.isCancelled,!locked,healthResultIsCurrent(powerGeneration) else{return};failedHealthCycles=0}
         catch {
-            guard epoch==token,!Task.isCancelled,!locked,healthResultIsCurrent(powerGeneration) else{return};monitor.health="节点健康暂无法核对";failedHealthCycles+=1;healthFailures=HealthFailureCounter()
-            log("健康检查：控制接口失败 category="+ConnectivityResult.category(error)+" consecutive=\(failedHealthCycles)")
+            guard epoch==token,!Task.isCancelled,!locked,healthResultIsCurrent(powerGeneration) else{return}
+            let category=ConnectivityResult.category(error)
+            // DNS 超时不累计为控制接口失败，避免误判节点异常
+            if category=="DNS" {
+                monitor.health="DNS 解析延迟，健康检查已跳过"
+                log("健康检查：DNS 超时，不计入失败计数 category=\(category)")
+                return
+            }
+            monitor.health="节点健康暂无法核对";failedHealthCycles+=1;healthFailures=HealthFailureCounter()
+            log("健康检查：控制接口失败 category=\(category) consecutive=\(failedHealthCycles)")
             if let apiError=error as? CoreAPIError {if ["超时","取消"].contains(apiError.category) {failedHealthCycles=0};if apiError.category=="鉴权" {beginRoutineRecovery(reason:.authentication);return}}
             if failedHealthCycles>=2 {beginRoutineRecovery(reason:.controlUnavailable)}
             return
@@ -802,10 +839,6 @@ import QingzhouKit
         exitHealth.retain(relevant)
         var failedExits=Set<UUID>()
         for (id,status) in nodeStatuses {if exitHealth.update(id,status:status) {failedExits.insert(id)}}
-        if usesAutomaticExit(), nodeStatuses.values.contains(where:{if case .unavailable=$0{return true};return false}) {
-            await refreshAutomaticIfNeeded(client,token:token)
-            guard epoch==token,!Task.isCancelled,!locked,healthResultIsCurrent(powerGeneration) else{return}
-        }
         for group in state.groups where group.kind == .fallback && group.members.contains(where:{if case .node(let id)=$0{return relevant.contains(id)};return false}) {
             guard epoch==token,!Task.isCancelled,!locked,healthResultIsCurrent(powerGeneration) else{return}
             let priority=group.members.compactMap{ref -> UUID? in if case .node(let id)=ref{return id};return nil};let currentTag=proxyInfo[PolicyReference.group(group.id).tag]?.now
@@ -858,6 +891,7 @@ import QingzhouKit
         await cancelWakeRecoveryAndWait()
         guard !busy else {errorMessage="正在更新配置，请稍后退出";return false}
         guard drafts.allowLeaving("退出汐航",all:true) else{return false}
+        await stopClaudeApplicationProxy()
         if loadingFailed{return true}
         cancelHealthRefresh()
         if measuring {cancelMeasurement();await measurementTask?.value}

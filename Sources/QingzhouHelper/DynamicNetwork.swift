@@ -43,6 +43,7 @@ extension Service {
         try dynamicRules?.stageDomains(guarded.domains,exact:guarded.exactDomains ?? [])
     }
     func applyCorporatePlan(_ fresh:CapturePlan,sample:NetworkRouteSample) throws -> Bool {
+        if activeRequest?.state?.usesClaudeBypasses == true { return false }
         guard let old=capturePlan,let rules=dynamicRules,let request=activeRequest,let state=request.state,let record=journal else{return false}
         guard old.snapshot.primaryInterface==fresh.snapshot.primaryInterface,rules.supports(fresh) else{return false}
         let oldDefaults=old.snapshot.routes.filter{$0.interface==old.snapshot.primaryInterface && $0.destination.hasSuffix("/0")}

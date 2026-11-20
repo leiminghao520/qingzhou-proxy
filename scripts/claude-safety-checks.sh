@@ -16,7 +16,7 @@ for source in Sources/Qingzhou/*.swift; do
 done
 objects=(.build/debug/Pow.build/*.o .build/debug/QingzhouKit.build/*.o .build/debug/CQingzhouRoute.build/*.o .build/debug/Yams.build/*.o .build/debug/CYaml.build/src/*.o)
 swiftc -parse-as-library -swift-version 5 -I .build/debug/Modules -I Vendor/Yams/Sources/CYaml/include -Xcc -fmodule-map-file=.build/debug/CQingzhouRoute.build/module.modulemap -module-cache-path .build/module-cache "${sources[@]}" "$stage/QingzhouApp.swift" scripts/claude-safety-checks.swift "${objects[@]}" -o "$stage/checks"
-for scenario in filter-preflight old-helper happy failures picker concurrent; do
+for scenario in bypass-old-helper bypass-happy filter-preflight old-helper happy failures normal-recovery normal-recovery-fallback normal-recovery-loading-failed picker concurrent; do
     fixture="$(mktemp -d "$stage/$scenario.XXXXXX")"
     "$stage/checks" --test-directory "$fixture" --scenario "$scenario"
 done

@@ -4,6 +4,7 @@ import Foundation
 public struct ClaudeSafetyNetworkSettings: Codable, Sendable {
     public let captureMode: CaptureMode
     public let claudeSafetyMode: Bool?
+    public let claudeAllowsBypasses: Bool?
     public let mode: ProxyMode
     public let dnsPreference: DNSPreference
     public let strictDNS: Bool?
@@ -16,6 +17,7 @@ public struct ClaudeSafetyNetworkSettings: Codable, Sendable {
     public init(_ state: AppState) {
         captureMode = state.captureMode
         claudeSafetyMode = state.claudeSafetyMode
+        claudeAllowsBypasses = state.claudeAllowsBypasses
         mode = state.mode
         dnsPreference = state.dnsPreference
         strictDNS = state.strictDNS
@@ -30,6 +32,7 @@ public struct ClaudeSafetyNetworkSettings: Codable, Sendable {
         var restored = state
         restored.captureMode = captureMode
         restored.claudeSafetyMode = claudeSafetyMode
+        restored.claudeAllowsBypasses = claudeAllowsBypasses
         restored.mode = mode
         restored.dnsPreference = dnsPreference
         restored.strictDNS = strictDNS
@@ -58,6 +61,7 @@ public struct ClaudeSafetySession: Codable, Sendable {
 
 public struct ClaudeSafetyPreferences: Codable, Sendable {
     public var preferredNodeID: UUID?
+    public var allowNetworkBypasses: Bool?
     public var session: ClaudeSafetySession?
     public var proxyPaused: Bool?
     public var policyVersion: Int?
@@ -72,7 +76,7 @@ public enum ClaudeSafetyPolicy {
         state.nodes.filter { (try? ClaudePFPolicy.endpoint($0)) != nil }
     }
 
-    public static func configuration(_ state: AppState, nodeID: UUID) throws -> AppState {
+    public static func configuration(_ state: AppState, nodeID: UUID, allowNetworkBypasses: Bool = false) throws -> AppState {
         guard candidates(in: state).contains(where: { $0.id == nodeID }) else {
             throw ProxyError("Claude 安全模式需要固定公网 IP 且证书校验未被关闭的节点")
         }
@@ -85,6 +89,8 @@ public enum ClaudeSafetyPolicy {
         configured.strictDNS = true
         configured.disconnectProtection = true
         configured.claudeSafetyMode = true
+        configured.claudeAllowsBypasses = allowNetworkBypasses
+        if allowNetworkBypasses { try ClaudeBypassPolicy.validate(configured) }
         configured.httpCompatibilityEnabled = false
         configured.ruleFinal = .selected
         try PolicyValidator.validate(configured)

@@ -2,6 +2,10 @@ import Foundation
 
 public enum CaptureConfiguration {
     public static func apply(_ object:inout [String:Any],state:AppState,plan:CapturePlan,dnsForwardPort:Int,nodeInterfaces:[String:String]=[:]) {
+        if state.usesClaudeBypasses {
+            ClaudeBypassPolicy.configure(&object, state: state, plan: plan, dnsForwardPort: dnsForwardPort, nodeInterfaces: nodeInterfaces)
+            return
+        }
         if state.claudeSafetyMode == true {
             // 安全模式不生成任何企业或局域网直连路由，也不使用原 DNS 转发器。
             var outbounds = object["outbounds"] as! [[String: Any]]

@@ -6,6 +6,7 @@ struct AppDependencies {
     var safetyHelperRequest: ((TunRequest) async throws -> TunReply)?
     var safetyStart: ((AppState) async throws -> Void)?
     var safetyStop: (() async throws -> Void)?
+    var normalRecoveryTool: ((Bool) async throws -> Void)?
     var safetyMonitoringEnabled = true
     var recoveryRuntimeHealthyOverride:(()->Bool)?
     var recoveryEnvironmentOverride:(()->String)?
